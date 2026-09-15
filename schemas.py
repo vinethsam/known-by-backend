@@ -4,7 +4,6 @@ from typing import Annotated
 
 from pydantic import AnyHttpUrl, BaseModel, Field
 
-
 HttpStatus = Annotated[int, Field(strict=True, ge=100, le=599)]
 
 

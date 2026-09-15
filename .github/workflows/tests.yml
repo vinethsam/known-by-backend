@@ -1,0 +1,44 @@
+name: Backend checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: research_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m ruff check .
+      - run: python -m pytest -q
+        env:
+          APP_ENV: test
+          TEST_POSTGRES_URL: postgresql+psycopg://research:test-only-password@localhost:5432/research_test
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t people-research:test .
+      - name: Verify container imports
+        run: docker run --rm -e APP_ENV=test people-research:test python -c "from app.main import app; from app.worker import run_worker; print(app.title)"
