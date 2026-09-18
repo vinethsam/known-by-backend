@@ -16,7 +16,7 @@ from app.api.routes import create_app
 from app.config import Settings
 from app.db import Store
 from app.providers.openrouter import OpenRouterClient
-from app.providers.search import BraveSearchProvider
+from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
 from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
 from app.schemas import PersonSeed, ProfileField
@@ -30,12 +30,10 @@ def configured(tmp_path, **overrides):
         OPENROUTER_API_KEY="fake-model-key",
         OPENROUTER_SOURCE_MODEL="test/source",
         OPENROUTER_EXTRACTION_MODEL="test/extraction",
-        BRAVE_SEARCH_API_KEY="fake-search-key",
         STATIC_FETCH_WORKER_URL="https://worker.example.net/fetch",
         STATIC_FETCH_WORKER_SECRET="fake-worker-key",
         API_ACCESS_TOKEN="test-token",
         PLAYWRIGHT_ENABLED=False,
-        SEARCH_MIN_INTERVAL_SECONDS=0,
         MAX_SEARCH_QUERIES_PER_PERSON=3,
         MAX_SOURCES_PER_PERSON=3,
         SOURCES_PER_ROUND=1,
@@ -54,13 +52,27 @@ def migrated_store(settings):
     return Store(settings)
 
 
-def fake_services(settings, store, monkeypatch, *, malformed=False):
-    calls = {"models": [], "queries": [], "fetched": []}
+def fake_services(
+    settings,
+    store,
+    monkeypatch,
+    *,
+    malformed=False,
+    search_urls=None,
+    prose_only=False,
+    search_status=200,
+    always_new_query=False,
+):
+    calls = {"models": [], "queries": [], "fetched": [], "validated": [], "plans": 0, "search_limits": []}
     text = (
         "Jane Doe works for Example Foundation in Ghana as Programme Director. "
         "Jane Doe earned BSc in Economics at Example University."
     )
-    urls = ["https://employer.example.org/jane", "https://university.example.edu/jane"]
+    urls = (
+        search_urls
+        if search_urls is not None
+        else ["https://employer.example.org/jane", "https://university.example.edu/jane"]
+    )
 
     async def safe(url, settings=None):
         return url
@@ -82,22 +94,53 @@ def fake_services(settings, store, monkeypatch, *, malformed=False):
             },
         )
 
-    def search(request):
-        calls["queries"].append(request.url.params["q"])
-        return httpx.Response(
-            200,
-            json={
-                "web": {"results": [{"url": url, "title": "Jane Doe", "description": text} for url in urls]}
-            },
-        )
-
     def model(request):
         body = json.loads(request.content)
         calls["models"].append(body["model"])
+        if body.get("tools"):
+            calls["queries"].append(body["messages"][-1]["content"])
+            calls["search_limits"].append(body["tools"][0]["parameters"]["max_results"])
+            if malformed:
+                return httpx.Response(200, content=b"{invalid")
+            if search_status != 200:
+                return httpx.Response(search_status, json={"error": {"message": "fixture failure"}})
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Model prose https://invented.example.org/fake",
+                                "annotations": []
+                                if prose_only
+                                else [
+                                    {
+                                        "type": "url_citation",
+                                        "url_citation": {"url": url, "title": "Jane Doe", "content": text},
+                                    }
+                                    for url in urls
+                                ],
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                        "cost": 0.0002,
+                        "server_tool_use": {"web_search_requests": 1},
+                    },
+                },
+            )
         data = json.loads(body["messages"][1]["content"])["payload"]
         if data.get("task") == "plan_search_queries":
-            answer = {"queries": ['"Jane Doe" education', '"Jane Doe" Example Foundation']}
+            calls["plans"] += 1
+            answer = {
+                "queries": [f'"Jane Doe" research {calls["plans"]}']
+                if always_new_query
+                else ['"Jane Doe" education', "education jane DOE", '"Jane Doe" Example Foundation']
+            }
         elif data.get("task") == "validate_candidates":
+            calls["validated"].extend(c["url"] for c in data["candidates"])
             answer = {
                 "decisions": [
                     {"candidate_id": c["candidate_id"], "source_type": "employer", "relevance": "likely"}
@@ -136,12 +179,12 @@ def fake_services(settings, store, monkeypatch, *, malformed=False):
             },
         )
 
-    search_client = httpx.AsyncClient(transport=httpx.MockTransport(search))
     model_client = httpx.AsyncClient(transport=httpx.MockTransport(model))
     fetch_client = httpx.AsyncClient(transport=httpx.MockTransport(static))
+    shared_model = OpenRouterClient(settings, model_client, sleep=lambda _: asyncio.sleep(0))
     providers = (
-        BraveSearchProvider(settings, search_client),
-        OpenRouterClient(settings, model_client, sleep=lambda _: asyncio.sleep(0)),
+        OpenRouterSearchProvider(settings, shared_model),
+        shared_model,
         RetrievalService(settings, StaticFetcher(settings, fetch_client), cache=store),
     )
     return ResearchOrchestrator(settings, *providers), calls
@@ -203,6 +246,116 @@ async def test_paid_retries_obey_person_call_budget(tmp_path, monkeypatch):
     assert result.profile.metrics.stop_reason == "MAX_LLM_CALLS"
     assert result.profile.coverage == 0
     assert len(result.usage) == 1 and not result.usage[0].success
+
+
+@pytest.mark.asyncio
+async def test_search_retries_reserve_tool_calls_before_paid_requests(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_SOURCE_MODEL_TOOL_CALLS=1, OPENROUTER_MAX_RETRIES=2)
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch, search_status=429)
+    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+    assert len(calls["queries"]) == 1
+    assert result.profile.metrics.web_search_calls_reserved == 1
+    assert result.profile.metrics.stop_reason == "MAX_SEARCH_TOOL_CALLS"
+    assert len(result.usage) == 1 and not result.usage[0].success
+
+
+@pytest.mark.asyncio
+async def test_search_result_reservations_cap_request_and_reject_prose_urls(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=3)
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch, prose_only=True)
+    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+    assert calls["search_limits"] == [3]
+    assert not calls["fetched"] and not calls["validated"]
+    assert result.profile.metrics.search_results_reserved == 3
+    assert result.profile.metrics.stop_reason == "MAX_SEARCH_RESULTS"
+    assert result.profile.coverage == 0
+
+
+@pytest.mark.asyncio
+async def test_followup_queries_are_bounded_and_search_usage_persists(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_SEARCH_QUERIES_PER_PERSON=2, MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=100)
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch, prose_only=True, always_new_query=True)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+    result = store.get_results(job.job_id).people[0].result
+    assert len(calls["queries"]) == result.profile.metrics.queries_performed == 2
+    assert calls["plans"] == 1
+    assert result.profile.metrics.stop_reason == "MAX_QUERIES"
+    assert sum(u.web_search_requests or 0 for u in result.usage) == 2
+    assert result.profile.metrics.web_search_requests == 2
+
+
+@pytest.mark.asyncio
+async def test_discovered_backlog_is_used_before_searching_and_classification_is_reused(
+    tmp_path, monkeypatch
+):
+    settings = configured(tmp_path, MAX_SOURCE_MODEL_TOOL_CALLS=1, SOURCES_PER_ROUND=1)
+    store = migrated_store(settings)
+    urls = ["https://employer.example.org/jane", "https://university.example.edu/jane"]
+    pipeline, calls = fake_services(
+        settings, store, monkeypatch, search_urls=urls + [urls[0] + "?utm_source=copy"]
+    )
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe", organisation="Example Foundation", country="Ghana"),
+    )
+    assert len(calls["queries"]) == 1
+    assert calls["plans"] == 0
+    assert sorted(calls["fetched"]) == sorted(urls)
+    assert sorted(calls["validated"]) == sorted(urls)
+    assert result.profile.coverage == 100
+
+
+@pytest.mark.asyncio
+async def test_discovery_and_extraction_can_use_same_model(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path, OPENROUTER_SOURCE_MODEL="test/shared", OPENROUTER_EXTRACTION_MODEL="test/shared"
+    )
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe", organisation="Example Foundation", country="Ghana"),
+    )
+    assert set(calls["models"]) == {"test/shared"}
+    assert result.profile.coverage == 100
+
+
+@pytest.mark.asyncio
+async def test_search_is_fenced_by_token_budget_before_http(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_TOKENS_PER_PERSON=1000)
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+    assert not calls["models"]
+    assert result.profile.metrics.stop_reason == "TOKEN_BUDGET"
+
+
+@pytest.mark.asyncio
+async def test_search_citation_dns_still_passes_production_retrieval_guard(tmp_path, monkeypatch):
+    import socket
+
+    from app.retrieval.urls import validate_public_url
+
+    settings = configured(tmp_path, MAX_SOURCE_MODEL_TOOL_CALLS=1)
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(
+        settings, store, monkeypatch, search_urls=["https://employer.example.org/jane"]
+    )
+    monkeypatch.setattr("app.retrieval.service.validate_public_url", validate_public_url)
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))],
+    )
+    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+    assert calls["validated"] and not calls["fetched"]
+    assert "RETRIEVAL_FAILED" in result.profile.metrics.error_codes
 
 
 class FakeFetcher:

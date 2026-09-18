@@ -15,6 +15,7 @@ CONTEXT_FIELDS = (
     "model",
     "prompt_tokens",
     "completion_tokens",
+    "web_search_requests",
     "cost",
     "error_code",
     "prompt_version",

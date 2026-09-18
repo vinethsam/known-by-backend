@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -148,7 +149,34 @@ class Store:
             people = session.scalars(
                 select(PersonTaskRow).where(PersonTaskRow.job_id == id).order_by(PersonTaskRow.row_index)
             ).all()
-            views = [self._person_result_view(session, task) for task in people]
+            profiles = {
+                profile.person_id: profile
+                for profile in session.scalars(select(ProfileRow).where(ProfileRow.job_id == id))
+            }
+            sources, claims, usage = defaultdict(list), defaultdict(list), defaultdict(list)
+            if profiles:
+                # Load each ledger once for the whole batch; retain its per-person
+                # chronology, including evidence and paid usage from earlier leases.
+                for row_type, grouped in (
+                    (SourceRow, sources),
+                    (EvidenceClaimRow, claims),
+                    (UsageRecordRow, usage),
+                ):
+                    rows = session.scalars(
+                        select(row_type).where(row_type.job_id == id).order_by(row_type.created_at)
+                    )
+                    for row in rows:
+                        grouped[row.person_id].append(row)
+            views = [
+                self._person_result_view(
+                    task,
+                    profiles.get(task.person_id),
+                    sources[task.person_id],
+                    claims[task.person_id],
+                    usage[task.person_id],
+                )
+                for task in people
+            ]
             return JobResults(job_id=id, status=JobStatus(job.status), people=views)
 
     def get_columns(self, id: str) -> list[str]:
@@ -626,23 +654,16 @@ class Store:
                 )
             )
 
-    def _person_result_view(self, session: Session, task: PersonTaskRow) -> PersonResultView:
-        profile = session.get(ProfileRow, task.person_id)
+    def _person_result_view(
+        self,
+        task: PersonTaskRow,
+        profile: ProfileRow | None,
+        sources: list[SourceRow],
+        claims: list[EvidenceClaimRow],
+        usage: list[UsageRecordRow],
+    ) -> PersonResultView:
         result = None
         if profile:
-            sources = session.scalars(
-                select(SourceRow).where(SourceRow.person_id == task.person_id).order_by(SourceRow.created_at)
-            ).all()
-            claims = session.scalars(
-                select(EvidenceClaimRow)
-                .where(EvidenceClaimRow.person_id == task.person_id)
-                .order_by(EvidenceClaimRow.created_at)
-            ).all()
-            usage = session.scalars(
-                select(UsageRecordRow)
-                .where(UsageRecordRow.person_id == task.person_id)
-                .order_by(UsageRecordRow.created_at)
-            ).all()
             result = ResearchResult(
                 profile=PersonProfile.model_validate(profile.data_json),
                 sources=[SourceRecord.model_validate(row.data_json) for row in sources],

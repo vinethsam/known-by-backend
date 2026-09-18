@@ -6,6 +6,7 @@ from app.research.discovery import (
     build_query,
     candidate_score,
     deduplicate_candidates,
+    query_key,
     rank_candidates,
     source_authority,
 )
@@ -13,9 +14,31 @@ from app.schemas import PersonSeed, SourceCandidate, SourceType
 
 
 def settings(**overrides) -> Settings:
-    values = {"APP_ENV": "test", "SEARCH_MIN_INTERVAL_SECONDS": 0}
+    values = {"APP_ENV": "test"}
     values.update(overrides)
     return Settings(**values)
+
+
+def test_search_query_dedup_ignores_case_whitespace_and_reordered_terms():
+    assert query_key('"Jane Doe" education') == query_key('Education  "jane DOE"')
+    queries = build_queries(
+        PersonSeed(full_name="Jane Doe"),
+        settings(),
+        extra_queries=['"Jane Doe" education', 'Education "jane DOE"'],
+    )
+    assert len(queries) == 2
+
+
+def test_query_dedup_preserves_exclusions_domains_phrases_and_boolean_order():
+    for included, excluded in [
+        ("Jane Doe physics", "Jane Doe -physics"),
+        ("Jane Doe site:example.edu", "Jane Doe -site:example.edu"),
+        ("Jane Doe site:example.edu", "Jane Doe site:exampleedu"),
+        ('"Jane Doe" research', '"Doe Jane" research'),
+        ('Jane Doe -"Example University"', 'Jane Doe "Example University"'),
+        ("Jane OR Doe physics", "Jane physics OR Doe"),
+    ]:
+        assert query_key(included) != query_key(excluded)
 
 
 def seed() -> PersonSeed:

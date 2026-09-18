@@ -2,14 +2,14 @@
 
 from app.providers.openrouter import OpenRouterClient, OpenRouterError
 from app.providers.search import (
-    BraveSearchProvider,
+    OpenRouterSearchProvider,
     SearchProvider,
     SearchProviderError,
 )
 from app.providers.source_advisor import SourceAdvisor
 
 __all__ = [
-    "BraveSearchProvider",
+    "OpenRouterSearchProvider",
     "OpenRouterClient",
     "OpenRouterError",
     "SearchProvider",

@@ -15,7 +15,14 @@ from app.providers.search import SearchProviderError
 from app.providers.source_advisor import SourceAdvisor
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
-from app.research.discovery import build_queries, deduplicate_candidates, rank_candidates, source_authority
+from app.research.discovery import (
+    build_queries,
+    build_query,
+    deduplicate_candidates,
+    query_key,
+    rank_candidates,
+    source_authority,
+)
 from app.research.identity import assess_identity, contains_phrase
 from app.research.normalisation import comparison_key
 from app.research.reconciliation import reconcile
@@ -52,7 +59,8 @@ class ResearchOrchestrator:
         advisor = SourceAdvisor(client, max_queries=settings.MAX_SEARCH_QUERIES_PER_PERSON)
         context = {"job_id": job_id, "person_id": person_id}
         seen_urls, seen_hashes, queries_done, discovered_urls = set(), set(), set(), set()
-        known_clues = []
+        validated_candidates, pending_candidates = {}, {}
+        rejected_urls = set()
         no_new_claims = 0
 
         def result():
@@ -224,30 +232,43 @@ class ResearchOrchestrator:
                 )
 
         async def validate_and_process(candidates, preloaded=None, limit=None):
+            for url in set(pending_candidates) & (seen_urls | rejected_urls):
+                pending_candidates.pop(url, None)
             candidates = [
                 c
                 for c in deduplicate_candidates(candidates, settings)
-                if canonicalise_url(c.url) not in seen_urls
+                if canonicalise_url(c.url) not in seen_urls | rejected_urls
             ]
             if not candidates:
                 return
             discovered_urls.update(canonicalise_url(candidate.url) for candidate in candidates)
             metrics.sources_discovered = len(discovered_urls)
-            decisions, _ = await advisor.validate(seed, candidates, context)
-            by_id = {d.candidate_id: d for d in decisions}
+            new_candidates = [c for c in candidates if c.url not in validated_candidates]
+            by_id = {}
+            if new_candidates:
+                decisions, _ = await advisor.validate(seed, new_candidates, context)
+                by_id = {d.candidate_id: d for d in decisions}
             eligible = []
             for candidate in candidates:
-                decision = by_id[candidate.candidate_id]
-                if decision.relevance == "unrelated":
-                    continue
-                # Model duplicate suggestions are advisory; only URL/content equality
-                # deterministically removes evidence, avoiding circular duplicate labels.
-                candidate.source_type = decision.source_type
-                candidate.relevance = decision.relevance
+                cached = validated_candidates.get(candidate.url)
+                if cached is not None:
+                    candidate = cached
+                else:
+                    decision = by_id[candidate.candidate_id]
+                    if decision.relevance == "unrelated":
+                        rejected_urls.add(candidate.url)
+                        continue
+                    # Duplicate suggestions remain advisory; equality removes evidence.
+                    candidate.source_type = decision.source_type
+                    candidate.relevance = decision.relevance
+                    validated_candidates[candidate.url] = candidate
                 eligible.append(candidate)
+                if limit is not None:
+                    pending_candidates[candidate.url] = candidate
             for candidate in rank_candidates(eligible, seed, settings, limit=limit):
                 if stopped():
                     break
+                pending_candidates.pop(candidate.url, None)
                 await process_candidate(candidate, (preloaded or {}).get(candidate.url))
 
         try:
@@ -277,44 +298,83 @@ class ResearchOrchestrator:
             if preferred and not stopped():
                 await validate_and_process(preferred)
             if not stopped():
-                try:
-                    planned, _ = await advisor.plan(seed, known_clues, context)
-                except OpenRouterError:
-                    metrics.error_codes.append("SOURCE_PLANNING_FAILED")
-                    planned = []
-                queue = deque(build_queries(seed, settings, extra_queries=planned))
-                while (
-                    queue
-                    and not stopped()
-                    and metrics.queries_performed < settings.MAX_SEARCH_QUERIES_PER_PERSON
-                ):
-                    query = queue.popleft()
-                    if query.casefold() in queries_done:
+                # Start with the exact name and supplied clues. Pay for further planning
+                # only after useful already-discovered candidates have been processed.
+                queue = deque([build_query(seed)])
+                last_planned_clues = None
+                while not stopped():
+                    if pending_candidates:
+                        await validate_and_process(
+                            list(pending_candidates.values()), limit=settings.SOURCES_PER_ROUND
+                        )
                         continue
-                    queries_done.add(query.casefold())
+                    if metrics.queries_performed >= settings.MAX_SEARCH_QUERIES_PER_PERSON:
+                        metrics.stop_reason = "MAX_QUERIES"
+                        break
+                    if metrics.web_search_calls_reserved >= settings.MAX_SOURCE_MODEL_TOOL_CALLS:
+                        metrics.stop_reason = "MAX_SEARCH_TOOL_CALLS"
+                        break
+                    remaining_results = (
+                        settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
+                    )
+                    if remaining_results <= 0:
+                        metrics.stop_reason = "MAX_SEARCH_RESULTS"
+                        break
+                    if not queue:
+                        clues = tuple(
+                            dict.fromkeys(
+                                c.raw_value
+                                for c in claims
+                                if c.field
+                                in {
+                                    ProfileField.organisation,
+                                    ProfileField.university_name,
+                                    ProfileField.subject,
+                                }
+                                and c.identity_relevance >= settings.SCORING.identity_review_threshold
+                            )
+                        )[:12]
+                        if clues == last_planned_clues:
+                            break
+                        last_planned_clues = clues
+                        unresolved = [
+                            field.value
+                            for field, decision in result().profile.fields.items()
+                            if decision.value is None
+                            or decision.review_required
+                            or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
+                        ]
+                        try:
+                            planned, _ = await advisor.plan(
+                                seed, list(clues), dict(context, unresolved_fields=unresolved)
+                            )
+                        except OpenRouterError:
+                            metrics.error_codes.append("SOURCE_PLANNING_FAILED")
+                            break
+                        queue.extend(
+                            q
+                            for q in build_queries(seed, settings, extra_queries=planned)
+                            if query_key(q) not in queries_done
+                        )
+                        if not queue:
+                            break
+                    query = queue.popleft()
+                    key = query_key(query)
+                    if key in queries_done:
+                        continue
+                    queries_done.add(key)
                     metrics.queries_performed += 1
                     try:
-                        candidates = await self.search.search(query, settings.MAX_SEARCH_RESULTS_PER_QUERY)
+                        candidates = await client.search(
+                            self.search,
+                            query,
+                            min(settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results),
+                            context,
+                        )
                     except SearchProviderError:
                         metrics.error_codes.append("SEARCH_PROVIDER_FAILED")
                         continue
                     await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
-                    new_clues = list(
-                        dict.fromkeys(
-                            c.raw_value
-                            for c in claims
-                            if c.field
-                            in {ProfileField.organisation, ProfileField.university_name, ProfileField.subject}
-                            and c.identity_relevance >= settings.SCORING.identity_review_threshold
-                        )
-                    )[:12]
-                    if new_clues != known_clues and not stopped():
-                        known_clues = new_clues
-                        followups, _ = await advisor.plan(seed, known_clues, context)
-                        refined = build_queries(seed, settings, extra_queries=followups)
-                        for followup in reversed(refined):
-                            if followup.casefold() not in queries_done:
-                                queue.appendleft(followup)
                 if not metrics.stop_reason:
                     metrics.stop_reason = (
                         "MAX_QUERIES"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -10,8 +11,6 @@ from urllib.parse import urlsplit
 from app.config import ScoringPolicy, Settings, get_settings
 from app.retrieval.urls import canonicalise_url, domain_key
 from app.schemas import PersonSeed, SourceCandidate, SourceType
-
-INVALID_SCORE = 0.0
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,6 @@ def deduplicate_candidates(
     candidates: Iterable[SourceCandidate],
     settings: Settings | None = None,
 ) -> list[SourceCandidate]:
-    settings = settings or get_settings()
     by_canonical: dict[str, SourceCandidate] = {}
     for candidate in candidates:
         parts = _valid_url_parts(candidate.url)
@@ -107,7 +105,7 @@ def rank_candidates(
     return ranked
 
 
-def build_query(seed: PersonSeed, site: str | None = None) -> str:
+def build_query(seed: PersonSeed) -> str:
     terms = [f'"{seed.full_name}"']
     for value in (
         seed.organisation,
@@ -119,8 +117,6 @@ def build_query(seed: PersonSeed, site: str | None = None) -> str:
     ):
         if value:
             terms.append(str(value))
-    if site:
-        terms.append(f"site:{_site_constraint(site)}")
     return " ".join(terms)[:600]
 
 
@@ -197,11 +193,14 @@ def _domain_for_url(url: str) -> str:
     return (parsed.hostname or "").lower().removeprefix("www.").rstrip(".")
 
 
-def _site_constraint(site: str) -> str:
-    parsed = urlsplit(site if "://" in site else "https://" + site)
-    host = (parsed.hostname or site).lower().removeprefix("www.").rstrip(".")
-    path = parsed.path.rstrip("/")
-    return host + path
+def query_key(query: str) -> str:
+    """Deduplicate reordered terms without erasing exclusions or quoted phrases."""
+    normalized = " ".join(query.casefold().split())
+    terms = re.findall(r'(?:[^\s"]|"[^"]*")+', normalized)
+    # Boolean grouping is order-sensitive; preserve its expression as supplied.
+    if any(term in {"or", "and", "not"} for term in terms) or any(c in normalized for c in "()"):
+        return normalized
+    return " ".join(sorted(set(terms)))
 
 
 def _unique(values: Iterable[str]) -> list[str]:
@@ -209,7 +208,7 @@ def _unique(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     for value in values:
         normalized = " ".join(value.split())
-        key = normalized.casefold()
+        key = query_key(normalized)
         if normalized and key not in seen:
             unique.append(normalized)
             seen.add(key)

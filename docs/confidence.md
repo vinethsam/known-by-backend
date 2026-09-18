@@ -40,7 +40,7 @@ Model A can reject an unrelated candidate or cap an ambiguous match at 0.80; it 
 raise an otherwise ambiguous same-name match to certainty. Identity below **0.45** is
 excluded from field decisions, and below **0.80** requires review. Missing a clue is
 not proof of a mismatch: employers and locations may change. Near-name variants are
-conservatively rejected in this POC and require an improved seed/review.
+conservatively rejected and require an improved seed/review.
 
 Identity clues are user-supplied anchors. Facts learned during research refine search
 queries; they do not silently become trusted identity anchors. Unrelated batch columns
@@ -114,7 +114,7 @@ Select the support group with the best deterministic score. Preserve supporting,
 conflicting and alternative claim IDs, supporting source IDs/URLs, selected claim ID,
 and the full component dictionary. Education/employment `fact_group` values associate
 components from one source record. A flat result does not borrow a university or
-subject from a different degree to fill a gap. The current POC selects one strong
+subject from a different degree to fill a gap. The backend selects one strong
 record; it does not attempt a complete career/education timeline.
 
 Different degrees, institutions or subjects can coexist. They remain alternatives

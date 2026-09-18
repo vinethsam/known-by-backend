@@ -3,8 +3,9 @@ from __future__ import annotations
 import io
 from datetime import timedelta
 
+import pytest
 from alembic.config import Config
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.dialects import postgresql
 
 from alembic import command
@@ -12,6 +13,7 @@ from app.config import Settings
 from app.db.models import PersonTaskRow
 from app.db.store import Store
 from app.schemas import (
+    EvidenceClaim,
     FieldDecision,
     JobStatus,
     PersonProfile,
@@ -207,6 +209,76 @@ def test_review_required_counts_as_successful_job_completion(tmp_path):
     assert lease is not None
     assert store.finish_task(lease, _result(lease.person_id, PersonStatus.review_required))
     assert store.get_job(created.job_id).status == JobStatus.completed
+
+
+@pytest.mark.parametrize("people_count", [1, 8])
+def test_batch_results_use_constant_queries_and_preserve_attempt_ledgers(tmp_path, people_count):
+    store = _store(tmp_path)
+    seeds = [PersonSeed(full_name=f"Person {index}") for index in range(people_count)]
+    originals = [{"name": seed.full_name, "note": str(index)} for index, seed in enumerate(seeds)]
+    created = store.create_job(seeds, originals, ["name", "note"])
+    expected = []
+    for index in range(people_count):
+        lease = store.claim_task("first-worker")
+        attempts = []
+        for attempt in range(2):
+            result = _result(
+                lease.person_id, PersonStatus.review_required if index % 2 else PersonStatus.completed
+            )
+            result.profile.input_name = lease.seed.full_name
+            result.usage[0].job_id = lease.job_id
+            result.claims.append(
+                EvidenceClaim(
+                    person_id=lease.person_id,
+                    source_id=result.sources[0].source_id,
+                    field=ProfileField.full_name,
+                    raw_value=lease.seed.full_name,
+                    normalised_value=lease.seed.full_name,
+                    evidence_text=lease.seed.full_name,
+                    subject_name=lease.seed.full_name,
+                    extraction_model="fixture/model",
+                )
+            )
+            attempts.append(result)
+            if attempt == 0:
+                assert store.checkpoint(lease, result)
+                with store.session_factory.begin() as session:
+                    task = session.get(PersonTaskRow, lease.person_id)
+                    task.lease_expires_at = utcnow() - timedelta(seconds=1)
+                lease = store.claim_task("recovery-worker")
+                assert lease.person_id == result.profile.person_id
+            else:
+                assert store.finish_task(lease, result)
+        expected.append(
+            ResearchResult(
+                profile=attempts[-1].profile,
+                sources=[source for result in attempts for source in result.sources],
+                claims=[claim for result in attempts for claim in result.claims],
+                usage=[usage for result in attempts for usage in result.usage],
+            )
+        )
+
+    statements = []
+
+    def count_selects(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", count_selects)
+    try:
+        results = store.get_results(created.job_id)
+    finally:
+        event.remove(store.engine, "before_cursor_execute", count_selects)
+
+    assert len(statements) == 6
+    assert results.status == JobStatus.completed
+    assert len(results.people) == people_count
+    for index, (view, result) in enumerate(zip(results.people, expected, strict=True)):
+        assert view.row_index == index + 2
+        assert view.original_row == originals[index]
+        assert view.status == result.profile.status
+        assert view.error_code is None
+        assert view.result.model_dump() == result.model_dump()
 
 
 def test_alembic_upgrade_and_downgrade(tmp_path):

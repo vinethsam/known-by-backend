@@ -72,7 +72,6 @@ class ScoringPolicy(Contract):
     historical_current_factor: float = Field(default=0.25, ge=0, le=1)
     identity_name_only: float = Field(default=0.55, ge=0, le=1)
     identity_clue_bonus: float = Field(default=0.18, ge=0, le=1)
-    identity_mismatch_penalty: float = Field(default=0.30, ge=0, le=1)
     candidate_authority_weight: float = Field(default=0.45, ge=0, le=1)
     candidate_relevance_weight: float = Field(default=0.35, ge=0, le=1)
     candidate_identity_weight: float = Field(default=0.15, ge=0, le=1)
@@ -167,12 +166,10 @@ class Settings(BaseSettings):
     OPENROUTER_TEMPERATURE: float = Field(default=0, ge=0, le=1)
     OPENROUTER_MAX_TOKENS: int = Field(default=3000, ge=100, le=16000)
     OPENROUTER_RESPONSE_FORMAT: Literal["json_schema", "json_object"] = "json_schema"
-    SEARCH_PROVIDER: Literal["brave"] = "brave"
-    BRAVE_SEARCH_API_KEY: SecretStr | None = None
-    SEARCH_TIMEOUT_SECONDS: float = Field(default=20, gt=0, le=120)
-    SEARCH_MIN_INTERVAL_SECONDS: float = Field(default=1.1, ge=0, le=60)
     MAX_SEARCH_QUERIES_PER_PERSON: int = Field(default=6, ge=1, le=30)
     MAX_SEARCH_RESULTS_PER_QUERY: int = Field(default=8, ge=1, le=20)
+    MAX_TOTAL_SEARCH_RESULTS_PER_PERSON: int = Field(default=24, ge=1, le=200)
+    MAX_SOURCE_MODEL_TOOL_CALLS: int = Field(default=6, ge=1, le=30)
     MAX_SOURCES_PER_PERSON: int = Field(default=6, ge=1, le=30)
     SOURCES_PER_ROUND: int = Field(default=2, ge=1, le=10)
     MAX_CONCURRENT_PEOPLE: int = Field(default=3, ge=1, le=20)
@@ -200,6 +197,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def valid_settings(self):
+        for model in (self.OPENROUTER_SOURCE_MODEL, self.OPENROUTER_EXTRACTION_MODEL):
+            if model and (":online" in model.lower() or model.strip().startswith("@")):
+                raise ValueError("Use a plain model ID; online variants and presets can bypass tool budgets")
         if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         if self.WORKER_HEARTBEAT_SECONDS * 2 >= self.WORKER_LEASE_SECONDS:
@@ -229,7 +229,6 @@ class Settings(BaseSettings):
             "OPENROUTER_API_KEY",
             "OPENROUTER_SOURCE_MODEL",
             "OPENROUTER_EXTRACTION_MODEL",
-            "BRAVE_SEARCH_API_KEY",
         )
         missing = []
         for name in required:

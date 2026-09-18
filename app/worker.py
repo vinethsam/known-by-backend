@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.db import Store
 from app.logging import configure_logging
 from app.providers.openrouter import OpenRouterClient
-from app.providers.search import BraveSearchProvider
+from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
 from app.retrieval.service import RetrievalService
 
@@ -81,12 +81,10 @@ async def run_worker(settings=None, store=None, orchestrator=None, stop_event=No
             pass
     resources = None
     if orchestrator is None:
-        search, model, retrieval = (
-            BraveSearchProvider(settings),
-            OpenRouterClient(settings),
-            RetrievalService(settings, cache=store),
-        )
-        resources = (search, model, retrieval)
+        model = OpenRouterClient(settings)
+        search = OpenRouterSearchProvider(settings, model)
+        retrieval = RetrievalService(settings, cache=store)
+        resources = (model, retrieval)
         orchestrator = ResearchOrchestrator(settings, search, model, retrieval)
     worker_id = str(uuid4())
     active = set()
@@ -115,8 +113,7 @@ async def run_worker(settings=None, store=None, orchestrator=None, stop_event=No
         await asyncio.gather(*active, return_exceptions=True)
         if resources:
             await resources[0].aclose()
-            await resources[1].aclose()
-            await resources[2].close()
+            await resources[1].close()
         store.engine.dispose()
 
 

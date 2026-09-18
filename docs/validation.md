@@ -1,83 +1,60 @@
 # Validation record
 
-Validated locally on **2026-09-15**, Windows, Python **3.14.7**. Docker/CI targets
-Python 3.13. This record separates checks executed here from checks prepared for CI
-or a configured deployment.
+Validated locally on **2026-09-18**, Windows, Python **3.14.7**. Docker and CI target
+Python 3.13. Trial jobs use the production API, queue, worker, providers, and settings;
+automated tests replace external network responses without a second research pipeline.
 
 ## Executed checks
 
 | Check | Result |
 | --- | --- |
-| `python -m pytest -q` | **122 passed, 5 skipped** |
-| `python -m ruff check .` | Passed |
-| `python -m ruff format --check .` | Passed |
-| `python -m compileall -q app main.py worker.py config.py schemas.py fetcher.py processing.py` | Passed |
-| `python -m pip check` | No broken requirements |
-| Uvicorn process startup with a temporary development database path | Passed |
-| Actual localhost HTTP `GET /health` from that process | HTTP 200, `{"status":"ok"}` |
+| Full test suite | **165 passed, 5 skipped** |
+| Ruff lint and formatting | Passed |
+| Python compilation and application/compatibility imports | Passed |
+| Dependency consistency | No broken requirements |
+| Real Uvicorn process startup and localhost `GET /health` | HTTP 200, `{"status":"ok"}` |
 | SQLite Alembic upgrade/downgrade and readiness | Passed in the suite |
 | PostgreSQL migration DDL and locking SQL compilation | Passed offline |
-| `git diff --check` | Passed; Git reported normal Windows newline-conversion notices |
+| Git diff whitespace check | Passed |
 
-The suite reported two upstream deprecation warnings from Starlette's TestClient
-and its AnyIO portal alias. They did not fail any test. Production provider adapters
-use the explicitly constrained HTTPX 0.28 client; browser transport internals are
-constrained to HTTPcore 1.0.9.
+Two upstream deprecation warnings concern Starlette's TestClient transport and its
+AnyIO portal alias. Neither failed a test. No paid provider requests were made.
 
-## What the suite exercises
+## Migration coverage
 
-- API authorization, input validation, upload size limits, immediate durable job
-  creation, status/results/cancellation/export, readiness and the existing `/process`.
-- The production research orchestrator, actual Brave/OpenRouter/Worker adapters with
-  HTTP fixture transports, separate worker execution, both model roles, source reuse,
-  grounded output, persisted provenance and bounded retries/token reservations.
-- URL canonicalization, public-address checks, private redirects, DNS rebinding
-  protection through pinned connections, TLS hostname preservation, browser route
-  limits, popup/context routing and main-document provenance in the presence of iframes.
-- Conservative HTML conversion, late-page person content, relevant bounded chunks,
-  structured filtered/bulk/paginated acquisition and explicit publication metadata.
-- Source hierarchy, identity ambiguity, literal claim grounding, dates, normalization,
-  corroboration, mirrored content, recency, conflicts, coherent degree/employment
-  selection, missing values and confidence independent of coverage.
-- Concurrent leases/completions, stale-worker fencing, cancellation races, exhausted
-  lease recovery, checkpoint retention, usage/evidence retention across attempts,
-  and temporary cache size, expiry and cleanup.
-- CSV/XLSX parsing, original-row preservation, malicious worksheet dimensions,
-  enrichment-header collisions, formula-safe exports and invalid XML characters.
+- Real OpenRouter request/response adapters under HTTP fixtures: server-tool syntax,
+  citation-only discovery, canonical deduplication, missing or malformed results,
+  response-size limits, safe errors, retry accounting, unknown usage, model-ID
+  guards, and immediate stopping when upstream reports exceeding the tool cap.
+- Production orchestration: shared source/extraction model IDs, bounded follow-up
+  queries (preserving search exclusions and quoted phrases), pre-request
+  tool/result/token reservations, pending-candidate reuse,
+  persisted usage, and public-address validation before retrieval.
+- Existing API/authentication, jobs, leases, fencing, cancellation, cache, migrations,
+  static/structured/browser retrieval, grounding, deterministic confidence, and
+  CSV/XLSX ingestion/export checks remain in the suite.
+- Completed batch results retain identical serialized evidence and usage while
+  requiring six SELECTs for both one-person and eight-person fixtures.
 
-Automated tests substitute external network responses at normal provider interfaces.
-There is no alternate research pipeline, temporary source allowlist or separate set
-of trial settings. Real trial jobs use the same API, queue, worker and configuration
-as production. HTTP fixture tests do not measure real model quality or web coverage.
+## Deployment checks still required
 
-## Checks not executed locally
+- **PostgreSQL runtime:** five tests skipped because `TEST_POSTGRES_URL` is unset.
+  CI supplies a disposable PostgreSQL database; these tests use isolated schemas.
+- **Live OpenRouter and Cloudflare:** configure the production variables and run one
+  person plus a small batch through the normal API. Verify source-model tool support,
+  both roles' structured JSON support, citation metadata, evidence, and usage. Ensure
+  OpenRouter workspace settings permit Exa and no forced legacy web plugin adds
+  implicit search. Search costs are additional to model tokens.
+- **Cloudflare protections:** the separately deployed Worker must enforce upstream
+  public-address and redirect checks; its code is outside this repository.
+- **Chromium:** local browser fixtures do not establish real launch/rendering or
+  sandbox compatibility. Verify both on the deployment host when fallback is enabled.
+- **Docker and Railway:** no local Docker build or Railway deployment was executed.
+  The GitHub workflow includes a Docker build/import check and PostgreSQL tests;
+  consult its run for the pushed revision before deployment.
 
-1. **Five PostgreSQL runtime checks** skipped because `TEST_POSTGRES_URL` is unset and
-   no local PostgreSQL service was available. They exercise production Store methods
-   and migrations inside a uniquely named schema, removed after each test. CI supplies
-   a disposable PostgreSQL service. Use a dedicated test database when running them
-   yourself; the test account needs permission to create schemas.
-2. **Real Brave, OpenRouter and Cloudflare requests** were not made. Provider keys,
-   model IDs and a verified Worker endpoint/secret must be configured. No API credits
-   were spent. The external Worker code is outside this repository, so its own
-   redirect/public-destination protections could not be inspected here.
-3. **Real Chromium launch/rendering** was not tested locally. Playwright is installed;
-   its browser runtime must be installed and checked on the intended host. Routing
-   tests use browser fixtures and do not prove Chromium sandbox compatibility.
-4. **Docker build and Railway deployment** were not run. The Dockerfile and CI build
-   job are supplied. CI was not dispatched because changes have not been committed
-   or pushed. A successful local test run is not evidence of a successful deployment.
-
-## Deployment verification
-
-Follow the [README setup and manual checklist](../README.md). Configure both model
-roles, Brave and the existing Worker; migrate PostgreSQL; start web and worker from
-the same revision and environment settings. Confirm `/health`, then `/ready`. Run
-one real person followed by a small CSV/XLSX batch, inspect evidence and usage, and
-verify a real dynamic page can launch Chromium safely before relying on fallback.
-
-Jobs and output retain public personal information, so the operator must choose
-appropriate retention and backups. Confidence remains a documented evidence heuristic;
-review flags and preserved source evidence are part of the intended workflow.
-
-No commit, push, remote change or deployment was performed.
+The [README deployment overview](../README.md#deployment) lists the web/worker
+commands and migration owner. Run both services against the same database and
+configuration, apply migrations, and check `/health` then `/ready`. Readiness checks
+configuration and runtime prerequisites without making paid calls; it does not
+prove live model compatibility or successful Chromium rendering.

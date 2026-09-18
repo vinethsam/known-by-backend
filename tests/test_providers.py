@@ -13,7 +13,6 @@ from app.providers.openrouter import (
     OpenRouterError,
     strict_json_schema,
 )
-from app.providers.search import BRAVE_WEB_SEARCH_URL, BraveSearchProvider, SearchProviderError
 from app.providers.source_advisor import SourceAdvisor
 from app.schemas import (
     Contract,
@@ -31,12 +30,10 @@ async def no_sleep(_: float) -> None:
 def settings(**overrides) -> Settings:
     values = {
         "APP_ENV": "test",
-        "BRAVE_SEARCH_API_KEY": SecretStr("brave-token"),
         "OPENROUTER_API_KEY": SecretStr("openrouter-token"),
         "OPENROUTER_SOURCE_MODEL": "source-model",
         "OPENROUTER_EXTRACTION_MODEL": "extraction-model",
         "OPENROUTER_MAX_RETRIES": 1,
-        "SEARCH_MIN_INTERVAL_SECONDS": 0,
     }
     values.update(overrides)
     return Settings(**values)
@@ -58,81 +55,6 @@ def openrouter_response(content: str, usage: dict | None = None, status_code: in
 
 
 @pytest.mark.asyncio
-async def test_brave_search_maps_web_results_and_headers() -> None:
-    requests: list[httpx.Request] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        assert request.url.params["q"] == "Jane Doe fellowship"
-        assert request.url.params["count"] == "2"
-        assert request.url.params["result_filter"] == "web"
-        assert request.headers["x-subscription-token"] == "brave-token"
-        return httpx.Response(
-            200,
-            json={
-                "web": {
-                    "results": [
-                        {
-                            "title": "Jane Doe | Fellowship",
-                            "description": "Jane Doe is a fellow.",
-                            "url": "https://www.example.org/profile/jane",
-                        },
-                        {
-                            "title": "Ignored invalid URL",
-                            "description": "Nope",
-                            "url": "ftp://example.org/file",
-                        },
-                        {
-                            "title": "Jane Doe publication",
-                            "description": "Article",
-                            "url": "https://news.example.com/jane",
-                        },
-                    ]
-                }
-            },
-            request=request,
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    provider = BraveSearchProvider(settings(), client=client, sleep=no_sleep)
-
-    results = await provider.search("Jane Doe fellowship", 2)
-
-    assert str(requests[0].url).startswith(BRAVE_WEB_SEARCH_URL)
-    assert [result.title for result in results] == ["Jane Doe | Fellowship"]
-    assert results[0].domain == "example.org"
-    assert results[0].origin == "brave"
-
-
-@pytest.mark.asyncio
-async def test_brave_search_retries_429() -> None:
-    attempts = 0
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            return httpx.Response(429, json={"error": "rate"}, request=request)
-        return httpx.Response(
-            200,
-            json={
-                "web": {
-                    "results": [{"title": "Jane", "description": "snippet", "url": "https://example.com"}]
-                }
-            },
-            request=request,
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    provider = BraveSearchProvider(settings(), client=client, sleep=no_sleep, max_retries=1)
-
-    results = await provider.search("Jane", 1)
-
-    assert attempts == 2
-    assert results[0].url == "https://example.com"
-
-
-@pytest.mark.asyncio
 async def test_openrouter_retries_empty_content_and_returns_all_usage() -> None:
     attempts = 0
     before: list[dict] = []
@@ -146,6 +68,7 @@ async def test_openrouter_retries_empty_content_and_returns_all_usage() -> None:
         assert body["model"] == "source-model"
         assert body["response_format"]["type"] == "json_schema"
         assert body["provider"]["require_parameters"] is True
+        assert "tools" not in body and "plugins" not in body and "max_tool_calls" not in body
         if attempts == 1:
             return openrouter_response("", {"prompt_tokens": 5, "completion_tokens": 1})
         return openrouter_response(
@@ -273,6 +196,7 @@ async def test_openrouter_extraction_response_schema() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["model"] == "extraction-model"
+        assert "tools" not in body and "max_tool_calls" not in body
         return openrouter_response(content)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -297,39 +221,6 @@ def test_strict_json_schema_marks_nested_objects_strict() -> None:
 
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {"name", "optional_note"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [{"web": []}, {"web": {"results": {}}}, [], None])
-async def test_brave_malformed_envelopes_fail_safely(payload):
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, content=json.dumps(payload).encode())
-        )
-    ) as client:
-        with pytest.raises(SearchProviderError):
-            await BraveSearchProvider(settings(), client, max_retries=0).search("Jane Doe", 3)
-
-
-@pytest.mark.asyncio
-async def test_brave_auth_failure_does_not_retry_or_expose_response():
-    calls = []
-
-    def handler(request):
-        calls.append(request)
-        return httpx.Response(401, text="secret provider details")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(SearchProviderError, match="^Brave search HTTP 401$"):
-            await BraveSearchProvider(settings(), client, sleep=no_sleep).search("Jane Doe", 2)
-    assert len(calls) == 1
-
-
-def test_brave_skips_malformed_url_without_losing_valid_result():
-    results = BraveSearchProvider._parse_results(
-        {"web": {"results": [{"url": "https://[broken"}, {"url": "https://example.org/person"}]}}, 2
-    )
-    assert [r.url for r in results] == ["https://example.org/person"]
 
 
 @pytest.mark.asyncio

@@ -192,6 +192,9 @@ class FieldDecision(Contract):
 
 class ResearchMetrics(Contract):
     queries_performed: int = 0
+    web_search_calls_reserved: int = 0
+    web_search_requests: int = 0
+    search_results_reserved: int = 0
     sources_discovered: int = 0
     sources_fetched: int = 0
     sources_accepted: int = 0
@@ -229,6 +232,7 @@ class UsageRecord(Contract):
     prompt_version: str
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
+    web_search_requests: int | None = Field(default=None, ge=0)
     cost: float | None = Field(default=None, ge=0)
     latency_ms: float = Field(default=0, ge=0)
     success: bool = True
