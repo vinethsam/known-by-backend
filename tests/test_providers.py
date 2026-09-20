@@ -68,6 +68,7 @@ async def test_openrouter_retries_empty_content_and_returns_all_usage() -> None:
         assert body["model"] == "source-model"
         assert body["response_format"]["type"] == "json_schema"
         assert body["provider"]["require_parameters"] is True
+        assert "temperature" not in body
         assert "tools" not in body and "plugins" not in body and "max_tool_calls" not in body
         if attempts == 1:
             return openrouter_response("", {"prompt_tokens": 5, "completion_tokens": 1})

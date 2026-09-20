@@ -19,7 +19,7 @@ from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
 from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
-from app.schemas import PersonSeed, ProfileField
+from app.schemas import PersonSeed, ProfileField, SourceCandidate
 from app.worker import process_lease, run_worker
 
 
@@ -62,8 +62,20 @@ def fake_services(
     prose_only=False,
     search_status=200,
     always_new_query=False,
+    malformed_citation=False,
+    advisor_status=200,
+    advisor_response=None,
+    advisor_relevance="likely",
 ):
-    calls = {"models": [], "queries": [], "fetched": [], "validated": [], "plans": 0, "search_limits": []}
+    calls = {
+        "models": [],
+        "queries": [],
+        "fetched": [],
+        "validated": [],
+        "plans": 0,
+        "search_limits": [],
+        "advisor_requests": 0,
+    }
     text = (
         "Jane Doe works for Example Foundation in Ghana as Programme Director. "
         "Jane Doe earned BSc in Economics at Example University."
@@ -104,6 +116,19 @@ def fake_services(
                 return httpx.Response(200, content=b"{invalid")
             if search_status != 200:
                 return httpx.Response(search_status, json={"error": {"message": "fixture failure"}})
+            annotations = [
+                {
+                    "type": "url_citation",
+                    "url_citation": {"url": url, "title": "Jane Doe", "content": text},
+                }
+                for url in urls
+            ]
+            if malformed_citation:
+                annotations = [
+                    {"type": "url_citation", "url_citation": {"title": "Missing URL"}},
+                    {"type": "url_citation", "url_citation": "not-an-object"},
+                    {"type": "other", "url_citation": {"url": "https://invented.example/fake"}},
+                ]
             return httpx.Response(
                 200,
                 json={
@@ -111,15 +136,7 @@ def fake_services(
                         {
                             "message": {
                                 "content": "Model prose https://invented.example.org/fake",
-                                "annotations": []
-                                if prose_only
-                                else [
-                                    {
-                                        "type": "url_citation",
-                                        "url_citation": {"url": url, "title": "Jane Doe", "content": text},
-                                    }
-                                    for url in urls
-                                ],
+                                "annotations": [] if prose_only else annotations,
                             }
                         }
                     ],
@@ -132,6 +149,7 @@ def fake_services(
                 },
             )
         data = json.loads(body["messages"][1]["content"])["payload"]
+        calls["advisor_requests"] += int(data.get("task") in {"plan_search_queries", "validate_candidates"})
         if data.get("task") == "plan_search_queries":
             calls["plans"] += 1
             answer = {
@@ -141,9 +159,27 @@ def fake_services(
             }
         elif data.get("task") == "validate_candidates":
             calls["validated"].extend(c["url"] for c in data["candidates"])
+            if advisor_status != 200:
+                return httpx.Response(
+                    advisor_status,
+                    json={"error": {"message": "provider rejected request fixture"}},
+                )
+            if advisor_response is not None:
+                content = advisor_response
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"message": {"content": content}}],
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 0, "cost": 0.0002},
+                    },
+                )
             answer = {
                 "decisions": [
-                    {"candidate_id": c["candidate_id"], "source_type": "employer", "relevance": "likely"}
+                    {
+                        "candidate_id": c["candidate_id"],
+                        "source_type": "employer",
+                        "relevance": advisor_relevance,
+                    }
                     for c in data["candidates"]
                 ]
             }
@@ -209,10 +245,176 @@ async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, m
     assert all(c.source_id in {s.source_id for s in person.result.sources} for c in person.result.claims)
     assert {"test/source", "test/extraction"} == set(calls["models"])
     assert len(calls["fetched"]) == len(set(calls["fetched"])) == 2
+    assert sorted(calls["validated"]) == sorted(calls["fetched"])
+    assert calls["advisor_requests"] >= 1
     assert person.result.profile.metrics.queries_performed <= 3
     assert person.result.profile.metrics.llm_calls == len(calls["models"])
     assert person.result.profile.metrics.tokens_used == len(calls["models"]) * 150
     assert len(person.result.usage) == len(calls["models"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fixture_options",
+    [
+        {"prose_only": True},
+        {"malformed_citation": True},
+    ],
+    ids=["prose-url-without-citations", "malformed-citation"],
+)
+async def test_no_usable_search_citations_finish_as_review_required(tmp_path, monkeypatch, fixture_options):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=3,
+        MAX_SOURCE_MODEL_TOOL_CALLS=3,
+    )
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        **fixture_options,
+    )
+
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+
+    person = store.get_results(job.job_id).people[0]
+    assert person.status == "review_required"
+    assert person.error_code is None
+    assert person.result is not None
+    assert person.result.profile.coverage == 0
+    assert person.result.profile.research_status == "completed"
+    assert person.result.profile.metrics.error_codes == []
+    assert person.result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
+    assert not calls["validated"] and not calls["fetched"]
+    assert calls["plans"] == calls["advisor_requests"] == 0
+    assert len(person.result.usage) == 1
+    assert person.result.usage[0].success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fixture_options", "expected_code"),
+    [
+        ({"advisor_status": 400}, "SOURCE_ADVISOR_PROVIDER_ERROR"),
+        ({"advisor_response": "{invalid"}, "SOURCE_ADVISOR_VALIDATION_ERROR"),
+        (
+            {"advisor_response": json.dumps({"decisions": "not-a-list"})},
+            "SOURCE_ADVISOR_VALIDATION_ERROR",
+        ),
+    ],
+    ids=["provider-http-400", "malformed-json", "schema-mismatch"],
+)
+async def test_source_advisor_failures_preserve_specific_terminal_code(
+    tmp_path, monkeypatch, fixture_options, expected_code
+):
+    settings = configured(
+        tmp_path,
+        OPENROUTER_MAX_RETRIES=0,
+        MAX_SEARCH_QUERIES_PER_PERSON=1,
+    )
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    pipeline, calls = fake_services(settings, store, monkeypatch, **fixture_options)
+    attempt_logs, stage_logs = [], []
+    monkeypatch.setattr(
+        "app.research.budget.logger.warning",
+        lambda event, *, extra: attempt_logs.append((event, extra)),
+    )
+    monkeypatch.setattr(
+        "app.research.orchestrator.logger.error",
+        lambda event, *, extra: stage_logs.append((event, extra)),
+    )
+
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+
+    person = store.get_results(job.job_id).people[0]
+    assert person.status == "failed"
+    assert person.error_code == expected_code
+    assert person.result is not None
+    assert expected_code in person.result.profile.metrics.error_codes
+    assert calls["advisor_requests"] == 1
+    assert not calls["fetched"]
+    attempt = next(extra for event, extra in attempt_logs if event == "model_attempt")
+    stage = next(extra for event, extra in stage_logs if event == "source_advisor_failed")
+    assert attempt["operation"] == stage["operation"] == "validate_candidates"
+    assert attempt["request_sent"] and attempt["response_received"]
+    assert attempt["response_body_received"]
+    assert attempt["error_code"] in {"OPENROUTER_HTTP_ERROR", "OPENROUTER_SCHEMA_ERROR"}
+    assert stage["error_code"] == expected_code
+    assert stage["candidate_count"] > 0 and stage["selected_source_count"] == 0
+    assert "provider rejected request fixture" not in json.dumps([attempt, stage])
+
+
+@pytest.mark.asyncio
+async def test_all_unrelated_candidates_finish_without_retrieval(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=3,
+        MAX_SOURCE_MODEL_TOOL_CALLS=3,
+    )
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        advisor_relevance="unrelated",
+    )
+
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+
+    person = store.get_results(job.job_id).people[0]
+    assert person.status == "review_required"
+    assert person.error_code is None
+    assert person.result is not None
+    assert person.result.profile.research_status == "completed"
+    assert person.result.profile.metrics.error_codes == []
+    assert person.result.profile.metrics.stop_reason == "NO_SELECTED_SOURCES"
+    assert calls["validated"] and not calls["fetched"]
+
+
+@pytest.mark.asyncio
+async def test_candidates_empty_after_filtering_finish_without_advisor(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_SEARCH_QUERIES_PER_PERSON=3)
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+    monkeypatch.setattr(
+        pipeline.search,
+        "_parse_results",
+        lambda _data, _limit: [SourceCandidate(url="not-a-valid-public-url")],
+    )
+
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+
+    person = store.get_results(job.job_id).people[0]
+    assert person.status == "review_required"
+    assert person.error_code is None
+    assert person.result is not None
+    assert person.result.profile.metrics.stop_reason == "NO_ELIGIBLE_CANDIDATES"
+    assert calls["advisor_requests"] == 0
+    assert not calls["validated"] and not calls["fetched"]
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_before_advisor_makes_no_advisor_request(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_LLM_CALLS_PER_PERSON=1,
+        MAX_SEARCH_QUERIES_PER_PERSON=1,
+    )
+    store = migrated_store(settings)
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+
+    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+
+    assert result.profile.metrics.stop_reason == "MAX_LLM_CALLS"
+    assert calls["advisor_requests"] == 0
+    assert not calls["validated"] and not calls["fetched"]
+    assert len(calls["models"]) == len(result.usage) == 1
+    assert result.usage[0].success
 
 
 @pytest.mark.asyncio
@@ -269,23 +471,25 @@ async def test_search_result_reservations_cap_request_and_reject_prose_urls(tmp_
     assert calls["search_limits"] == [3]
     assert not calls["fetched"] and not calls["validated"]
     assert result.profile.metrics.search_results_reserved == 3
-    assert result.profile.metrics.stop_reason == "MAX_SEARCH_RESULTS"
+    assert result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
+    assert len(calls["queries"]) == 1
+    assert calls["plans"] == calls["advisor_requests"] == 0
     assert result.profile.coverage == 0
 
 
 @pytest.mark.asyncio
-async def test_followup_queries_are_bounded_and_search_usage_persists(tmp_path, monkeypatch):
+async def test_zero_citation_search_stops_without_advisor_and_usage_persists(tmp_path, monkeypatch):
     settings = configured(tmp_path, MAX_SEARCH_QUERIES_PER_PERSON=2, MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=100)
     store = migrated_store(settings)
     pipeline, calls = fake_services(settings, store, monkeypatch, prose_only=True, always_new_query=True)
     job = store.create_job([PersonSeed(full_name="Jane Doe")])
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
     result = store.get_results(job.job_id).people[0].result
-    assert len(calls["queries"]) == result.profile.metrics.queries_performed == 2
-    assert calls["plans"] == 1
-    assert result.profile.metrics.stop_reason == "MAX_QUERIES"
-    assert sum(u.web_search_requests or 0 for u in result.usage) == 2
-    assert result.profile.metrics.web_search_requests == 2
+    assert len(calls["queries"]) == result.profile.metrics.queries_performed == 1
+    assert calls["plans"] == calls["advisor_requests"] == 0
+    assert result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
+    assert sum(u.web_search_requests or 0 for u in result.usage) == 1
+    assert result.profile.metrics.web_search_requests == 1
 
 
 @pytest.mark.asyncio
@@ -353,7 +557,13 @@ async def test_search_citation_dns_still_passes_production_retrieval_guard(tmp_p
         "getaddrinfo",
         lambda host, port, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))],
     )
-    result = await pipeline.research(str(uuid4()), str(uuid4()), PersonSeed(full_name="Jane Doe"))
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+    person = store.get_results(job.job_id).people[0]
+    result = person.result
+    assert person.status == "failed"
+    assert person.error_code == "RETRIEVAL_FAILED"
+    assert result is not None
     assert calls["validated"] and not calls["fetched"]
     assert "RETRIEVAL_FAILED" in result.profile.metrics.error_codes
 

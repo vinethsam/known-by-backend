@@ -104,6 +104,7 @@ async def test_shared_openrouter_search_uses_hard_caps_and_citation_metadata():
     ]
     assert body["max_tool_calls"] == 1
     assert body["max_tokens"] == WEB_SEARCH_MAX_OUTPUT_TOKENS
+    assert "temperature" not in body
     assert "response_format" not in body and "plugins" not in body
     assert json.loads(body["messages"][1]["content"])["query"] == "Jane Doe fellowship"
     assert len(before) == len(usage) == 1

@@ -230,12 +230,20 @@ class UsageRecord(Contract):
     role: str
     model: str
     prompt_version: str
+    operation: str = "structured_completion"
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     web_search_requests: int | None = Field(default=None, ge=0)
     cost: float | None = Field(default=None, ge=0)
     latency_ms: float = Field(default=0, ge=0)
     success: bool = True
+    error_code: str | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    exception_type: str | None = None
+    retry_attempt: int = Field(default=0, ge=0)
+    request_sent: bool = False
+    response_received: bool = False
+    response_body_received: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
 

@@ -19,6 +19,18 @@ CONTEXT_FIELDS = (
     "cost",
     "error_code",
     "prompt_version",
+    "operation",
+    "provider",
+    "success",
+    "http_status",
+    "exception_type",
+    "retry_attempt",
+    "request_sent",
+    "response_received",
+    "response_body_received",
+    "candidate_count",
+    "citation_count",
+    "selected_source_count",
 )
 
 

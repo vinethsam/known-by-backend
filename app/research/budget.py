@@ -89,13 +89,16 @@ class BudgetedModel:
                 self.metrics.tokens_budgeted += actual - reserve
             if self.checkpoint:
                 await self.checkpoint()
-            logger.info(
+            log = logger.info if record.success else logger.warning
+            log(
                 "model_attempt",
                 extra={
                     "job_id": record.job_id,
                     "person_id": record.person_id,
                     "source_id": record.source_id,
                     "pipeline_stage": record.role,
+                    "operation": record.operation,
+                    "provider": "openrouter",
                     "model": record.model,
                     "prompt_version": record.prompt_version,
                     "prompt_tokens": record.prompt_tokens,
@@ -103,6 +106,14 @@ class BudgetedModel:
                     "web_search_requests": record.web_search_requests,
                     "cost": record.cost,
                     "duration_ms": record.latency_ms,
+                    "success": record.success,
+                    "error_code": record.error_code,
+                    "http_status": record.http_status,
+                    "exception_type": record.exception_type,
+                    "retry_attempt": record.retry_attempt,
+                    "request_sent": record.request_sent,
+                    "response_received": record.response_received,
+                    "response_body_received": record.response_body_received,
                 },
             )
 

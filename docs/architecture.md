@@ -27,6 +27,13 @@ discovery requests use the `openrouter:web_search` server tool with the Exa engi
 and credits; tool charges are additional to model tokens. Both model roles may share
 one model ID, while extraction remains a separate structured request.
 
+Structured requests use OpenRouter's `response_format.type=json_schema` contract.
+The adapter derives schemas from Pydantic, recursively removes generated `default`
+annotations that OpenRouter's strict validators do not accept, and retains the strict
+object requirements: every property is required and every object sets
+`additionalProperties: false`. Runtime Pydantic validation remains the final contract
+check for a returned payload.
+
 Only valid `url_citation` annotations from search responses become discovered
 candidates. Model-prose URLs never enter the candidate pool. Preferred seed URLs and
 operator-reviewed structured endpoints are separate eligible inputs. Canonical URLs
@@ -34,6 +41,16 @@ and equivalent queries are deduplicated before repeated work. The first query us
 the exact person name and supplied clues. Candidate decisions are reused within a
 person attempt, and pending candidates are processed before paying for another
 search. Follow-up planning runs only when unresolved fields justify it.
+
+OpenRouter citations are read from
+`choices[*].message.annotations[*].url_citation`; the nested `url` is required, while
+title and content are optional context. Malformed annotations are ignored, valid URLs
+are canonicalized and deduplicated, and URLs that fail safety checks never become
+candidates. Ordinary assistant content is never parsed for URLs. If no citations are
+available, or filtering or advisor selection leaves no source, orchestration records
+`NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES` and returns
+a `review_required` profile with explicit missing fields. These expected empty states
+do not become infrastructure-level failed jobs.
 
 Per-query and aggregate result, query, tool-attempt, model-attempt, token, source,
 and time budgets bound each person attempt. Aggregate results reserve requested
@@ -44,6 +61,20 @@ Reported tool-cap violations stop further research. Worker crash recovery has a
 separate attempt limit and retains earlier usage records. Plain model IDs prevent
 presets and online variants from adding implicit search; deployment must also avoid
 forced legacy web plugins in the OpenRouter account settings.
+
+Usage parsing reads model tokens and cost from `usage` and web-search counts from
+`usage.server_tool_use.web_search_requests`. Missing optional usage metadata remains
+unknown and does not itself fail research. A zero-token attempt therefore carries
+diagnostic state rather than implying a budget failure: operation, safe error code,
+HTTP status, exception class, retry number, and flags for request sent, response
+received, and response body received are persisted with the attempt.
+
+Provider, transport, and schema failures remain terminal when they prevent research.
+The worker preserves the specific safe failure code instead of replacing it with a
+generic result. Structured logs repeat that code with job, person, pipeline stage,
+model, and the safe attempt fields above. Discovery/advisor boundaries also log
+candidate, citation, and selected-source counts. Credentials, authorization headers,
+secrets, and raw model response bodies are never included.
 
 The extraction role receives bounded processed text and returns schema-validated
 claims with literal evidence. Deterministic grounding and identity checks run before

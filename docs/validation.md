@@ -1,14 +1,15 @@
 # Validation record
 
-Validated locally on **2026-09-18**, Windows, Python **3.14.7**. Docker and CI target
-Python 3.13. Trial jobs use the production API, queue, worker, providers, and settings;
-automated tests replace external network responses without a second research pipeline.
+Validated locally for the focused discovery fix on **2026-09-20**, Windows, Python
+**3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API, queue,
+worker, providers, and settings; automated tests replace external network responses
+without a second research pipeline.
 
 ## Executed checks
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **165 passed, 5 skipped** |
+| Full test suite | **180 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
 | Ruff lint and formatting | Passed |
 | Python compilation and application/compatibility imports | Passed |
 | Dependency consistency | No broken requirements |
@@ -19,6 +20,30 @@ automated tests replace external network responses without a second research pip
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Focused discovery failure-path coverage
+
+The 2026-09-20 source-discovery regression fixtures exercise the production provider
+and orchestration path with network responses replaced locally. They cover:
+
+| Case | Expected contract |
+| --- | --- |
+| Valid `url_citation` | Canonical citation URLs become source candidates and valid advisor output proceeds to retrieval. |
+| No citation | Model prose URLs remain ignored; the person ends `review_required` with `NO_SEARCH_CITATIONS`. |
+| Malformed citation metadata | Invalid annotations do not become candidates or cause an opaque exception. |
+| Advisor provider or HTTP failure | The zero-coverage task preserves `SOURCE_ADVISOR_PROVIDER_ERROR`; its attempt record retains the HTTP category and status. |
+| Advisor invalid JSON | The provider attempt records `OPENROUTER_SCHEMA_ERROR` and retains its safe diagnostic reason. |
+| Advisor schema mismatch | The task records a validation/schema code without logging the raw response. |
+| Empty candidates after filtering | The person ends `review_required` with `NO_ELIGIBLE_CANDIDATES`. |
+| Budget exhausted before advisor | No request is sent and the bounded budget outcome remains distinguishable from a zero-token provider attempt. |
+| OpenRouter 4xx/5xx | HTTP status, retry number, request/body flags, and safe terminal error code are retained. |
+| Valid discovery with no selected source | The person ends `review_required` with `NO_SELECTED_SOURCES`. |
+
+Schema fixtures also verify that strict OpenRouter schemas recursively omit Pydantic
+`default` annotations while retaining required fields and closed objects. Usage
+fixtures verify `usage.server_tool_use.web_search_requests`, and attempt fixtures
+verify the safe diagnostic fields used to explain zero-token records. These checks are
+offline and make no paid OpenRouter calls.
 
 ## Migration coverage
 
@@ -58,3 +83,8 @@ commands and migration owner. Run both services against the same database and
 configuration, apply migrations, and check `/health` then `/ready`. Readiness checks
 configuration and runtime prerequisites without making paid calls; it does not
 prove live model compatibility or successful Chromium rendering.
+
+No OpenRouter key is available in the local validation environment for the focused
+2026-09-20 fix, so no live provider request is claimed. The next deployment check
+should use one bounded person through the normal production API and confirm citation
+counts, selected-source counts, persisted attempt diagnostics, and the terminal code.

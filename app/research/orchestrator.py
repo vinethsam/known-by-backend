@@ -10,7 +10,7 @@ from time import monotonic
 from app.config import Settings
 from app.processing import document_metadata, process_content
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
-from app.providers.openrouter import OpenRouterError
+from app.providers.openrouter import OPENROUTER_SCHEMA_ERROR, OpenRouterError
 from app.providers.search import SearchProviderError
 from app.providers.source_advisor import SourceAdvisor
 from app.research.budget import BudgetedModel, BudgetExceeded
@@ -44,6 +44,12 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _source_advisor_error_code(exc: OpenRouterError) -> str:
+    if exc.error_code == OPENROUTER_SCHEMA_ERROR:
+        return "SOURCE_ADVISOR_VALIDATION_ERROR"
+    return "SOURCE_ADVISOR_PROVIDER_ERROR"
+
+
 class ResearchOrchestrator:
     def __init__(self, settings: Settings, search, model, retrieval):
         self.settings, self.search, self.model, self.retrieval = settings, search, model, retrieval
@@ -62,6 +68,9 @@ class ResearchOrchestrator:
         validated_candidates, pending_candidates = {}, {}
         rejected_urls = set()
         no_new_claims = 0
+        citation_count = 0
+        eligible_candidate_count = 0
+        candidates_filtered_empty = False
 
         def result():
             profile = reconcile(person_id, seed, claims, sources, settings.SCORING)
@@ -212,10 +221,27 @@ class ResearchOrchestrator:
                 source.processing_status = "failed"
                 source.error_code = "RETRIEVAL_FAILED" if isinstance(exc, FetchError) else "CONTENT_INVALID"
                 metrics.error_codes.append(source.error_code)
-            except OpenRouterError:
+            except OpenRouterError as exc:
                 source.processing_status = "extraction_failed"
                 source.error_code = "EXTRACTION_PROVIDER_FAILED"
                 metrics.error_codes.append(source.error_code)
+                logger.error(
+                    "extraction_provider_failed",
+                    extra=dict(
+                        context,
+                        source_id=source.source_id,
+                        pipeline_stage="extraction",
+                        operation=exc.operation or "extract_claims",
+                        provider="openrouter",
+                        model=settings.OPENROUTER_EXTRACTION_MODEL,
+                        error_code=exc.error_code,
+                        http_status=exc.http_status,
+                        exception_type=exc.exception_type,
+                        request_sent=exc.request_sent,
+                        response_received=exc.response_received,
+                        response_body_received=exc.response_body_received,
+                    ),
+                )
             finally:
                 no_new_claims = no_new_claims + 1 if len(claims) == before else 0
                 await save()
@@ -232,6 +258,8 @@ class ResearchOrchestrator:
                 )
 
         async def validate_and_process(candidates, preloaded=None, limit=None):
+            nonlocal eligible_candidate_count, candidates_filtered_empty
+            supplied_count = len(candidates)
             for url in set(pending_candidates) & (seen_urls | rejected_urls):
                 pending_candidates.pop(url, None)
             candidates = [
@@ -240,13 +268,49 @@ class ResearchOrchestrator:
                 if canonicalise_url(c.url) not in seen_urls | rejected_urls
             ]
             if not candidates:
-                return
+                if supplied_count:
+                    candidates_filtered_empty = True
+                    logger.info(
+                        "source_candidates_filtered",
+                        extra=dict(
+                            context,
+                            pipeline_stage="source",
+                            operation="filter_candidates",
+                            error_code="NO_ELIGIBLE_CANDIDATES",
+                            candidate_count=supplied_count,
+                            selected_source_count=0,
+                        ),
+                    )
+                return 0
             discovered_urls.update(canonicalise_url(candidate.url) for candidate in candidates)
             metrics.sources_discovered = len(discovered_urls)
             new_candidates = [c for c in candidates if c.url not in validated_candidates]
             by_id = {}
             if new_candidates:
-                decisions, _ = await advisor.validate(seed, new_candidates, context)
+                try:
+                    decisions, _ = await advisor.validate(seed, new_candidates, context)
+                except OpenRouterError as exc:
+                    error_code = _source_advisor_error_code(exc)
+                    logger.error(
+                        "source_advisor_failed",
+                        extra=dict(
+                            context,
+                            pipeline_stage="source",
+                            operation=exc.operation or "validate_candidates",
+                            provider="openrouter",
+                            model=settings.OPENROUTER_SOURCE_MODEL,
+                            error_code=error_code,
+                            http_status=exc.http_status,
+                            exception_type=exc.exception_type,
+                            request_sent=exc.request_sent,
+                            response_received=exc.response_received,
+                            response_body_received=exc.response_body_received,
+                            candidate_count=len(new_candidates),
+                            citation_count=citation_count,
+                            selected_source_count=0,
+                        ),
+                    )
+                    raise
                 by_id = {d.candidate_id: d for d in decisions}
             eligible = []
             for candidate in candidates:
@@ -265,11 +329,26 @@ class ResearchOrchestrator:
                 eligible.append(candidate)
                 if limit is not None:
                     pending_candidates[candidate.url] = candidate
-            for candidate in rank_candidates(eligible, seed, settings, limit=limit):
+            selected = rank_candidates(eligible, seed, settings, limit=limit)
+            eligible_candidate_count += len(eligible)
+            logger.info(
+                "source_candidates_selected",
+                extra=dict(
+                    context,
+                    pipeline_stage="source",
+                    operation="validate_candidates",
+                    candidate_count=len(candidates),
+                    citation_count=citation_count,
+                    selected_source_count=len(selected),
+                    error_code="NO_SELECTED_SOURCES" if new_candidates and not eligible else None,
+                ),
+            )
+            for candidate in selected:
                 if stopped():
                     break
                 pending_candidates.pop(candidate.url, None)
                 await process_candidate(candidate, (preloaded or {}).get(candidate.url))
+            return len(selected)
 
         try:
             # Operator-configured public structured datasets may serve the whole batch.
@@ -348,8 +427,29 @@ class ResearchOrchestrator:
                             planned, _ = await advisor.plan(
                                 seed, list(clues), dict(context, unresolved_fields=unresolved)
                             )
-                        except OpenRouterError:
-                            metrics.error_codes.append("SOURCE_PLANNING_FAILED")
+                        except OpenRouterError as exc:
+                            error_code = _source_advisor_error_code(exc)
+                            metrics.error_codes.append(error_code)
+                            metrics.stop_reason = "PROVIDER_FAILED"
+                            logger.error(
+                                "source_advisor_failed",
+                                extra=dict(
+                                    context,
+                                    pipeline_stage="source",
+                                    operation=exc.operation or "plan_search_queries",
+                                    provider="openrouter",
+                                    model=settings.OPENROUTER_SOURCE_MODEL,
+                                    error_code=error_code,
+                                    http_status=exc.http_status,
+                                    exception_type=exc.exception_type,
+                                    request_sent=exc.request_sent,
+                                    response_received=exc.response_received,
+                                    response_body_received=exc.response_body_received,
+                                    candidate_count=0,
+                                    citation_count=citation_count,
+                                    selected_source_count=0,
+                                ),
+                            )
                             break
                         queue.extend(
                             q
@@ -371,10 +471,48 @@ class ResearchOrchestrator:
                             min(settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results),
                             context,
                         )
-                    except SearchProviderError:
-                        metrics.error_codes.append("SEARCH_PROVIDER_FAILED")
+                    except SearchProviderError as exc:
+                        metrics.error_codes.append(exc.error_code)
+                        logger.error(
+                            "web_search_failed",
+                            extra=dict(
+                                context,
+                                pipeline_stage="source",
+                                operation="web_search",
+                                provider="openrouter",
+                                model=settings.OPENROUTER_SOURCE_MODEL,
+                                error_code=exc.error_code,
+                                http_status=exc.http_status,
+                                candidate_count=0,
+                                citation_count=0,
+                                selected_source_count=0,
+                            ),
+                        )
                         continue
-                    await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
+                    citation_count += len(candidates)
+                    logger.info(
+                        "web_search_completed",
+                        extra=dict(
+                            context,
+                            pipeline_stage="source",
+                            operation="web_search",
+                            provider="openrouter",
+                            model=settings.OPENROUTER_SOURCE_MODEL,
+                            candidate_count=len(candidates),
+                            citation_count=len(candidates),
+                        ),
+                    )
+                    if not candidates:
+                        metrics.stop_reason = "NO_SEARCH_CITATIONS"
+                        break
+                    selected_count = await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
+                    if selected_count == 0:
+                        metrics.stop_reason = (
+                            "NO_ELIGIBLE_CANDIDATES"
+                            if candidates_filtered_empty and metrics.sources_discovered == 0
+                            else "NO_SELECTED_SOURCES"
+                        )
+                        break
                 if not metrics.stop_reason:
                     metrics.stop_reason = (
                         "MAX_QUERIES"
@@ -383,9 +521,16 @@ class ResearchOrchestrator:
                     )
         except BudgetExceeded as exc:
             metrics.stop_reason = str(exc)
-        except OpenRouterError:
-            metrics.error_codes.append("SOURCE_PROVIDER_FAILED")
+        except OpenRouterError as exc:
+            metrics.error_codes.append(_source_advisor_error_code(exc))
             metrics.stop_reason = "PROVIDER_FAILED"
+        if not metrics.error_codes and not metrics.stop_reason:
+            if metrics.queries_performed and citation_count == 0:
+                metrics.stop_reason = "NO_SEARCH_CITATIONS"
+            elif metrics.sources_discovered and eligible_candidate_count == 0:
+                metrics.stop_reason = "NO_SELECTED_SOURCES"
+            elif candidates_filtered_empty and not sources:
+                metrics.stop_reason = "NO_ELIGIBLE_CANDIDATES"
         metrics.error_codes = sorted(set(metrics.error_codes))
         await save()
         return result()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -18,13 +19,24 @@ from app.schemas import SourceCandidate, UsageRecord
 MAX_TITLE_CHARS = 300
 MAX_SNIPPET_CHARS = 700
 
+logger = logging.getLogger(__name__)
+
 
 class SearchProviderError(RuntimeError):
     """A safe discovery failure retaining all known paid-attempt usage."""
 
-    def __init__(self, message: str, *, usage: list[UsageRecord] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: list[UsageRecord] | None = None,
+        error_code: str = "OPENROUTER_PROVIDER_ERROR",
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.usage = usage or []
+        self.error_code = error_code
+        self.http_status = http_status
 
 
 class SearchProvider(Protocol):
@@ -65,8 +77,37 @@ class OpenRouterSearchProvider:
                 query, count, context, before_attempt=before_attempt, on_usage=on_usage
             )
         except OpenRouterError as exc:
-            raise SearchProviderError(str(exc), usage=exc.usage) from exc
-        return self._parse_results(data, count)
+            raise SearchProviderError(
+                str(exc),
+                usage=exc.usage,
+                error_code=exc.error_code,
+                http_status=exc.http_status,
+            ) from exc
+        results = self._parse_results(data, count)
+        logger.info(
+            "web_search_citations_parsed",
+            extra={
+                "job_id": context.get("job_id"),
+                "person_id": context.get("person_id"),
+                "pipeline_stage": "source",
+                "operation": "parse_citations",
+                "provider": "openrouter",
+                "model": self.settings.OPENROUTER_SOURCE_MODEL,
+                "citation_count": self._citation_count(data),
+                "candidate_count": len(results),
+            },
+        )
+        return results
+
+    @staticmethod
+    def _citation_count(data: dict) -> int:
+        return sum(
+            1
+            for choice in data.get("choices", [])
+            if isinstance(choice, dict) and isinstance(choice.get("message"), dict)
+            for annotation in choice["message"].get("annotations") or []
+            if isinstance(annotation, dict) and annotation.get("type") == "url_citation"
+        )
 
     @staticmethod
     def _parse_results(data: dict, limit: int) -> list[SourceCandidate]:

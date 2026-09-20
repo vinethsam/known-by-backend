@@ -104,6 +104,9 @@ class SourceAdvisor:
         before_attempt: AttemptCallback | None = None,
         on_usage: UsageCallback | None = None,
     ) -> tuple[list[SourceDecision], list[UsageRecord]]:
+        if not candidates:
+            self._record_usage([])
+            return [], []
         candidate_ids = {candidate.candidate_id for candidate in candidates}
         response, usage = await self.client.complete(
             SourceDecisionSet,

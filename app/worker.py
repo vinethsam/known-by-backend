@@ -22,6 +22,33 @@ class LeaseLost(RuntimeError):
     pass
 
 
+FATAL_RESEARCH_ERROR_CODES = (
+    "SOURCE_ADVISOR_VALIDATION_ERROR",
+    "SOURCE_ADVISOR_PROVIDER_ERROR",
+    "EXTRACTION_PROVIDER_FAILED",
+    "OPENROUTER_HTTP_ERROR",
+    "OPENROUTER_PROVIDER_ERROR",
+    "OPENROUTER_TRANSPORT_ERROR",
+    "OPENROUTER_TIMEOUT",
+    "OPENROUTER_SCHEMA_ERROR",
+    "OPENROUTER_RESPONSE_TOO_LARGE",
+    # Preserve classification for checkpoints created by older workers.
+    "SEARCH_PROVIDER_FAILED",
+    "SOURCE_PROVIDER_FAILED",
+    "SOURCE_PLANNING_FAILED",
+)
+
+
+def terminal_research_error(error_codes: list[str]) -> str | None:
+    present = set(error_codes)
+    if not present:
+        return None
+    return next(
+        (code for code in FATAL_RESEARCH_ERROR_CODES if code in present),
+        sorted(present)[0],
+    )
+
+
 async def process_lease(store, orchestrator, lease, settings):
     async def checkpoint(result):
         saved = await asyncio.to_thread(store.checkpoint, lease, result)
@@ -31,8 +58,9 @@ async def process_lease(store, orchestrator, lease, settings):
     async def work():
         async with asyncio.timeout(settings.PERSON_TIMEOUT_SECONDS):
             result = await orchestrator.research(lease.job_id, lease.person_id, lease.seed, checkpoint)
-        if result.profile.coverage == 0 and result.profile.metrics.error_codes:
-            await asyncio.to_thread(store.fail_task, lease, "RESEARCH_PROVIDERS_FAILED")
+        fatal_error = terminal_research_error(result.profile.metrics.error_codes)
+        if result.profile.coverage == 0 and fatal_error:
+            await asyncio.to_thread(store.fail_task, lease, fatal_error)
         else:
             await asyncio.to_thread(store.finish_task, lease, result)
 

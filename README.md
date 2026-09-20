@@ -16,7 +16,10 @@ Person / Batch → Durable job → OpenRouter discovery → Source validation
 The source model plans searches and evaluates real candidates. The extraction model
 reads processed evidence and returns schema-validated claims. Both roles use one
 OpenRouter key and may use the same model ID. Choose a tool-compatible source model
-and models supporting the configured structured JSON format.
+and models supporting the configured structured JSON format. Before sending a strict
+JSON schema, the adapter recursively removes Pydantic `default` annotations that are
+not accepted by OpenRouter's strict structured-output validators; required fields and
+`additionalProperties: false` remain enforced.
 
 Discovery uses OpenRouter's `openrouter:web_search` server tool with its Exa engine.
 Only search `url_citation` metadata supplies discovered URLs; ordinary model prose
@@ -25,6 +28,10 @@ configuration are also supported. Every retrieval target passes URL-safety check
 Search uses existing OpenRouter credits and incurs tool charges in addition to model
 tokens; no separate search account or key is required. The
 [server-tool API is currently beta](https://openrouter.ai/docs/guides/features/server-tools/web-search).
+When search returns no usable citations, or filtering/advisor selection leaves no
+sources, the person finishes as `review_required` with a specific empty-result code
+(`NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES`) instead
+of being reported as an infrastructure failure.
 
 ## Core capabilities
 
@@ -36,7 +43,7 @@ tokens; no separate search account or key is required. The
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
   coverage remains distinct from confidence. See [scoring rules](docs/confidence.md).
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
-  bounded retries, and recorded model/tool usage.
+  bounded retries, and recorded model/tool usage with safe attempt diagnostics.
 - Rich JSON results and CSV/XLSX exports with spreadsheet formula protection.
 
 Trial runs use the production pipeline and settings. No dataset or sample-source
@@ -96,8 +103,24 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
 Search attempts cap server-tool execution to one call per request. The aggregate
 result budget reserves requested slots, including retries with unknown usage.
 Model calls share a conservative token reservation budget; this is not a dollar cap.
+With `OPENROUTER_TEMPERATURE=0`, the adapter omits the parameter so reasoning models
+that do not accept explicit temperature remain eligible under `require_parameters`;
+positive configured values are forwarded.
 Worker crash recovery is separately attempt-limited. Use plain model IDs and ensure
 OpenRouter workspace settings permit Exa without forced legacy web plugins.
+
+Provider, transport, retrieval, and structured-response failures that leave zero
+coverage remain failed tasks. Their specific safe error code is stored on the terminal
+task instead of being collapsed to a generic research failure; a profile with partial
+evidence can still complete for review. Structured attempt records and logs include
+the operation, HTTP status when available, exception class, retry number, and whether
+a request, response, and response body were observed. Stage-boundary logs add
+candidate, citation, and selected-source counts. Credentials and raw model bodies are
+excluded.
+
+The diagnostic fields are additive JSON fields and require no database migration.
+Deploy or restart the web and worker services from the same revision so an older
+process does not read attempt records written by the newer contract.
 
 ## API
 
