@@ -108,7 +108,7 @@ async def test_shared_openrouter_search_uses_hard_caps_and_citation_metadata():
     assert "response_format" not in body and "plugins" not in body
     assert json.loads(body["messages"][1]["content"])["query"] == "Jane Doe fellowship"
     assert len(before) == len(usage) == 1
-    assert before[0]["prompt_version"] == "web-discovery-v1"
+    assert before[0]["prompt_version"] == "web-discovery-v2"
     assert usage[0].prompt_tokens == 21 and usage[0].completion_tokens == 13
     assert usage[0].web_search_requests == 1 and usage[0].cost == 0.007
     assert usage[0].role == "source" and usage[0].success

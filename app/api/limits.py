@@ -18,6 +18,10 @@ class RequestSizeLimitMiddleware:
             return await JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)(
                 scope, receive, send
             )
+        if length < 0:
+            return await JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)(
+                scope, receive, send
+            )
         if length > self.limit:
             return await JSONResponse({"detail": "Request body exceeds maximum size"}, status_code=413)(
                 scope, receive, send

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import socket
@@ -15,6 +16,7 @@ from app.retrieval.service import (
     BrowserRenderer,
     BrowserRouteHTTPClient,
     FetchError,
+    PinnedAsyncHTTPTransport,
     PinnedPublicNetworkBackend,
     RetrievalService,
     RetrievedPage,
@@ -193,6 +195,8 @@ def test_canonicalise_dedups_root_path_and_rejects_unsafe_urls():
         canonicalise_url("https://example.com\\admin")
     with pytest.raises(URLValidationError):
         canonicalise_url("https://example.com/\nadmin")
+    with pytest.raises(URLValidationError):
+        canonicalise_url("https://[broken/profile")
 
 
 def test_domain_key_groups_subdomains():
@@ -723,3 +727,319 @@ async def test_structured_filtered_expands_seed_params(monkeypatch):
     )
 
     assert seen["url"] == "https://example.com/search?source=directory&q=Ada+Lovelace"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_bounds_overlap_without_domain_starvation(monkeypatch):
+    public_dns(monkeypatch)
+
+    async def validated(url, settings):
+        return canonicalise_url(url)
+
+    monkeypatch.setattr("app.retrieval.service._validate_target", validated)
+    release = asyncio.Event()
+    overlap = asyncio.Event()
+    active = set()
+    peaks = {"global": 0, "domain": 0}
+
+    class Fetcher:
+        async def fetch(self, url):
+            active.add(url)
+            peaks["global"] = max(peaks["global"], len(active))
+            domain_count = sum(domain_key(item) == domain_key(url) for item in active)
+            peaks["domain"] = max(peaks["domain"], domain_count)
+            if len(active) == 2:
+                overlap.set()
+            try:
+                await release.wait()
+                return RetrievedPage(requested_url=url, final_url=url, status=200, html="public")
+            finally:
+                active.remove(url)
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(settings(MAX_CONCURRENT_FETCHES=2, PER_DOMAIN_CONCURRENCY=1), Fetcher())
+    tasks = [
+        asyncio.create_task(service.retrieve(url, job_id="job"))
+        for url in [
+            "https://a.example.com/first",
+            "https://b.example.com/second",
+            "https://independent.org/third",
+            "https://another.net/fourth",
+        ]
+    ]
+    try:
+        await asyncio.wait_for(overlap.wait(), timeout=2)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert peaks == {"global": 2, "domain": 1}
+    assert not service._locks
+    assert not service._domain_sems
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_job_cache_reuse_and_job_isolation(monkeypatch):
+    public_dns(monkeypatch)
+    calls = []
+
+    class Fetcher:
+        async def fetch(self, url):
+            calls.append(url)
+            await asyncio.sleep(0)
+            return RetrievedPage(requested_url=url, final_url=url, status=200, html="public")
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(settings(), Fetcher(), cache={})
+    first, second = await asyncio.gather(
+        service.retrieve("https://example.com/profile", job_id="one"),
+        service.retrieve("https://example.com/profile?utm_source=x", job_id="one"),
+    )
+    assert first.html == second.html
+    assert len(calls) == 1
+    await service.retrieve("https://example.com/profile", job_id="two")
+    assert len(calls) == 2
+    assert not service._locks
+
+
+@pytest.mark.asyncio
+async def test_retrieval_cancellation_releases_pending_limits(monkeypatch):
+    public_dns(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class Fetcher:
+        async def fetch(self, url):
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return RetrievedPage(requested_url=url, final_url=url, status=200, html="public")
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(MAX_CONCURRENT_FETCHES=1, PER_DOMAIN_CONCURRENCY=1), Fetcher(), cache={}
+    )
+    first = asyncio.create_task(service.retrieve("https://example.com/a", job_id="job"))
+    await started.wait()
+    pending = asyncio.create_task(service.retrieve("https://example.com/b", job_id="job"))
+    same_url = asyncio.create_task(service.retrieve("https://example.com/a", job_id="job"))
+    await asyncio.sleep(0)
+    for task in (first, pending, same_url):
+        task.cancel()
+    outcomes = await asyncio.gather(first, pending, same_url, return_exceptions=True)
+    assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+    assert cancelled.is_set()
+    assert not service._locks
+    assert not service._domain_sems
+    release.set()
+    assert (await service.retrieve("https://example.com/c", job_id="job")).html == "public"
+
+
+@pytest.mark.asyncio
+async def test_static_fetcher_reuses_owned_client_and_closes_it():
+    fetcher = StaticFetcher(settings(MAX_CONCURRENT_FETCHES=3))
+    first = await fetcher._client_for_request()
+    assert await fetcher._client_for_request() is first
+    await fetcher.close()
+    assert first.is_closed
+    assert fetcher._client is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_setup", [False, True])
+async def test_browser_closes_context_and_route_client_when_setup_fails(monkeypatch, cancel_setup):
+    public_dns(monkeypatch)
+    browser = FakeBrowser()
+    renderer = BrowserRenderer(settings())
+    setup_started = asyncio.Event()
+    closed_clients = []
+
+    async def ensure():
+        return browser
+
+    async def broken_route(*args):
+        setup_started.set()
+        if cancel_setup:
+            await asyncio.Event().wait()
+        raise RuntimeError("private setup failure")
+
+    async def close_client(self):
+        closed_clients.append(self)
+
+    renderer._ensure_browser = ensure
+    browser.context.route = broken_route
+    monkeypatch.setattr(BrowserRouteHTTPClient, "close", close_client)
+    task = asyncio.create_task(renderer.fetch("https://example.com/"))
+    await setup_started.wait()
+    if cancel_setup:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(FetchError, match="^The browser retrieval failed$"):
+            await task
+    assert browser.context.closed
+    assert len(closed_clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_browser_reuses_process_with_isolated_contexts(monkeypatch):
+    public_dns(monkeypatch)
+    contexts = []
+
+    class Browser:
+        async def new_context(self, **kwargs):
+            context = FakeBrowserContext()
+            contexts.append(context)
+            return context
+
+        def is_connected(self):
+            return True
+
+    renderer = BrowserRenderer(settings())
+    renderer._browser = Browser()
+    await asyncio.gather(renderer.fetch("https://example.com/a"), renderer.fetch("https://example.com/b"))
+    assert len(contexts) == 2
+    assert contexts[0] is not contexts[1]
+    assert all(context.closed for context in contexts)
+
+
+@pytest.mark.asyncio
+async def test_disconnected_browser_is_restarted(monkeypatch):
+    import playwright.async_api
+
+    events = []
+
+    class Browser:
+        def __init__(self, connected):
+            self.connected = connected
+
+        def is_connected(self):
+            return self.connected
+
+        async def close(self):
+            events.append("browser_closed")
+
+    replacement = Browser(True)
+
+    class Runtime:
+        @property
+        def chromium(self):
+            return self
+
+        async def start(self):
+            events.append("started")
+            return self
+
+        async def launch(self, **kwargs):
+            assert kwargs["chromium_sandbox"] is True
+            events.append("launched")
+            return replacement
+
+        async def stop(self):
+            events.append("stopped")
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", Runtime)
+    renderer = BrowserRenderer(settings())
+    renderer._browser = Browser(False)
+    renderer._playwright = Runtime()
+    assert await renderer._ensure_browser() is replacement
+    assert await renderer._ensure_browser() is replacement
+    assert events == ["browser_closed", "stopped", "started", "launched"]
+    await renderer.close()
+
+
+@pytest.mark.asyncio
+async def test_browser_route_reuses_pinned_connection_and_revalidates_dns(monkeypatch):
+    public_dns(monkeypatch)
+    cfg = settings()
+    backend = FakeNetworkBackend()
+    backend.stream.reads = [b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/html\r\n\r\nok"] * 2
+    transport = PinnedAsyncHTTPTransport(cfg)
+    transport.network_backend.backend = backend
+
+    async def handler(request):
+        response = await transport._pool.handle_async_request(
+            httpcore.Request(request.method, str(request.url), headers=request.headers.raw)
+        )
+        try:
+            return httpx.Response(response.status, headers=response.headers, content=await response.aread())
+        finally:
+            await response.aclose()
+
+    async with transport, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        route_client = BrowserRouteHTTPClient(cfg, client)
+        assert (await route_client.fetch("https://example.com/a")).body == b"ok"
+        assert (await route_client.fetch("https://example.com/b")).body == b"ok"
+        assert backend.connections == [("93.184.216.34", 443)]
+        public_dns(monkeypatch, "10.0.0.5")
+        with pytest.raises(FetchError):
+            await route_client.fetch("https://example.com/c")
+        assert len(backend.connections) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("content_type", "html"), [("application/pdf", "old"), ("text/html", "x" * 2000)])
+async def test_cache_rechecks_current_content_limits(monkeypatch, content_type, html):
+    public_dns(monkeypatch)
+    url = "https://example.com/profile"
+    cache = {
+        ("job", url): RetrievedPage(
+            requested_url=url, final_url=url, status=200, content_type=content_type, html=html
+        )
+    }
+
+    class Fetcher:
+        async def fetch(self, url):
+            return RetrievedPage(requested_url=url, final_url=url, status=200, html="fresh")
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(settings(MAX_RESPONSE_BYTES=1024), Fetcher(), cache=cache)
+    assert (await service.retrieve(url, "job")).html == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_browser_cancellation_drains_callback_tasks(monkeypatch):
+    from types import SimpleNamespace
+
+    public_dns(monkeypatch)
+    browser = FakeBrowser()
+    renderer = BrowserRenderer(settings())
+    callback_started = asyncio.Event()
+    callback_closed = asyncio.Event()
+
+    async def ensure():
+        return browser
+
+    async def cancel_download():
+        callback_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            callback_closed.set()
+
+    async def goto(self, *args, **kwargs):
+        handler = next(handler for event, handler in self.events if event == "download")
+        handler(SimpleNamespace(cancel=cancel_download))
+        await asyncio.Event().wait()
+
+    renderer._ensure_browser = ensure
+    monkeypatch.setattr(FakePage, "goto", goto)
+    task = asyncio.create_task(renderer.fetch("https://example.com/"))
+    await callback_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert browser.context.closed
+    assert callback_closed.is_set()

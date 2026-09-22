@@ -22,6 +22,71 @@ _BOILERPLATE_LINE_RE = re.compile(
     r"all rights reserved|skip to content|main navigation|advertisement)$",
     re.IGNORECASE,
 )
+_UI_LABELS = {
+    "home",
+    "about",
+    "about us",
+    "contact",
+    "contact us",
+    "search",
+    "menu",
+    "news",
+    "events",
+    "sign in",
+    "log in",
+    "login",
+    "register",
+    "accessibility",
+    "sitemap",
+    "back to top",
+    "skip to main content",
+    "accept all",
+    "reject all",
+    "manage cookies",
+    "close",
+}
+_STANDALONE_LINK_RE = re.compile(r"^(?:[-*+]\s+)?\[([^\]\n]+)\]\([^\s\[\]]+\)$")
+_PRESERVED_STRUCTURES = ("h1", "h2", "h3", "h4", "h5", "h6", "table", "dl", "article")
+
+
+def _identity_terms(seed: object) -> list[str]:
+    values = [
+        _seed_value(seed, key)
+        for key in (
+            "full_name",
+            "organisation",
+            "country",
+            "location",
+            "university_name",
+            "job_title",
+            "subject",
+            "program_year",
+        )
+    ]
+    attributes = _seed_value(seed, "known_attributes")
+    if isinstance(attributes, Mapping):
+        values.extend(attributes.values())
+    return [" ".join(str(value).casefold().split()) for value in values if value]
+
+
+def _remove_ui_chrome(soup: BeautifulSoup, seed: object) -> None:
+    identity_terms = _identity_terms(seed)
+    elements = soup.find_all(
+        lambda tag: tag.name in {"nav", "footer"} or tag.get("role") in {"navigation", "menu", "contentinfo"}
+    )
+    for element in reversed(elements):
+        if element.find(_PRESERVED_STRUCTURES):
+            continue
+        labels = [" ".join(text.casefold().split()).strip(" |·•") for text in element.stripped_strings]
+        text = " ".join(labels)
+        if any(term in text for term in identity_terms):
+            continue
+        # Only whole, explicit UI labels qualify. Unknown directory/profile links
+        # and any prose survive, even inside misleading navigation/footer markup.
+        if labels and all(
+            not label or label in _UI_LABELS or _BOILERPLATE_LINE_RE.fullmatch(label) for label in labels
+        ):
+            element.decompose()
 
 
 def _resolve_relative_links(soup: BeautifulSoup, base_url: str) -> None:
@@ -38,7 +103,7 @@ def _normalise_markdown(markdown: str) -> str:
     return markdown.strip()
 
 
-def html_to_markdown(html: str, base_url: str | None = None) -> str:
+def html_to_markdown(html: str, base_url: str | None = None, *, seed: object | None = None) -> str:
     """Convert raw HTML to structured Markdown without interpreting content."""
 
     if not html or not html.strip():
@@ -47,6 +112,8 @@ def html_to_markdown(html: str, base_url: str | None = None) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for element in reversed(soup.find_all(_TECHNICAL_ELEMENTS)):
         element.decompose()
+    if seed is not None:
+        _remove_ui_chrome(soup, seed)
     if base_url:
         _resolve_relative_links(soup, base_url)
 
@@ -113,13 +180,21 @@ def _compact_boilerplate(text: str, seed: object) -> str:
     lines = [_normalise_markdown(line) for line in text.splitlines()]
     kept: list[str] = []
     seen_counts: dict[str, int] = {}
+    identity_terms = _identity_terms(seed)
     for line in lines:
         stripped = line.strip()
         if not stripped:
             if kept and kept[-1]:
                 kept.append("")
             continue
-        if _BOILERPLATE_LINE_RE.search(stripped) and not _line_mentions_seed(stripped, seed):
+        link = _STANDALONE_LINK_RE.fullmatch(stripped)
+        label = link.group(1) if link else stripped
+        protected_link = link is not None and any(term in label.casefold() for term in identity_terms)
+        if (
+            _BOILERPLATE_LINE_RE.fullmatch(label)
+            and not _line_mentions_seed(label, seed)
+            and not protected_link
+        ):
             continue
         key = stripped.lower()
         seen_counts[key] = seen_counts.get(key, 0) + 1
@@ -259,6 +334,7 @@ def process_content(page: object, seed: object, settings: object) -> list[str]:
         text = html_to_markdown(
             str(getattr(page, "html", "") or ""),
             base_url=getattr(page, "final_url", None),
+            seed=seed,
         )
     return processed_chunks(text, seed, settings)
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -140,7 +141,8 @@ class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
         self.network_backend = PinnedPublicNetworkBackend(settings)
         self._pool = httpcore.AsyncConnectionPool(
             max_connections=max_connections,
-            max_keepalive_connections=0,
+            max_keepalive_connections=min(max_connections, 20),
+            keepalive_expiry=5.0,
             http1=True,
             http2=False,
             network_backend=self.network_backend,
@@ -282,11 +284,12 @@ class BrowserRenderer:
         self._timeout_error: type[Exception] = TimeoutError
 
     async def _ensure_browser(self) -> Any:
-        if self._browser is not None:
+        if self._browser is not None and self._browser.is_connected():
             return self._browser
         async with self._browser_lock:
-            if self._browser is not None:
+            if self._browser is not None and self._browser.is_connected():
                 return self._browser
+            await self._close_runtime()
             try:
                 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
                 from playwright.async_api import async_playwright
@@ -314,12 +317,19 @@ class BrowserRenderer:
 
     async def close(self) -> None:
         async with self._browser_lock:
-            if self._browser is not None:
-                await self._browser.close()
-                self._browser = None
-            if self._playwright is not None:
-                await self._playwright.stop()
-                self._playwright = None
+            await self._close_runtime()
+
+    async def _close_runtime(self) -> None:
+        browser, self._browser = self._browser, None
+        playwright, self._playwright = self._playwright, None
+        try:
+            if browser is not None:
+                with suppress(Exception):
+                    await browser.close()
+        finally:
+            if playwright is not None:
+                with suppress(Exception):
+                    await playwright.stop()
 
     async def fetch(self, url: str) -> RetrievedPage:
         timeout_seconds = float(getattr(self.settings, "BROWSER_TIMEOUT_SECONDS", 30))
@@ -336,6 +346,33 @@ class BrowserRenderer:
     async def _fetch_once(self, url: str) -> RetrievedPage:
         target_url = await validate_target(url, self.settings)
         browser = await self._ensure_browser()
+        route_client = BrowserRouteHTTPClient(self.settings)
+        context = None
+        tasks: set[asyncio.Task] = set()
+        try:
+            context = await browser.new_context(
+                accept_downloads=False,
+                java_script_enabled=True,
+                service_workers="block",
+            )
+            return await self._render_context(context, target_url, route_client, tasks)
+        finally:
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await route_client.close()
+
+    async def _render_context(
+        self,
+        context: Any,
+        target_url: str,
+        route_client: BrowserRouteHTTPClient,
+        tasks: set[asyncio.Task],
+    ) -> RetrievedPage:
         timeout_ms = int(float(getattr(self.settings, "BROWSER_TIMEOUT_SECONDS", 30)) * 1000)
         max_requests = int(getattr(self.settings, "BROWSER_MAX_REQUESTS", 80))
         max_total_bytes = int(getattr(self.settings, "BROWSER_MAX_TOTAL_BYTES", 8_000_000))
@@ -346,15 +383,18 @@ class BrowserRenderer:
             "document_content_type": None,
             "document_status": 0,
         }
-        route_client = BrowserRouteHTTPClient(self.settings)
-
-        context = await browser.new_context(
-            accept_downloads=False,
-            java_script_enabled=True,
-            service_workers="block",
-        )
         context.set_default_timeout(timeout_ms)
         context.set_default_navigation_timeout(timeout_ms)
+
+        def task_done(task: asyncio.Task) -> None:
+            tasks.discard(task)
+            if not task.cancelled():
+                task.exception()
+
+        def schedule(coroutine: Coroutine) -> None:
+            task = asyncio.create_task(coroutine)
+            tasks.add(task)
+            task.add_done_callback(task_done)
 
         async def route_guard(route: Any, request: Any) -> None:
             state["requests"] += 1
@@ -403,7 +443,7 @@ class BrowserRenderer:
             state["blocked"] = "WebSocket requests are not allowed during retrieval"
             result = websocket_route.close()
             if hasattr(result, "__await__"):
-                asyncio.create_task(result)
+                schedule(result)
 
         await context.route("**/*", route_guard)
         if hasattr(context, "route_web_socket"):
@@ -416,9 +456,9 @@ class BrowserRenderer:
 
         context.on(
             "page",
-            lambda opened_page: asyncio.create_task(close_popup(opened_page)),
+            lambda opened_page: schedule(close_popup(opened_page)),
         )
-        page.on("download", lambda download: asyncio.create_task(cancel_download(download)))
+        page.on("download", lambda download: schedule(cancel_download(download)))
 
         try:
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -448,6 +488,3 @@ class BrowserRenderer:
             )
         except self._timeout_error as exc:
             raise FetchTimeoutError("The browser retrieval timed out") from exc
-        finally:
-            await route_client.close()
-            await context.close()

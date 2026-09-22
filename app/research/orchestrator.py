@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 from collections import deque
+from contextlib import aclosing
 from time import monotonic
 
 from app.config import Settings
 from app.processing import document_metadata, process_content
-from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
 from app.providers.openrouter import OPENROUTER_SCHEMA_ERROR, OpenRouterError
 from app.providers.search import SearchProviderError
 from app.providers.source_advisor import SourceAdvisor
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
+from app.research.concurrency import Outcome, ordered_window
 from app.research.discovery import (
     build_queries,
     build_query,
@@ -23,14 +26,15 @@ from app.research.discovery import (
     rank_candidates,
     source_authority,
 )
+from app.research.extraction import extract_chunks
 from app.research.identity import assess_identity, contains_phrase
 from app.research.normalisation import comparison_key
 from app.research.reconciliation import reconcile
-from app.retrieval.service import FetchError
+from app.research.telemetry import count, person_performance, stage
+from app.retrieval.service import FetchError, RetrievedPage
 from app.retrieval.urls import canonicalise_url, domain_key
 from app.schemas import (
     EvidenceClaim,
-    ExtractionResponse,
     PersonSeed,
     ProfileField,
     ResearchMetrics,
@@ -50,11 +54,47 @@ def _source_advisor_error_code(exc: OpenRouterError) -> str:
     return "SOURCE_ADVISOR_PROVIDER_ERROR"
 
 
+def _process_source(
+    source: SourceRecord,
+    candidate: SourceCandidate,
+    page: RetrievedPage,
+    seed: PersonSeed,
+    settings: Settings,
+) -> list[str]:
+    chunks = process_content(page, seed, settings)
+    text = "\n\n".join(chunks)
+    # A captured-JSON response may have no HTML. Hash its actual payload instead
+    # of treating every such source as the same empty page.
+    body = page.html
+    if not body and page.captured_json is not None:
+        body = json.dumps(page.captured_json, ensure_ascii=False, sort_keys=True)
+    source.content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if settings.RETAIN_RAW_CONTENT:
+        source.raw_content = page.html
+    source.compacted_text = text if settings.RETAIN_COMPACTED_TEXT else None
+    if not page.content_type or "html" in page.content_type.lower():
+        title, source.published_at = document_metadata(page.html)
+        source.title = title or source.title
+    source.authority_score, source.authority_components = source_authority(
+        candidate.source_type, page.final_url, settings.SCORING
+    )
+    source.source_type = SourceType(source.authority_components["source_type"])
+    source.identity = assess_identity(seed, text, settings.SCORING, model_relevance=candidate.relevance)
+    return chunks
+
+
 class ResearchOrchestrator:
     def __init__(self, settings: Settings, search, model, retrieval):
         self.settings, self.search, self.model, self.retrieval = settings, search, model, retrieval
+        self._extraction_slots = asyncio.Semaphore(settings.MAX_CONCURRENT_EXTRACTIONS)
 
     async def research(
+        self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None
+    ) -> ResearchResult:
+        with person_performance(job_id, person_id):
+            return await self._research(job_id, person_id, seed, checkpoint)
+
+    async def _research(
         self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None
     ) -> ResearchResult:
         settings = self.settings
@@ -71,9 +111,17 @@ class ResearchOrchestrator:
         citation_count = 0
         eligible_candidate_count = 0
         candidates_filtered_empty = False
+        cached_profile = None
+        evidence_changed = True
+        checkpoint_lock = asyncio.Lock()
 
         def result():
-            profile = reconcile(person_id, seed, claims, sources, settings.SCORING)
+            nonlocal cached_profile, evidence_changed
+            if evidence_changed:
+                with stage("reconciliation_ms"):
+                    cached_profile = reconcile(person_id, seed, claims, sources, settings.SCORING)
+                evidence_changed = False
+            profile = cached_profile.model_copy(deep=True)
             profile.metrics = metrics
             profile.started_at = started
             profile.completed_at = utcnow()
@@ -83,9 +131,12 @@ class ResearchOrchestrator:
 
         async def save():
             if checkpoint is not None:
-                current = result()
-                current.profile.research_status = "researching"
-                await checkpoint(current)
+                async with checkpoint_lock:
+                    # The store runs in a thread. Freeze mutable usage/evidence while
+                    # other requests finish; sessions never cross network awaits.
+                    current = result().model_copy(deep=True)
+                    current.profile.research_status = "researching"
+                    await checkpoint(current)
 
         client.checkpoint = save
 
@@ -108,7 +159,7 @@ class ResearchOrchestrator:
             return False
 
         async def process_candidate(candidate, page=None):
-            nonlocal claims, no_new_claims
+            nonlocal claims, no_new_claims, evidence_changed
             canonical = canonicalise_url(candidate.url)
             if canonical in seen_urls:
                 return
@@ -125,11 +176,15 @@ class ResearchOrchestrator:
                 preferred_source=candidate.preferred_source,
             )
             sources.append(source)
+            evidence_changed = True
             before = len(claims)
             timer = monotonic()
             try:
+                if isinstance(page, Outcome):
+                    page = page.unwrap()
                 if page is None:
-                    page = await self.retrieval.retrieve(candidate.url, job_id=job_id)
+                    with stage("retrieval_ms"):
+                        page = await self.retrieval.retrieve(candidate.url, job_id=job_id)
                 source.final_url = page.final_url
                 source.canonical_url = canonicalise_url(page.final_url)
                 seen_urls.add(source.canonical_url)
@@ -139,24 +194,10 @@ class ResearchOrchestrator:
                 source.retrieval_method = page.retrieval_method
                 if not 200 <= page.status < 300:
                     raise FetchError("SOURCE_HTTP_ERROR")
-                chunks = process_content(page, seed, settings)
-                text = "\n\n".join(chunks)
-                # Hash original source body (not person-specific chunks) to detect mirrors.
-                source.content_hash = hashlib.sha256(page.html.encode("utf-8")).hexdigest()
-                if settings.RETAIN_RAW_CONTENT:
-                    source.raw_content = page.html
-                source.compacted_text = text if settings.RETAIN_COMPACTED_TEXT else None
-                if not page.content_type or "html" in page.content_type.lower():
-                    title, source.published_at = document_metadata(page.html)
-                    source.title = title or source.title
-                source.authority_score, source.authority_components = source_authority(
-                    candidate.source_type, page.final_url, settings.SCORING
-                )
-                source.source_type = SourceType(source.authority_components["source_type"])
-                source.identity = assess_identity(
-                    seed, text, settings.SCORING, model_relevance=candidate.relevance
-                )
+                with stage("processing_ms"):
+                    chunks = _process_source(source, candidate, page, seed, settings)
                 source.processing_status = "processed"
+                evidence_changed = True
                 await save()
                 if source.content_hash in seen_hashes:
                     source.processing_status = "duplicate"
@@ -166,26 +207,31 @@ class ResearchOrchestrator:
                     source.processing_status = "identity_rejected"
                     return
                 metrics.sources_accepted += 1
-                for index, chunk in enumerate(chunks):
-                    response, _ = await client.complete(
-                        ExtractionResponse,
-                        "extraction",
-                        EXTRACTION_SYSTEM_PROMPT,
-                        {
-                            "person": seed.model_dump(mode="json"),
-                            "source_url": page.final_url,
-                            "chunk_index": index,
-                            "content": chunk,
-                        },
+                async with aclosing(
+                    extract_chunks(
+                        client,
+                        seed,
+                        chunks,
+                        page.final_url,
                         dict(context, source_id=source.source_id),
-                        EXTRACTION_PROMPT_VERSION,
+                        self._extraction_slots,
+                        settings.MAX_CONCURRENT_EXTRACTIONS,
                     )
-                    extracted, reasons = validate_claims(
-                        response, seed, source, chunk, settings.OPENROUTER_EXTRACTION_MODEL or "configured"
-                    )
-                    claims.extend(extracted)
-                    metrics.error_codes.extend(code for code in reasons if code not in metrics.error_codes)
-                    await save()
+                ) as extractions:
+                    async for chunk, response in extractions:
+                        extracted, reasons = validate_claims(
+                            response,
+                            seed,
+                            source,
+                            chunk,
+                            settings.OPENROUTER_EXTRACTION_MODEL or "configured",
+                        )
+                        claims.extend(extracted)
+                        evidence_changed = True
+                        metrics.error_codes.extend(
+                            code for code in reasons if code not in metrics.error_codes
+                        )
+                        await save()
                 claims = deduplicate_claims(claims)
                 # A link to a known, person-labelled profile is derived from the retrieved
                 # URL. A generic listing URL is never promoted into a personal profile link.
@@ -243,6 +289,7 @@ class ResearchOrchestrator:
                     ),
                 )
             finally:
+                evidence_changed = True
                 no_new_claims = no_new_claims + 1 if len(claims) == before else 0
                 await save()
                 logger.info(
@@ -282,13 +329,16 @@ class ResearchOrchestrator:
                         ),
                     )
                 return 0
+            previous_discovered = len(discovered_urls)
             discovered_urls.update(canonicalise_url(candidate.url) for candidate in candidates)
+            count("candidates_discovered", len(discovered_urls) - previous_discovered)
             metrics.sources_discovered = len(discovered_urls)
             new_candidates = [c for c in candidates if c.url not in validated_candidates]
             by_id = {}
             if new_candidates:
                 try:
-                    decisions, _ = await advisor.validate(seed, new_candidates, context)
+                    with stage("source_validation_ms"):
+                        decisions, _ = await advisor.validate(seed, new_candidates, context)
                 except OpenRouterError as exc:
                     error_code = _source_advisor_error_code(exc)
                     logger.error(
@@ -343,11 +393,37 @@ class ResearchOrchestrator:
                     error_code="NO_SELECTED_SOURCES" if new_candidates and not eligible else None,
                 ),
             )
-            for candidate in selected:
+
+            async def fetch(candidate):
+                # An earlier redirect may identify a queued candidate before it
+                # starts. Avoid fetching that now-known alias even in serial mode.
+                if canonicalise_url(candidate.url) in seen_urls:
+                    return None
+                page = (preloaded or {}).get(candidate.url)
+                if page is None:
+                    with stage("retrieval_ms"):
+                        page = await self.retrieval.retrieve(candidate.url, job_id=job_id)
+                return page
+
+            # Only I/O runs ahead. Evidence and stop decisions keep ranked source
+            # order, and exiting the window cancels/awaits every speculative fetch.
+            def fetch_capacity():
                 if stopped():
-                    break
-                pending_candidates.pop(candidate.url, None)
-                await process_candidate(candidate, (preloaded or {}).get(candidate.url))
+                    return 0
+                return min(
+                    settings.MAX_CONCURRENT_FETCHES, settings.MAX_SOURCES_PER_PERSON - metrics.sources_fetched
+                )
+
+            if selected and not stopped():
+                # Recompute available slots after each source: skipped redirect
+                # aliases must not discard later selected evidence from this round.
+                async with ordered_window(selected, fetch, fetch_capacity) as fetched:
+                    async for candidate, page in fetched:
+                        if stopped():
+                            break
+                        count("candidates_selected")
+                        pending_candidates.pop(candidate.url, None)
+                        await process_candidate(candidate, page)
             return len(selected)
 
         try:
@@ -363,7 +439,8 @@ class ResearchOrchestrator:
                             settings.MAX_SOURCES_PER_PERSON - metrics.sources_fetched,
                         ),
                     )
-                    pages = await self.retrieval.retrieve_structured(bounded_plan, seed, job_id=job_id)
+                    with stage("retrieval_ms"):
+                        pages = await self.retrieval.retrieve_structured(bounded_plan, seed, job_id=job_id)
                     candidates = [
                         SourceCandidate(url=p.requested_url, origin="configured_structured") for p in pages
                     ]
@@ -424,9 +501,10 @@ class ResearchOrchestrator:
                             or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
                         ]
                         try:
-                            planned, _ = await advisor.plan(
-                                seed, list(clues), dict(context, unresolved_fields=unresolved)
-                            )
+                            with stage("discovery_ms"):
+                                planned, _ = await advisor.plan(
+                                    seed, list(clues), dict(context, unresolved_fields=unresolved)
+                                )
                         except OpenRouterError as exc:
                             error_code = _source_advisor_error_code(exc)
                             metrics.error_codes.append(error_code)
@@ -464,13 +542,15 @@ class ResearchOrchestrator:
                         continue
                     queries_done.add(key)
                     metrics.queries_performed += 1
+                    count("search_queries")
                     try:
-                        candidates = await client.search(
-                            self.search,
-                            query,
-                            min(settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results),
-                            context,
-                        )
+                        with stage("discovery_ms"):
+                            candidates = await client.search(
+                                self.search,
+                                query,
+                                min(settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results),
+                                context,
+                            )
                     except SearchProviderError as exc:
                         metrics.error_codes.append(exc.error_code)
                         logger.error(

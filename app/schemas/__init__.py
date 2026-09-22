@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
+from app.input_validation import MAX_INPUT_URL_CHARS, normalized_input_text, validate_input_text
+
 
 def new_id() -> str:
     return str(uuid4())
@@ -78,11 +80,46 @@ class PersonSeed(Contract):
     known_attributes: dict[str, str] = Field(default_factory=dict, max_length=10)
     preferred_urls: list[AnyHttpUrl] = Field(default_factory=list, max_length=10)
 
-    @field_validator("known_attributes")
+    @field_validator(
+        "full_name",
+        "organisation",
+        "country",
+        "location",
+        "university_name",
+        "job_title",
+        "subject",
+        "program_year",
+        mode="before",
+    )
     @classmethod
-    def bounded_attributes(cls, value: dict[str, str]) -> dict[str, str]:
-        if any(len(k) > 80 or len(v) > 200 for k, v in value.items()):
-            raise ValueError("Identity attribute keys/values are too long")
+    def safe_identity_text(cls, value):
+        if isinstance(value, str):
+            return normalized_input_text(value, max_length=200)
+        return value
+
+    @field_validator("known_attributes", mode="before")
+    @classmethod
+    def bounded_attributes(cls, value):
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, attribute in value.items():
+            if isinstance(key, str):
+                key = normalized_input_text(key, max_length=80).strip()
+            if isinstance(attribute, str):
+                attribute = normalized_input_text(attribute, max_length=200)
+            if key in result:
+                raise ValueError("Identity attribute keys must be distinct after Unicode normalization")
+            result[key] = attribute
+        return result
+
+    @field_validator("preferred_urls", mode="before")
+    @classmethod
+    def bounded_url_text(cls, value):
+        if isinstance(value, (list, tuple)):
+            for url in value:
+                if isinstance(url, (str, AnyHttpUrl)):
+                    validate_input_text(str(url), max_length=MAX_INPUT_URL_CHARS)
         return value
 
 

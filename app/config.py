@@ -174,6 +174,7 @@ class Settings(BaseSettings):
     SOURCES_PER_ROUND: int = Field(default=2, ge=1, le=10)
     MAX_CONCURRENT_PEOPLE: int = Field(default=3, ge=1, le=20)
     MAX_CONCURRENT_FETCHES: int = Field(default=4, ge=1, le=30)
+    MAX_CONCURRENT_EXTRACTIONS: int = Field(default=2, ge=1, le=20)
     PER_DOMAIN_CONCURRENCY: int = Field(default=1, ge=1, le=5)
     MAX_MARKDOWN_CHARS: int = Field(default=24000, ge=100, le=200000)
     CHUNK_SIZE: int = Field(default=6000, ge=100, le=30000)

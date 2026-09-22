@@ -1,0 +1,132 @@
+{
+  "fixture_version": 1,
+  "mock_latency_ms": 2,
+  "batches": [
+    {
+      "people": 1,
+      "elapsed_ms": 660.54,
+      "average_ms_per_person": 660.54,
+      "counts": {
+        "db_statements": 633,
+        "db_insert": 171,
+        "db_select": 240,
+        "db_update": 185,
+        "people": 1,
+        "db_delete": 37,
+        "models": 5,
+        "searches": 1,
+        "validations": 1,
+        "cache_misses": 2,
+        "fetches": 2,
+        "extractions": 2,
+        "planning": 1
+      },
+      "peak_concurrency": {
+        "people": 1,
+        "models": 1,
+        "fetches": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.0,
+      "searches_per_person": 1.0,
+      "fetches_per_person": 2.0,
+      "result_sha256": "4bf61d728f11704e9207c95c0156b6f5bacf99d6c9073036a5460f86c09b591f"
+    },
+    {
+      "people": 5,
+      "elapsed_ms": 2377.61,
+      "average_ms_per_person": 475.52,
+      "counts": {
+        "db_statements": 3049,
+        "db_insert": 827,
+        "db_select": 1132,
+        "db_update": 909,
+        "people": 5,
+        "db_delete": 181,
+        "models": 25,
+        "searches": 5,
+        "validations": 5,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 8,
+        "extractions": 10,
+        "planning": 5
+      },
+      "peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "fetches": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.8,
+      "searches_per_person": 1.0,
+      "fetches_per_person": 0.4,
+      "result_sha256": "c3bcbdaed84dce5bb1eb8326142b59dbe884ece35986a0209e2c827fcf75983a"
+    },
+    {
+      "people": 25,
+      "elapsed_ms": 11000.55,
+      "average_ms_per_person": 440.02,
+      "counts": {
+        "db_statements": 15129,
+        "db_insert": 4107,
+        "db_select": 5592,
+        "db_update": 4529,
+        "people": 25,
+        "db_delete": 901,
+        "models": 125,
+        "searches": 25,
+        "validations": 25,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 48,
+        "extractions": 50,
+        "planning": 25
+      },
+      "peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "fetches": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.96,
+      "searches_per_person": 1.0,
+      "fetches_per_person": 0.08,
+      "result_sha256": "72b87a5f4078fc068871ad0e7ef975bcacea55480d1154e5f50c083746990b26"
+    },
+    {
+      "people": 100,
+      "elapsed_ms": 68221.47,
+      "average_ms_per_person": 682.21,
+      "counts": {
+        "db_statements": 116245,
+        "db_insert": 26455,
+        "db_select": 44825,
+        "db_update": 38964,
+        "people": 100,
+        "db_delete": 6001,
+        "models": 900,
+        "searches": 100,
+        "validations": 100,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 198,
+        "extractions": 600,
+        "planning": 100
+      },
+      "peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "fetches": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.99,
+      "searches_per_person": 1.0,
+      "fetches_per_person": 0.02,
+      "result_sha256": "2dbd9c83ea98403e97b78ebd5d0d668a5e82f2a6c6ed8d26e887bed320db310b"
+    }
+  ],
+  "normalization_version": 2,
+  "measurement_note": "One Windows/SQLite run with 2ms HTTP mocks and normal production defaults. Timings vary with machine load. SQL counts treat executemany as one statement. Normalized comparison excludes operational prompt versions and generated identities while preserving source-linked evidence and decisions.",
+  "revision": "84926353d803d7242330948aa2759607f03c4706"
+}

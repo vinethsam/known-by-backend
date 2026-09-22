@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import command
 from app.config import Settings
-from app.db.models import PersonTaskRow
+from app.db.models import EvidenceClaimRow, PersonTaskRow, SourceRow, UsageRecordRow
 from app.db.store import Store
 from app.schemas import (
     EvidenceClaim,
@@ -305,3 +305,93 @@ def test_postgresql_migration_and_skip_locked_sql_compile():
 
     sql = str(select(PersonTaskRow).with_for_update(skip_locked=True).compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE SKIP LOCKED" in sql
+
+
+@pytest.mark.parametrize("claim_count", [1, 100])
+def test_checkpoint_batches_ledger_writes_and_preserves_creation_order(tmp_path, claim_count):
+    store = _store(tmp_path)
+    store.create_job([PersonSeed(full_name="Ada Lovelace")])
+    lease = store.claim_task("worker")
+    assert lease.created_at is not None
+    result = _result(lease.person_id)
+    result.usage[0].job_id = lease.job_id
+    result.claims = [
+        EvidenceClaim(
+            person_id=lease.person_id,
+            source_id=result.sources[0].source_id,
+            field=ProfileField.full_name,
+            raw_value=f"Ada Lovelace {index}",
+            normalised_value=f"Ada Lovelace {index}",
+            evidence_text="Ada Lovelace",
+            subject_name="Ada Lovelace",
+            extraction_model="fixture/model",
+        )
+        for index in range(claim_count)
+    ]
+    assert store.checkpoint(lease, result)
+    with store.session_factory() as session:
+        original_times = {
+            row_type: session.scalars(select(row_type.created_at)).all()
+            for row_type in (SourceRow, EvidenceClaimRow, UsageRecordRow)
+        }
+    with store.session_factory.begin() as session:
+        session.execute(text("CREATE TABLE ledger_updates (table_name TEXT NOT NULL)"))
+        for table_name in ("sources", "evidence_claims", "usage_records"):
+            session.execute(
+                text(
+                    f"CREATE TRIGGER count_{table_name}_updates AFTER UPDATE ON {table_name} "
+                    f"BEGIN INSERT INTO ledger_updates VALUES ('{table_name}'); END"
+                )
+            )
+
+    statements = []
+
+    def capture(_connection, _cursor, sql, _parameters, _context, _executemany):
+        statements.append(sql)
+
+    result.sources[0].processing_status = "extracted"
+    result.claims[0].evidence_location = "paragraph 1"
+    event.listen(store.engine, "before_cursor_execute", capture)
+    try:
+        assert store.checkpoint(lease, result)
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture)
+
+    assert len(statements) == 9
+    assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 2
+    with store.session_factory() as session:
+        for row_type, timestamps in original_times.items():
+            assert session.scalars(select(row_type.created_at)).all() == timestamps
+    stored = store.get_results(lease.job_id).people[0].result
+    assert stored.sources[0].processing_status == "extracted"
+    assert stored.claims[0].evidence_location == "paragraph 1"
+    assert len(stored.claims) == claim_count
+    assert len(stored.usage) == 1
+    assert store.checkpoint(lease, result)
+    with store.session_factory() as session:
+        # Only the two deliberately changed records were written; unchanged claims
+        # and usage, and the entire repeated checkpoint, performed no row updates.
+        assert sorted(session.scalars(text("SELECT table_name FROM ledger_updates"))) == [
+            "evidence_claims",
+            "sources",
+        ]
+
+
+def test_postgresql_ledger_upsert_keeps_created_at_out_of_update(tmp_path):
+    store = _store(tmp_path)
+    captured = []
+
+    class CaptureSession:
+        def execute(self, statement, rows):
+            captured.append(str(statement.compile(dialect=postgresql.dialect())))
+
+    original_name = store.engine.dialect.name
+    try:
+        store.engine.dialect.name = "postgresql"
+        store._upsert_rows(CaptureSession(), SourceRow, "source_id", [{"source_id": "fixture"}])
+    finally:
+        store.engine.dialect.name = original_name
+    conflict = captured[0].split("ON CONFLICT", maxsplit=1)[1]
+    assert "source_id" in conflict and "DO UPDATE SET" in conflict
+    assert "created_at" not in conflict
+    assert "IS DISTINCT FROM" in conflict and "CAST(sources.data_json AS TEXT)" in conflict

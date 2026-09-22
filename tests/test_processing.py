@@ -128,3 +128,76 @@ def test_process_content_uses_json_payloads():
     chunks = process_content(page, {"full_name": "Ada Lovelace"}, cfg)
 
     assert "Ada Lovelace" in chunks[0]
+
+
+def test_ui_chrome_removal_saves_context_and_keeps_late_biography_and_education():
+    labels = ["Home", "About us", "Contact us", "Search", "News", "Events", "Accessibility", "Sitemap"]
+    menu = (
+        "<nav>"
+        + "".join(f'<a href="/menu/{index}">{label}</a>' for index, label in enumerate(labels))
+        + "</nav>"
+    )
+    biography = """
+    <main><h1>Ada Lovelace</h1>
+      <h2>Biography</h2><p>Ada Lovelace is a researcher at Analytical Society.</p>
+      <h2>Education</h2><table><tr><th>University</th><th>Subject</th></tr>
+        <tr><td>Example University</td><td>Mathematics</td></tr></table>
+    </main>
+    """
+    html = menu + '<div role="navigation">' + menu + "</div>" + biography + "<footer>" + menu + "</footer>"
+    url = "https://example.org/ada"
+    seed = {"full_name": "Ada Lovelace"}
+    cfg = settings()
+    before = "\n".join(processed_chunks(html_to_markdown(html, url), seed, cfg))
+    after = "\n".join(
+        process_content(RetrievedPage(requested_url=url, final_url=url, status=200, html=html), seed, cfg)
+    )
+    evidence = "\n".join(processed_chunks(html_to_markdown(biography, url), seed, cfg))
+    assert after == evidence
+    assert "# Ada Lovelace" in after
+    assert "## Education" in after
+    assert "Example University" in after
+    assert "Ada Lovelace is a researcher at Analytical Society." in after
+    assert len(before) - len(after) > 400
+
+
+def test_ui_markup_keeps_person_clues_tables_headings_and_unfamiliar_links():
+    html = """
+      <nav><a href="/about">About us</a><a href="/ada">Ada Lovelace</a></nav>
+      <footer><h2>Education</h2><table><tr><td>Mathematics</td></tr></table></footer>
+      <nav><a href="/directory">Faculty directory</a><a href="/professor">Analytical Society</a></nav>
+      <div role="navigation"><a href="/news">News</a><a href="/home">Home</a></div>
+    """
+    markdown = html_to_markdown(
+        html, "https://example.org/", seed={"full_name": "Ada Lovelace", "organisation": "Home"}
+    )
+    assert "Ada Lovelace" in markdown
+    assert "## Education" in markdown
+    assert "Mathematics" in markdown
+    assert "Faculty directory" in markdown
+    assert "Analytical Society" in markdown
+    assert "[Home](https://example.org/home)" in markdown
+
+
+def test_standalone_boilerplate_links_removed_without_removing_adjacent_evidence():
+    text = "\n".join(
+        [
+            "[Cookie policy](https://example.org/cookies)",
+            "- [Subscribe](https://example.org/newsletter)",
+            "[Privacy policy](https://example.org/privacy) [Ada Lovelace](https://example.org/ada)",
+            "[Privacy policy](https://example.org/privacy)[Mathematics](https://example.org/subject)",
+            "Ada Lovelace wrote the privacy policy for Analytical Society.",
+        ]
+    )
+    combined = "\n".join(processed_chunks(text, {"full_name": "Ada Lovelace"}, settings()))
+    assert "Cookie policy" not in combined
+    assert "[Subscribe]" not in combined
+    assert "[Ada Lovelace]" in combined
+    assert "[Mathematics]" in combined
+    assert "Ada Lovelace wrote the privacy policy for Analytical Society." in combined
+    protected = processed_chunks(
+        "[Privacy policy](https://example.org/privacy)",
+        {"full_name": "Ada Lovelace", "known_attributes": {"subject": "Privacy policy"}},
+        settings(),
+    )
+    assert protected == ["[Privacy policy](https://example.org/privacy)"]

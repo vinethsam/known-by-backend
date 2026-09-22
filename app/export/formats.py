@@ -129,5 +129,5 @@ def _xlsx_cell(value: Any) -> Any:
     if isinstance(value, str):
         # XML 1.0 cannot represent these control characters. Preserve other text,
         # replacing only invalid bytes with a visible replacement character.
-        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "\ufffd", value)
+        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", "\ufffd", value)
     return _safe_cell(value)

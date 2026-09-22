@@ -18,6 +18,12 @@ work; no session spans a network await. Alembic owns schema changes. Worker leas
 renewals, and fencing tokens prevent expired or cancelled attempts from publishing
 late results. Checkpoints retain evidence and recorded usage.
 
+Completed job results use six batched reads independent of the number of people;
+source bodies are not fetched through a per-person query loop. Evidence and usage
+ledger writes use batched upserts within each short checkpoint transaction. Field
+decisions are inserted together. Lease fencing and durable checkpoint boundaries
+remain in place; concurrent requests never share a SQLAlchemy session.
+
 ## Discovery and models
 
 A small discovery interface isolates research orchestration from OpenRouter HTTP.
@@ -62,6 +68,14 @@ separate attempt limit and retains earlier usage records. Plain model IDs preven
 presets and online variants from adding implicit search; deployment must also avoid
 forced legacy web plugins in the OpenRouter account settings.
 
+Budget reservations and usage adjustments are serialized per person before a paid
+attempt starts. Concurrent extraction is permitted only when the remaining chunks
+and their configured retries fit the current call/token headroom. Near either cap,
+chunks remain serial so scheduling cannot choose a different evidence subset.
+`MAX_CONCURRENT_EXTRACTIONS` caps active extraction requests across one worker's
+orchestrator. Completed chunks are consumed in input order before grounding and
+reconciliation; usage is retained even when requests finish out of order.
+
 Usage parsing reads model tokens and cost from `usage` and web-search counts from
 `usage.server_tool_use.web_search_requests`. Missing optional usage metadata remains
 unknown and does not itself fail research. A zero-token attempt therefore carries
@@ -81,6 +95,13 @@ claims with literal evidence. Deterministic grounding and identity checks run be
 reconciliation. Search citations identify acquisition targets; they do not replace
 retrieved evidence for extracted profile claims.
 
+Source/advisor prompts treat seed fields, candidate snippets, and known clues as
+untrusted data. Extraction also treats source text and metadata as untrusted. JSON
+serialization separates these values from the system message; embedded role claims
+or delimiter text do not create messages or tools. Extraction and advisor requests
+have no tools. Only discovery receives the bounded web-search tool. Prompt guidance
+complements schema validation and grounding; it does not replace those checks.
+
 ## Retrieval and compatibility
 
 The static Worker receives a POST to its configured full endpoint, body
@@ -94,9 +115,52 @@ validation. The separately deployed Worker must enforce its own upstream protect
 Development may use a local HTTP Worker endpoint; private research targets stay blocked.
 Static and rendered content share downstream cleaning, Markdown, and chunk selection.
 
+A bounded window overlaps selected-source fetches with processing/extraction of
+earlier sources. Results are consumed in candidate rank order, retaining deterministic
+early-stop and evidence decisions. `MAX_CONCURRENT_FETCHES` and
+`PER_DOMAIN_CONCURRENCY` remain authoritative. A later source may already have been
+fetched when an earlier one satisfies an early-stop condition; remaining tasks are
+cancelled and awaited when the window closes. A source failure is handled at its
+normal position without cancelling unrelated successful fetches.
+
 Within-job cache stores bounded retrieved content independent of person identity.
 Extracted person claims are never reused for another person. Structured acquisition
 is operator supplied and bounded: filtered, bulk, or paginated public data.
+
+Cache lookups and in-flight URL locks are keyed by job and canonical URL. Cache hits
+still validate stored requested/final URLs, content type, and byte limits. Concurrent
+people requesting the same URL share retrieval, never extracted claims. Identical
+page bodies retain distinct source records and skip repeated extraction without
+becoming independent corroboration. Structured bulk/paginated acquisition uses the
+same retrieval cache; it does not introduce a person-claim cache.
+
+OpenRouter and static retrieval keep lifecycle-managed HTTP connection pools. The
+browser renderer reuses one Chromium process with a fresh isolated context per
+source, restarts disconnected runtimes, and closes contexts and route resources
+on completion or cancellation. Static retrieval remains first choice, with the
+existing route/DNS, redirect, request, byte, and timeout checks enforced for fallback.
+
+## Input and performance boundaries
+
+Person identity text is normalized with Unicode NFC, preserving non-Latin names and
+joiners. Unsupported controls/surrogates and excessive values are rejected. Preferred
+URLs are bounded to 4096 characters before URL parsing and network validation. Original
+CSV/TSV/XLSX cells remain unchanged; cells allow tabs and line breaks and are bounded
+to 32767 characters, headers/name-column selectors to 200, and filenames to 1024.
+Canonically equivalent duplicate headers are rejected. Filename text is never used
+as a filesystem destination.
+
+XLSX preflight retains compressed/expanded-size, part-count, row, column, and forged
+dimension checks. It rejects encrypted/duplicate parts and XML document types/entities
+before openpyxl can allocate workbook content. XML validation streams without building
+trees. Export keeps formula escaping and replaces characters XML cannot represent.
+API job IDs remain UUIDs, and export formats use an explicit CSV/XLSX allowlist.
+
+`app/research/telemetry.py` collects one `person_performance` structured log per
+attempt, including persistence and final status work at the worker boundary. It adds
+no telemetry table or tiny per-stage writes and leaves result contracts unchanged.
+See [performance measurement](performance.md) for timing/counter definitions and
+the offline benchmark harness.
 
 The existing `/process` contract and root `main:app` entrypoint remain supported.
 Settings use uppercase attributes; credentials are `SecretStr` values and must never

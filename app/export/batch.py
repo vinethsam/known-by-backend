@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any
-from xml.etree.ElementTree import ParseError, iterparse
+from xml.etree.ElementTree import ParseError, XMLParser, iterparse
 
 from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
@@ -14,6 +15,12 @@ from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.input_validation import (
+    MAX_INPUT_CELL_CHARS,
+    MAX_INPUT_FILENAME_CHARS,
+    MAX_INPUT_HEADER_CHARS,
+    validate_input_text,
+)
 from app.schemas import PersonSeed
 
 NAME_ALIASES = {"name", "full_name", "full name"}
@@ -38,6 +45,9 @@ def parse_batch(
 ) -> BatchInput:
     if len(content) > settings.MAX_UPLOAD_BYTES:
         raise BatchParseError("Batch upload exceeds maximum size")
+    _validate_text(filename, MAX_INPUT_FILENAME_CHARS)
+    if name_column is not None:
+        _validate_text(name_column, MAX_INPUT_HEADER_CHARS)
     suffix = PurePath(filename).suffix.lower()
     if suffix == ".xlsx":
         rows = _read_xlsx(content, settings)
@@ -70,27 +80,15 @@ def _read_delimited(content: bytes, delimiter: str, settings: Settings) -> list[
 
 
 def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
+    _validate_xlsx_archive(content, settings)
     try:
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            entries = archive.infolist()
-            if len(entries) > 500:
-                raise BatchParseError("XLSX file contains too many internal parts")
-            total = 0
-            for info in entries:
-                total += info.file_size
-                if total > settings.MAX_XLSX_UNCOMPRESSED_BYTES:
-                    raise BatchParseError("XLSX file expands beyond the maximum allowed size")
-                if info.compress_size and info.file_size / info.compress_size > 1000:
-                    raise BatchParseError("XLSX compression ratio is too large")
-    except zipfile.BadZipFile as exc:
-        raise BatchParseError("XLSX file is corrupted") from exc
-
-    try:
-        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
-    except (InvalidFileException, OSError, KeyError, ValueError) as exc:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False, keep_links=False)
+    except (InvalidFileException, OSError, KeyError, ValueError, ParseError, zipfile.BadZipFile) as exc:
         raise BatchParseError("XLSX file is corrupted") from exc
     try:
         sheet = workbook.active
+        if sheet is None:
+            raise BatchParseError("XLSX file has no active worksheet")
         _validate_xlsx_dimensions(sheet, settings)
         # Validate actual cell coordinates as well as the declared worksheet range.
         # A forged small dimension must not silently hide rows/columns from a batch.
@@ -115,7 +113,7 @@ def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
                 raise BatchParseError("Batch file contains too many columns")
             rows.append(values)
         return rows
-    except (ParseError, KeyError, TypeError, ValueError) as exc:
+    except (ParseError, KeyError, TypeError, ValueError, OSError, zipfile.BadZipFile) as exc:
         if isinstance(exc, BatchParseError):
             raise
         raise BatchParseError("XLSX file is corrupted") from exc
@@ -123,10 +121,62 @@ def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
         workbook.close()
 
 
+def _validate_xlsx_archive(content: bytes, settings: Settings) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            entries = archive.infolist()
+            if len(entries) > 500:
+                raise BatchParseError("XLSX file contains too many internal parts")
+            if len({info.filename for info in entries}) != len(entries):
+                raise BatchParseError("XLSX file contains duplicate internal parts")
+            total = 0
+            for info in entries:
+                if info.flag_bits & 1:
+                    raise BatchParseError("Encrypted XLSX files are not supported")
+                total += info.file_size
+                if total > settings.MAX_XLSX_UNCOMPRESSED_BYTES:
+                    raise BatchParseError("XLSX file expands beyond the maximum allowed size")
+                if info.compress_size and info.file_size / info.compress_size > 1000:
+                    raise BatchParseError("XLSX compression ratio is too large")
+            # Parse without building trees before openpyxl can expand entities or
+            # allocate shared strings. The parser recognizes DTDs in UTF-16 too.
+            for info in entries:
+                if info.filename.lower().endswith((".xml", ".rels")):
+                    parser = XMLParser(target=_BoundedXMLTarget())
+                    with archive.open(info) as part:
+                        while chunk := part.read(65536):
+                            parser.feed(chunk)
+                    parser.close()
+    except (zipfile.BadZipFile, OSError, ValueError, ParseError, RuntimeError, NotImplementedError) as exc:
+        if isinstance(exc, BatchParseError):
+            raise
+        raise BatchParseError("XLSX file is corrupted") from exc
+
+
+class _BoundedXMLTarget:
+    def start(self, tag, attributes):
+        pass
+
+    def end(self, tag):
+        pass
+
+    def data(self, value):
+        pass
+
+    def close(self):
+        pass
+
+    def doctype(self, name, public_id, system_id):
+        raise BatchParseError("XLSX XML document types and entities are not supported")
+
+
 def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Settings) -> BatchInput:
     if not rows:
         raise BatchParseError("Batch file is empty")
-    header = [_stringify_cell(value).strip() for value in rows[0]]
+    header = []
+    for value in rows[0]:
+        _validate_text(value, MAX_INPUT_HEADER_CHARS)
+        header.append(value.strip())
     _validate_headers(header, settings)
     name_key = _select_name_column(header, name_column)
 
@@ -137,7 +187,7 @@ def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Set
             raise BatchParseError(f"Blank row at {zero_based}")
         if len(raw_row) > len(header):
             raise BatchParseError(f"Row {zero_based} contains data beyond the header")
-        values = [_stringify_cell(value) for value in raw_row]
+        values = list(raw_row)
         if len(values) < len(header):
             values.extend([""] * (len(header) - len(values)))
         if not any(value.strip() for value in values):
@@ -163,14 +213,18 @@ def _validate_headers(header: list[str], settings: Settings) -> None:
         raise BatchParseError("Batch file contains too many columns")
     if any(not column for column in header):
         raise BatchParseError("Batch file contains a blank header")
-    normalized = [column.casefold() for column in header]
+    normalized = [unicodedata.normalize("NFC", column).casefold() for column in header]
     if len(set(normalized)) != len(normalized):
         raise BatchParseError("Batch file contains duplicate headers")
 
 
 def _select_name_column(header: list[str], name_column: str | None) -> str:
     if name_column:
-        matches = [column for column in header if column == name_column]
+        matches = [
+            column
+            for column in header
+            if unicodedata.normalize("NFC", column) == unicodedata.normalize("NFC", name_column)
+        ]
         if not matches:
             raise BatchParseError("Selected name column is not present")
         return matches[0]
@@ -207,7 +261,16 @@ def _seed_from_row(row: dict[str, str], full_name: str) -> PersonSeed:
 def _stringify_cell(value: Any) -> str:
     if value is None:
         return ""
-    return str(value)
+    value = str(value)
+    _validate_text(value, MAX_INPUT_CELL_CHARS, multiline=True)
+    return value
+
+
+def _validate_text(value: str, max_length: int, *, multiline: bool = False) -> None:
+    try:
+        validate_input_text(value, max_length=max_length, multiline=multiline)
+    except ValueError as exc:
+        raise BatchParseError(str(exc)) from exc
 
 
 def _validate_xlsx_dimensions(sheet, settings: Settings) -> None:

@@ -6,6 +6,7 @@ import re
 import unicodedata
 from datetime import date
 
+from app.prompts.extraction import EXTRACTION_PROMPT_VERSION
 from app.research.normalisation import comparison_key, name_key, normalise
 from app.schemas import EvidenceClaim, ExtractionResponse, PersonSeed, ProfileField, SourceRecord, utcnow
 
@@ -82,6 +83,7 @@ def validate_claims(
                 subject_name=claim.subject_name,
                 identity_relevance=source.identity.score,
                 extraction_model=model,
+                prompt_version=EXTRACTION_PROMPT_VERSION,
             )
         )
     return deduplicate_claims(claims), sorted(set(reasons))

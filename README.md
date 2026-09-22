@@ -56,10 +56,13 @@ allowlist restricts discovery. Automated tests replace external calls with fixtu
 | `app/api/`, `app/schemas/` | FastAPI endpoints and validated contracts |
 | `app/providers/`, `app/prompts/` | OpenRouter discovery, model roles, and prompts |
 | `app/research/` | Budgets, orchestration, identity, evidence, and confidence |
+| `app/research/concurrency.py`, `extraction.py`, `telemetry.py` | Bounded I/O, ordered extraction, and person performance logs |
 | `app/retrieval/`, `app/processing/` | Safe acquisition, Markdown, and bounded chunks |
 | `app/db/`, `alembic/` | Persistence, job leases, cache, and migrations |
 | `app/export/`, `app/worker.py` | Batch input/output and background execution |
+| `app/input_validation.py` | Shared text bounds and Unicode/control validation |
 | `tests/` | Offline tests and optional PostgreSQL integration checks |
+| `benchmarks/` | Offline production-pipeline benchmarks using mocked providers |
 
 Shared interfaces and persistence rules are in [architecture contracts](docs/architecture.md).
 
@@ -99,6 +102,8 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
   `MAX_TOTAL_SEARCH_RESULTS_PER_PERSON`, `MAX_SOURCE_MODEL_TOOL_CALLS`,
   `MAX_SOURCES_PER_PERSON`, `MAX_LLM_CALLS_PER_PERSON`, `MAX_TOKENS_PER_PERSON`,
   `PERSON_TIMEOUT_SECONDS`, `WORKER_MAX_ATTEMPTS`.
+- **Concurrency:** `MAX_CONCURRENT_PEOPLE`, `MAX_CONCURRENT_FETCHES`,
+  `PER_DOMAIN_CONCURRENCY`, `MAX_CONCURRENT_EXTRACTIONS` (default `2` per worker).
 
 Search attempts cap server-tool execution to one call per request. The aggregate
 result budget reserves requested slots, including retries with unknown usage.
@@ -121,6 +126,26 @@ excluded.
 The diagnostic fields are additive JSON fields and require no database migration.
 Deploy or restart the web and worker services from the same revision so an older
 process does not read attempt records written by the newer contract.
+
+## Performance and input safety
+
+Selected sources use bounded fetch overlap and are consumed in their ranked order.
+Independent extraction chunks can overlap when their complete retry reservations fit
+the person budget; otherwise they run serially. Canonical URL caching shares retrieved
+public content within a job, while claims remain specific to each person. Existing
+HTTP pools and the reusable Chromium process retain explicit shutdown and isolated
+browser contexts.
+
+Each person attempt emits one structured `person_performance` log containing stage
+durations, cache/fetch counts, model attempts, tokens, and reported cost. See
+[performance and tuning](docs/performance.md) for counter meanings, cancellation,
+speculative-fetch tradeoffs, and the offline benchmark procedure.
+
+Input validation preserves Unicode names and original spreadsheet text while bounding
+cells, headers, and URLs. XLSX archives are checked before workbook parsing, including
+entity/DTD rejection. CSV/XLSX formula escaping remains enabled. Model prompts keep
+user fields and retrieved content inside a JSON data envelope; extraction has no tools
+and every returned claim still passes deterministic grounding checks.
 
 ## API
 

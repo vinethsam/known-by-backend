@@ -100,9 +100,12 @@ def canonicalise_url(url: str) -> str:
     if any(char.isspace() for char in raw_url):
         raise URLValidationError("URL contains unsafe whitespace")
 
-    parsed = urlsplit(raw_url)
-    if not parsed.scheme:
-        parsed = urlsplit("https://" + raw_url)
+    try:
+        parsed = urlsplit(raw_url)
+        if not parsed.scheme:
+            parsed = urlsplit("https://" + raw_url)
+    except ValueError as exc:
+        raise URLValidationError("URL is malformed") from exc
     if parsed.scheme.lower() not in {"http", "https"}:
         raise URLValidationError("Only HTTP and HTTPS URLs are supported")
     if not parsed.hostname:

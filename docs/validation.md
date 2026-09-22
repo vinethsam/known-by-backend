@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally for the focused discovery fix on **2026-09-20**, Windows, Python
+Validated locally for the performance/security hardening pass on **2026-09-21–22**, Windows, Python
 **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API, queue,
 worker, providers, and settings; automated tests replace external network responses
 without a second research pipeline.
@@ -9,17 +9,35 @@ without a second research pipeline.
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **180 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Full test suite | **244 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
 | Ruff lint and formatting | Passed |
 | Python compilation and application/compatibility imports | Passed |
 | Dependency consistency | No broken requirements |
-| Real Uvicorn process startup and localhost `GET /health` | HTTP 200, `{"status":"ok"}` |
+| Application imports and API health fixtures | Passed; real Uvicorn startup/HTTP 200 was separately verified on 2026-09-20 |
 | SQLite Alembic upgrade/downgrade and readiness | Passed in the suite |
 | PostgreSQL migration DDL and locking SQL compilation | Passed offline |
 | Git diff whitespace check | Passed |
+| Offline production-pipeline benchmark | 1/5/25/100-person fixtures preserve normalized research outputs; [measurements and method](../benchmarks/README.md) |
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Hardening regression coverage
+
+The pre-edit baseline was **180 passed, 5 skipped**. Added checks cover bounded
+retrieval and extraction, domain fairness, out-of-order responses, atomic retry/token
+budgets, cancellation, lease-renewal failures, frozen checkpoints, redirect aliases,
+JSON-only content fingerprints, cache/job isolation, browser context cleanup/restart,
+HTTP connection ownership, safe input/Unicode, malicious prompt text, and malformed
+spreadsheets. Grounded values, confidence, provenance and terminal states remain
+equivalent in the offline before/after fixtures. Prompt-version metadata is recorded
+accurately and excluded from that material-evidence comparison.
+
+Repeated checkpoints use nine SQL statements for both one and 100 claims; unchanged
+ledger rows are not rewritten. Completed-result reads retain six SELECTs. Explicit
+navigation removal preserves literal biography/education evidence in a fixture while
+reducing its context from 772 to 172 characters. These are fixture measurements,
+not predictions of live provider or Railway performance.
 
 ## Focused discovery failure-path coverage
 
@@ -84,7 +102,6 @@ configuration, apply migrations, and check `/health` then `/ready`. Readiness ch
 configuration and runtime prerequisites without making paid calls; it does not
 prove live model compatibility or successful Chromium rendering.
 
-No OpenRouter key is available in the local validation environment for the focused
-2026-09-20 fix, so no live provider request is claimed. The next deployment check
+No live provider request was made during this hardening pass. The next deployment check
 should use one bounded person through the normal production API and confirm citation
 counts, selected-source counts, persisted attempt diagnostics, and the terminal code.

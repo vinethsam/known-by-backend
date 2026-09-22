@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -20,6 +21,7 @@ from bs4 import BeautifulSoup
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.research.telemetry import count
 from app.retrieval.browser import (
     BrowserRenderer,
     BrowserRouteHTTPClient,
@@ -96,6 +98,11 @@ class StaticFetcher:
             self._client = httpx.AsyncClient(
                 follow_redirects=False,
                 timeout=float(getattr(self.settings, "FETCH_TIMEOUT_SECONDS", 30)),
+                limits=httpx.Limits(
+                    max_connections=int(getattr(self.settings, "MAX_CONCURRENT_FETCHES", 4)),
+                    max_keepalive_connections=int(getattr(self.settings, "MAX_CONCURRENT_FETCHES", 4)),
+                ),
+                trust_env=False,
             )
         return self._client
 
@@ -201,7 +208,9 @@ class RetrievalService:
         self.cache = cache
         self._global_fetch_sem = asyncio.Semaphore(int(getattr(settings, "MAX_CONCURRENT_FETCHES", 4)))
         self._domain_sems: dict[str, asyncio.Semaphore] = {}
+        self._domain_users: dict[str, int] = {}
         self._locks: dict[tuple[str | None, str], asyncio.Lock] = {}
+        self._lock_users: dict[tuple[str | None, str], int] = {}
 
     async def close(self) -> None:
         await self.static_fetcher.close()
@@ -219,7 +228,22 @@ class RetrievalService:
         lock_key = (job_id, key)
         if lock_key not in self._locks:
             self._locks[lock_key] = asyncio.Lock()
+        self._lock_users[lock_key] = self._lock_users.get(lock_key, 0) + 1
         return lock_key, self._locks[lock_key]
+
+    @asynccontextmanager
+    async def _fetch_slot(self, key: str) -> AsyncIterator[None]:
+        per_domain = self._domain_sem(key)
+        self._domain_users[key] = self._domain_users.get(key, 0) + 1
+        try:
+            # Domain waiters must not occupy global slots needed by other domains.
+            async with per_domain, self._global_fetch_sem:
+                yield
+        finally:
+            self._domain_users[key] -= 1
+            if self._domain_users[key] == 0:
+                del self._domain_users[key]
+                del self._domain_sems[key]
 
     async def _cache_get(self, job_id: str | None, key: str) -> RetrievedPage | None:
         if self.cache is None:
@@ -248,6 +272,13 @@ class RetrievalService:
                 return None
             page.requested_url = await _validate_target(page.requested_url, self.settings)
             page.final_url = await _validate_target(page.final_url, self.settings)
+            byte_limit = (
+                int(getattr(self.settings, "BROWSER_MAX_TOTAL_BYTES", 8_000_000))
+                if page.retrieval_method == "browser"
+                else _response_byte_limit(self.settings)
+            )
+            if not content_type_allowed(page.content_type) or len(page.html.encode("utf-8")) > byte_limit:
+                return None
             return page
         except (
             FetchError,
@@ -275,6 +306,7 @@ class RetrievalService:
             return
 
     async def retrieve(self, url: str, job_id: str | None = None) -> RetrievedPage:
+        count("sources_requested")
         key_url = await _validate_target(url, self.settings)
         cache_key = canonicalise_url(key_url)
         lock_key, lock = self._url_lock(job_id, cache_key)
@@ -282,20 +314,26 @@ class RetrievalService:
             async with lock:
                 cached = await self._cache_get(job_id, cache_key)
                 if cached is not None:
+                    count("retrieval_cache_hits")
+                    count("sources_retrieved")
                     return cached
+                count("retrieval_cache_misses")
 
-                per_domain = self._domain_sem(domain_key(cache_key))
-                async with self._global_fetch_sem, per_domain:
+                async with self._fetch_slot(domain_key(cache_key)):
+                    count("static_fetches")
                     page = await self.static_fetcher.fetch(key_url)
                     if needs_browser(page, self.settings) and self.renderer is not None:
+                        count("playwright_fallbacks")
                         browser_page = await self.renderer.fetch(page.final_url)
                         page = browser_page.model_copy(update={"requested_url": key_url})
                 await self._cache_put(job_id, cache_key, page)
+                count("sources_retrieved")
                 return page
         finally:
-            waiters = getattr(lock, "_waiters", None)
-            if not lock.locked() and not waiters:
-                self._locks.pop(lock_key, None)
+            self._lock_users[lock_key] -= 1
+            if self._lock_users[lock_key] == 0:
+                del self._lock_users[lock_key]
+                del self._locks[lock_key]
 
     async def retrieve_structured(
         self, plan: Mapping[str, Any], seed: object, job_id: str | None = None

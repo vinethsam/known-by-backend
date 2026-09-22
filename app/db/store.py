@@ -7,7 +7,22 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import create_engine, delete, event, exists, func, inspect, select, text, update
+from sqlalchemy import (
+    JSON,
+    Text,
+    cast,
+    create_engine,
+    delete,
+    event,
+    exists,
+    func,
+    insert,
+    inspect,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -54,6 +69,7 @@ class Lease:
     person_id: str
     seed: PersonSeed
     token: str
+    created_at: datetime | None = None
 
 
 def normalize_database_url(url: str) -> str:
@@ -202,6 +218,7 @@ class Store:
                 person_id=task.person_id,
                 seed=PersonSeed.model_validate(task.seed_json),
                 token=token,
+                created_at=_aware(task.created_at),
             )
 
     def renew_lease(self, lease: Lease) -> bool:
@@ -588,47 +605,60 @@ class Store:
         self, session: Session, job_id: str, person_id: str, result: ResearchResult, now: datetime
     ) -> None:
         session.execute(delete(FieldDecisionRow).where(FieldDecisionRow.person_id == person_id))
-        session.execute(delete(ProfileRow).where(ProfileRow.person_id == person_id))
         # Evidence and usage form an append/update ledger across worker attempts.
         # Reclaiming a lease must not erase already-paid work or its provenance.
-
-        profile_payload = result.profile.model_dump(mode="json")
-        session.add(
-            ProfileRow(
-                person_id=person_id,
-                job_id=job_id,
-                status=result.profile.status.value,
-                profile_confidence=result.profile.profile_confidence,
-                coverage=result.profile.coverage,
-                review_required=result.profile.review_required,
-                data_json=profile_payload,
-                created_at=now,
-            )
-        )
-        for field, decision in result.profile.fields.items():
-            session.add(
-                FieldDecisionRow(
-                    job_id=job_id,
+        self._upsert_rows(
+            session,
+            ProfileRow,
+            "person_id",
+            [
+                dict(
                     person_id=person_id,
-                    field=field.value,
-                    data_json=decision.model_dump(mode="json"),
+                    job_id=job_id,
+                    status=result.profile.status.value,
+                    profile_confidence=result.profile.profile_confidence,
+                    coverage=result.profile.coverage,
+                    review_required=result.profile.review_required,
+                    data_json=result.profile.model_dump(mode="json"),
                     created_at=now,
                 )
+            ],
+        )
+        decisions = [
+            dict(
+                job_id=job_id,
+                person_id=person_id,
+                field=field.value,
+                data_json=decision.model_dump(mode="json"),
+                created_at=now,
             )
-        for source in result.sources:
-            session.merge(
-                SourceRow(
+            for field, decision in result.profile.fields.items()
+        ]
+        if decisions:
+            session.execute(insert(FieldDecisionRow), decisions)
+        # Execute sources before claims/usage to satisfy provenance foreign keys.
+        # Executemany upserts avoid a SELECT and UPDATE for every saved ledger row.
+        self._upsert_rows(
+            session,
+            SourceRow,
+            "source_id",
+            [
+                dict(
                     source_id=source.source_id,
                     job_id=job_id,
                     person_id=person_id,
                     data_json=source.model_dump(mode="json"),
                     created_at=now,
                 )
-            )
-        session.flush()
-        for claim in result.claims:
-            session.merge(
-                EvidenceClaimRow(
+                for source in result.sources
+            ],
+        )
+        self._upsert_rows(
+            session,
+            EvidenceClaimRow,
+            "claim_id",
+            [
+                dict(
                     claim_id=claim.claim_id,
                     job_id=job_id,
                     person_id=person_id,
@@ -637,10 +667,15 @@ class Store:
                     data_json=claim.model_dump(mode="json"),
                     created_at=now,
                 )
-            )
-        for usage in result.usage:
-            session.merge(
-                UsageRecordRow(
+                for claim in result.claims
+            ],
+        )
+        self._upsert_rows(
+            session,
+            UsageRecordRow,
+            "usage_id",
+            [
+                dict(
                     usage_id=usage.usage_id,
                     job_id=job_id,
                     person_id=person_id,
@@ -652,7 +687,34 @@ class Store:
                     data_json=usage.model_dump(mode="json"),
                     created_at=now,
                 )
-            )
+                for usage in result.usage
+            ],
+        )
+
+    def _upsert_rows(self, session: Session, row_type, primary_key: str, rows: list[dict]) -> None:
+        if not rows:
+            return
+        table = row_type.__table__
+        factory = pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
+        statement = factory(table)
+        mutable = [column for column in table.columns if column.name not in {primary_key, "created_at"}]
+        statement = statement.on_conflict_do_update(
+            index_elements=[primary_key],
+            # Keep original ledger chronology across checkpoints and lease retries.
+            set_={column.name: statement.excluded[column.name] for column in mutable},
+            # PostgreSQL's JSON type has no equality operator. Comparing its stored
+            # serialization as text safely skips unchanged checkpoint payloads;
+            # different key ordering can only cause an extra write, never lost data.
+            where=or_(
+                *(
+                    cast(column, Text).is_distinct_from(cast(statement.excluded[column.name], Text))
+                    if isinstance(column.type, JSON)
+                    else column.is_distinct_from(statement.excluded[column.name])
+                    for column in mutable
+                )
+            ),
+        )
+        session.execute(statement, rows)
 
     def _person_result_view(
         self,

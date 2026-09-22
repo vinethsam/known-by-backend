@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
@@ -170,7 +171,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None, fet
         return await get_job(job_id)
 
     @application.get("/v1/jobs/{job_id}/export", dependencies=secured)
-    async def export(job_id: UUID, format: str = Query(default="csv", pattern="^(csv|xlsx)$")):
+    async def export(job_id: UUID, format: Literal["csv", "xlsx"] = Query(default="csv")):
         results = await get_results(job_id)
         columns = await asyncio.to_thread(store.get_columns, str(job_id))
         data = await asyncio.to_thread(export_results, results, columns, format)

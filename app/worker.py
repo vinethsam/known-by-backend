@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import timezone
+from time import monotonic
 from uuid import uuid4
 
 from app.config import get_settings
@@ -13,7 +15,9 @@ from app.logging import configure_logging
 from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
+from app.research.telemetry import person_performance, stage
 from app.retrieval.service import RetrievalService
+from app.schemas import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +54,21 @@ def terminal_research_error(error_codes: list[str]) -> str | None:
 
 
 async def process_lease(store, orchestrator, lease, settings):
+    created = getattr(lease, "created_at", None)
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    queue_wait = (utcnow() - created).total_seconds() * 1000 if created is not None else 0
+    with person_performance(lease.job_id, lease.person_id, queue_wait_ms=queue_wait):
+        await _process_lease(store, orchestrator, lease, settings)
+
+
+async def _process_lease(store, orchestrator, lease, settings):
+    async def persist(method, *args):
+        with stage("persistence_ms"):
+            return await asyncio.to_thread(method, *args)
+
     async def checkpoint(result):
-        saved = await asyncio.to_thread(store.checkpoint, lease, result)
+        saved = await persist(store.checkpoint, lease, result)
         if not saved:
             raise LeaseLost()
 
@@ -60,9 +77,9 @@ async def process_lease(store, orchestrator, lease, settings):
             result = await orchestrator.research(lease.job_id, lease.person_id, lease.seed, checkpoint)
         fatal_error = terminal_research_error(result.profile.metrics.error_codes)
         if result.profile.coverage == 0 and fatal_error:
-            await asyncio.to_thread(store.fail_task, lease, fatal_error)
+            await persist(store.fail_task, lease, fatal_error)
         else:
-            await asyncio.to_thread(store.finish_task, lease, result)
+            await persist(store.finish_task, lease, result)
 
     task = asyncio.create_task(work())
     try:
@@ -78,18 +95,28 @@ async def process_lease(store, orchestrator, lease, settings):
     except LeaseLost:
         logger.info("lease_lost", extra={"job_id": lease.job_id, "person_id": lease.person_id})
     except TimeoutError:
-        await asyncio.to_thread(store.fail_task, lease, "PERSON_TIMEOUT")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await persist(store.fail_task, lease, "PERSON_TIMEOUT")
     except asyncio.CancelledError:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         raise
     except Exception:
+        # A lease-renewal/database error can occur while research is still live.
+        # Stop owned network/model work before recording the terminal failure.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         logger.error(
             "person_failed",
             exc_info=True,
             extra={"job_id": lease.job_id, "person_id": lease.person_id, "error_code": "RESEARCH_FAILED"},
         )
-        await asyncio.to_thread(store.fail_task, lease, "RESEARCH_FAILED")
+        await persist(store.fail_task, lease, "RESEARCH_FAILED")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def run_worker(settings=None, store=None, orchestrator=None, stop_event=None):
@@ -116,9 +143,12 @@ async def run_worker(settings=None, store=None, orchestrator=None, stop_event=No
         orchestrator = ResearchOrchestrator(settings, search, model, retrieval)
     worker_id = str(uuid4())
     active = set()
+    next_heartbeat = 0.0
     try:
         while not stop_event.is_set():
-            await asyncio.to_thread(store.heartbeat, worker_id)
+            if monotonic() >= next_heartbeat:
+                await asyncio.to_thread(store.heartbeat, worker_id)
+                next_heartbeat = monotonic() + settings.WORKER_HEARTBEAT_SECONDS
             completed = {task for task in active if task.done()}
             if completed:
                 await asyncio.gather(*completed)
