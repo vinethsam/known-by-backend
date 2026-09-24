@@ -1,6 +1,7 @@
 """Offline end-to-end contracts through real providers, persistence and worker code."""
 
 import asyncio
+import csv
 import io
 import json
 from uuid import uuid4
@@ -251,6 +252,30 @@ async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, m
     assert person.result.profile.metrics.llm_calls == len(calls["models"])
     assert person.result.profile.metrics.tokens_used == len(calls["models"]) * 150
     assert len(person.result.usage) == len(calls["models"])
+
+
+@pytest.mark.asyncio
+async def test_linkedin_search_result_never_reaches_advisor_retrieval_or_evidence(
+    tmp_path, monkeypatch
+):
+    settings = configured(tmp_path, SOURCES_PER_ROUND=2)
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    allowed = "https://official.example.org/jane"
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=["https://www.linkedin.com/in/jane-doe", allowed],
+    )
+
+    await process_lease(store, pipeline, store.claim_task("worker"), settings)
+
+    result = store.get_results(job.job_id).people[0].result
+    assert calls["validated"] == calls["fetched"] == [allowed]
+    assert [source.requested_url for source in result.sources] == [allowed]
+    assert all("linkedin" not in source.final_url for source in result.sources)
+    assert all(claim.source_id == result.sources[0].source_id for claim in result.claims)
 
 
 @pytest.mark.asyncio
@@ -641,6 +666,12 @@ def test_api_batch_and_export_contracts(tmp_path, kind):
                 assert sheet.cell(2, 1).value == "Jane Doe"
             else:
                 assert "Department" in export.text and "Jane Doe" in export.text
+        rich_export = client.get(f"/v1/jobs/{job_id}/export?format=csv&provenance=field", headers=AUTH)
+        assert rich_export.status_code == 200
+        rich_headers = next(csv.reader(io.StringIO(rich_export.content.decode("utf-8-sig"))))
+        assert "full_name_source_urls" in rich_headers
+        assert rich_headers.index("full_name_source_urls") == rich_headers.index("full_name_confidence") + 1
+        assert client.get(f"/v1/jobs/{job_id}/export?provenance=claims", headers=AUTH).status_code == 422
 
 
 def test_api_rejects_unsafe_urls_and_missing_configuration(tmp_path):

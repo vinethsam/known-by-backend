@@ -227,6 +227,19 @@ class FieldDecision(Contract):
     scoring_components: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProfileRecord(Contract):
+    """One exportable record for a person, scoped to one education credential."""
+
+    record_id: str = Field(min_length=1, max_length=240)
+    fields: dict[ProfileField, FieldDecision]
+    profile_confidence: float = Field(ge=0, le=100)
+    coverage: float = Field(ge=0, le=100)
+    review_required: bool
+    status: PersonStatus = PersonStatus.review_required
+    sources_used: int = 0
+    review_reason_codes: list[str] = Field(default_factory=list)
+
+
 class ResearchMetrics(Contract):
     queries_performed: int = 0
     web_search_calls_reserved: int = 0
@@ -254,6 +267,8 @@ class PersonProfile(Contract):
     research_status: str = "completed"
     sources_considered: int = 0
     sources_used: int = 0
+    # Additive multi-record output. ``fields`` remains the primary/legacy projection.
+    records: list[ProfileRecord] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime = Field(default_factory=utcnow)
     metrics: ResearchMetrics = Field(default_factory=ResearchMetrics)

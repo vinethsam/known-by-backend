@@ -18,6 +18,7 @@ from app.schemas import (
     PersonResultView,
     PersonStatus,
     ProfileField,
+    ProfileRecord,
     ResearchResult,
     SourceRecord,
 )
@@ -152,6 +153,114 @@ def test_export_xlsx_is_readable_and_formula_safe():
     assert headers[:3] == ["name", "status", "status (2)"]
     assert row[0] == "'+Ada Lovelace"
     assert row[headers.index("full_name")] == "'=Ada"
+
+
+def test_default_export_is_unchanged_for_one_record_projection():
+    results = _results()
+    expected = export_results(results, ["name", "status"], "csv")
+    profile = results.people[0].result.profile
+    record = ProfileRecord(
+        record_id="primary",
+        fields=profile.fields,
+        profile_confidence=profile.profile_confidence,
+        coverage=profile.coverage,
+        review_required=profile.review_required,
+        status=profile.status,
+    )
+    profile.records = [record]
+
+    assert export_results(results, ["name", "status"], "csv") == expected
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_field_provenance_export_expands_records_without_cross_record_sources(format):
+    results = _results()
+    profile = results.people[0].result.profile
+
+    def record(degree, university, source_url, profile_url, confidence):
+        fields = {field: decision.model_copy(deep=True) for field, decision in profile.fields.items()}
+        fields[ProfileField.degree_type] = FieldDecision(
+            value=degree,
+            confidence=confidence,
+            sources=[source_url, source_url],
+            review_required=False,
+        )
+        fields[ProfileField.university_name] = FieldDecision(
+            value=university,
+            confidence=confidence,
+            sources=[source_url],
+            review_required=False,
+        )
+        fields[ProfileField.profile_link] = FieldDecision(
+            value=profile_url,
+            confidence=confidence,
+            sources=[profile_url],
+            review_required=False,
+        )
+        return ProfileRecord(
+            record_id=degree.casefold(),
+            fields=fields,
+            profile_confidence=confidence,
+            coverage=100,
+            review_required=False,
+            status=PersonStatus.completed,
+        )
+
+    bachelor_url = "https://university-a.example/ada"
+    master_url = "https://university-b.example/ada"
+    profile.records = [
+        record("Bachelor's", "University A", bachelor_url, bachelor_url, 91),
+        record("Master's", "University B", master_url, master_url, 89),
+    ]
+
+    data = export_results(results, ["name", "status"], format, provenance="field")
+    if format == "csv":
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+        headers = list(rows[0])
+    else:
+        workbook = load_workbook(io.BytesIO(data), data_only=False)
+        values = list(workbook.active.values)
+        workbook.close()
+        headers = list(values[0])
+        rows = [dict(zip(headers, values[index], strict=True)) for index in range(1, len(values))]
+
+    assert len(rows) == 2
+    assert headers.index("degree_type_source_urls") == headers.index("degree_type_confidence") + 1
+    assert [row["degree_type"] for row in rows] == ["Bachelor's", "Master's"]
+    assert [row["name"] for row in rows] == ["'+Ada Lovelace", "'+Ada Lovelace"]
+    assert rows[0]["degree_type_source_urls"] == bachelor_url
+    assert rows[1]["degree_type_source_urls"] == master_url
+    assert master_url not in rows[0]["university_name_source_urls"]
+    assert bachelor_url not in rows[1]["university_name_source_urls"]
+    assert [row["profile_link"] for row in rows] == [bachelor_url, master_url]
+
+
+def test_field_provenance_export_keeps_failed_person_and_formula_safety():
+    results = _results()
+    results.people[0].result = None
+    results.people[0].status = PersonStatus.failed
+    failed = list(
+        csv.DictReader(
+            io.StringIO(export_results(results, ["name"], "csv", provenance="field").decode("utf-8-sig"))
+        )
+    )
+    assert len(failed) == 1
+    assert failed[0]["status"] == "failed"
+    assert failed[0]["degree_type_source_urls"] == ""
+
+    sourced = _results()
+    sourced.people[0].result.profile.fields[ProfileField.full_name].sources = ["=unsafe-cell"]
+    rich = list(
+        csv.DictReader(
+            io.StringIO(export_results(sourced, ["name"], "csv", provenance="field").decode("utf-8-sig"))
+        )
+    )
+    assert rich[0]["full_name_source_urls"] == "'=unsafe-cell"
+
+
+def test_export_rejects_unknown_provenance_mode():
+    with pytest.raises(ValueError, match="Unsupported provenance mode"):
+        export_results(_results(), ["name"], "csv", provenance="claims")
 
 
 def test_export_has_each_enrichment_once_and_keeps_input_columns_unchanged():

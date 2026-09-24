@@ -12,6 +12,14 @@ field decisions, including explicit missing values. Raw claims and source proven
 survive flat field selection. Identity is assessed separately from source authority;
 final field/profile confidence is deterministic, with coverage reported separately.
 
+Reconciliation is multi-source. A field decision can cite supporting claims and URLs
+from several independent sources. Distinct supported education credentials become
+separate `ProfileRecord` objects; shared name and selected current-employment decisions
+repeat on each record, while education claims stay scoped to their credential. The
+existing flat `PersonProfile.fields` is the deterministic primary-record projection.
+This additive record list is stored in the existing profile JSON, so old profile rows
+remain readable and no database migration is required.
+
 PostgreSQL is the production database; SQLite supports development. SQLAlchemy
 transactions are short and synchronous, dispatched through thread pools during async
 work; no session spans a network await. Alembic owns schema changes. Worker leases,
@@ -47,6 +55,16 @@ and equivalent queries are deduplicated before repeated work. The first query us
 the exact person name and supplied clues. Candidate decisions are reused within a
 person attempt, and pending candidates are processed before paying for another
 search. Follow-up planning runs only when unresolved fields justify it.
+
+Every source selected in the current bounded discovery round is consumed before a
+target-confidence stop. This allows corroboration and additional credentials without
+changing the concurrent fetch window, extraction semaphore, budgets or source caps.
+
+LinkedIn and its redirect/content host trees are excluded by a shared hostname policy.
+The policy runs while parsing search citations, while admitting supplied candidates,
+and again at the network boundary. Exact hosts and subdomains are blocked; hostname
+lookalikes remain ordinary candidates. LinkedIn candidates therefore never reach the
+source advisor, retrieval, browser rendering, or claim extraction.
 
 OpenRouter citations are read from
 `choices[*].message.annotations[*].url_citation`; the nested `url` is required, while
@@ -95,6 +113,13 @@ claims with literal evidence. Deterministic grounding and identity checks run be
 reconciliation. Search citations identify acquisition targets; they do not replace
 retrieved evidence for extracted profile claims.
 
+Source-local `fact_group` values link education and employment components but are not
+global identifiers. Reconciliation merges compatible bundles across sources by their
+normalized values. It ranks current organisation/title as one relationship, computes
+confidence and coverage per record, and derives a representative URL from selected
+field contributions. The representative choice is deterministic and requires no
+additional model request.
+
 Source/advisor prompts treat seed fields, candidate snippets, and known clues as
 untrusted data. Extraction also treats source text and metadata as untrusted. JSON
 serialization separates these values from the system message; embedded role claims
@@ -117,10 +142,10 @@ Static and rendered content share downstream cleaning, Markdown, and chunk selec
 
 A bounded window overlaps selected-source fetches with processing/extraction of
 earlier sources. Results are consumed in candidate rank order, retaining deterministic
-early-stop and evidence decisions. `MAX_CONCURRENT_FETCHES` and
-`PER_DOMAIN_CONCURRENCY` remain authoritative. A later source may already have been
-fetched when an earlier one satisfies an early-stop condition; remaining tasks are
-cancelled and awaited when the window closes. A source failure is handled at its
+evidence decisions. A target-confidence result does not discard the rest of its
+already-selected discovery round; hard source/no-new-evidence limits can still close
+the window. `MAX_CONCURRENT_FETCHES` and `PER_DOMAIN_CONCURRENCY` remain authoritative,
+and every unused task is cancelled and awaited. A source failure is handled at its
 normal position without cancelling unrelated successful fetches.
 
 Within-job cache stores bounded retrieved content independent of person identity.

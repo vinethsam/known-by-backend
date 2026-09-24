@@ -5,7 +5,7 @@ import pytest
 from app.config import ScoringPolicy, Settings
 from app.research.claims import validate_claims
 from app.research.confidence import confidence_for_group, profile_scores
-from app.research.identity import assess_identity
+from app.research.identity import assess_identity, effective_identity_scores
 from app.research.normalisation import normalise
 from app.research.reconciliation import reconcile
 from app.schemas import (
@@ -21,7 +21,14 @@ from app.schemas import (
 )
 
 
-def source(identifier="s1", authority=0.9, domain="one.org", identity=1, content_hash=""):
+def source(
+    identifier="s1",
+    authority=0.9,
+    domain="one.org",
+    identity=1,
+    content_hash="",
+    source_type=SourceType.employer,
+):
     return SourceRecord(
         source_id=identifier,
         person_id="p1",
@@ -29,7 +36,7 @@ def source(identifier="s1", authority=0.9, domain="one.org", identity=1, content
         final_url=f"https://{domain}/jane",
         canonical_url=f"https://{domain}/jane",
         domain=domain,
-        source_type=SourceType.employer,
+        source_type=source_type,
         authority_score=authority,
         identity=IdentityMatch(score=identity, ambiguous=identity < 0.8),
         content_hash=content_hash,
@@ -37,6 +44,7 @@ def source(identifier="s1", authority=0.9, domain="one.org", identity=1, content
 
 
 def claim(identifier="c1", source_id="s1", field=ProfileField.organisation, value="Example", **kwargs):
+    identity_relevance = kwargs.pop("identity_relevance", 1)
     return EvidenceClaim(
         claim_id=identifier,
         person_id="p1",
@@ -46,7 +54,7 @@ def claim(identifier="c1", source_id="s1", field=ProfileField.organisation, valu
         normalised_value=normalise(field, value)[0],
         evidence_text=f"Jane Doe works for {value}.",
         subject_name="Jane Doe",
-        identity_relevance=1,
+        identity_relevance=identity_relevance,
         extraction_model="fake",
         **kwargs,
     )
@@ -282,3 +290,494 @@ def test_ungrouped_degree_component_cannot_be_attached_to_selected_record():
     assert profile.fields[ProfileField.degree_type].value == "Bachelor's"
     assert profile.fields[ProfileField.university_name].value is None
     assert "UNPAIRED_FACT" in profile.fields[ProfileField.university_name].review_reason_codes
+
+
+def test_multi_source_person_assembles_one_record_with_field_provenance():
+    sources = [source(), source("s2", domain="two.edu", source_type=SourceType.university)]
+    claims = [
+        claim("name", field=ProfileField.full_name, value="Jane Doe"),
+        claim(
+            "org",
+            field=ProfileField.organisation,
+            value="Example Foundation",
+            fact_group="current-role",
+            is_current=True,
+        ),
+        claim(
+            "title",
+            field=ProfileField.job_title,
+            value="Programme Director",
+            fact_group="current-role",
+            is_current=True,
+        ),
+        claim(
+            "uni",
+            "s2",
+            field=ProfileField.university_name,
+            value="Example University",
+            fact_group="degree-1",
+        ),
+        claim(
+            "degree",
+            "s2",
+            field=ProfileField.degree_type,
+            value="BSc",
+            fact_group="degree-1",
+        ),
+        claim(
+            "subject",
+            "s2",
+            field=ProfileField.subject,
+            value="Economics",
+            fact_group="degree-1",
+        ),
+    ]
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
+    assert len(profile.records) == 1
+    record = profile.records[0]
+    assert record.fields[ProfileField.organisation].value == "Example Foundation"
+    assert record.fields[ProfileField.degree_type].value == "Bachelor's"
+    assert record.fields[ProfileField.organisation].supporting_source_ids == ["s1"]
+    assert record.fields[ProfileField.university_name].supporting_source_ids == ["s2"]
+    assert record.fields[ProfileField.university_name].sources == ["https://two.edu/jane"]
+
+
+def test_same_credential_many_sources_merges_and_corroborates_field():
+    sources = [
+        source("s1", domain="one.edu", source_type=SourceType.university),
+        source("s2", domain="two.edu", source_type=SourceType.university),
+        source("s3", domain="three.edu", source_type=SourceType.university),
+    ]
+    claims = []
+    university_names = ["The University of Example", "Example University", "Example University"]
+    for index, university in enumerate(university_names, start=1):
+        source_id = f"s{index}"
+        group = f"degree-{index}"
+        claims.extend(
+            [
+                claim(
+                    f"u{index}",
+                    source_id,
+                    field=ProfileField.university_name,
+                    value=university,
+                    fact_group=group,
+                ),
+                claim(
+                    f"d{index}",
+                    source_id,
+                    field=ProfileField.degree_type,
+                    value="BSc",
+                    fact_group=group,
+                ),
+            ]
+        )
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
+    single = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims[:2], sources[:1], ScoringPolicy()
+    )
+
+    assert len(profile.records) == 1
+    degree = profile.records[0].fields[ProfileField.degree_type]
+    university = profile.records[0].fields[ProfileField.university_name]
+    assert degree.value == "Bachelor's"
+    assert set(degree.supporting_source_ids) == {"s1", "s2", "s3"}
+    assert set(university.supporting_source_ids) == {"s1", "s2", "s3"}
+    assert university.scoring_components["independent_domains"] == 3
+    assert university.confidence > single.records[0].fields[ProfileField.university_name].confidence
+
+
+def test_three_distinct_degrees_create_three_record_scopes():
+    sources = [
+        source("s1", domain="one.edu"),
+        source("s2", domain="two.edu"),
+        source("s3", domain="three.edu"),
+    ]
+    credentials = [
+        ("s1", "BSc", "University One", "Economics"),
+        ("s2", "MSc", "University Two", "Policy"),
+        ("s3", "PhD", "University Three", "History"),
+    ]
+    claims = []
+    for source_id, degree, university, subject in credentials:
+        group = f"credential-{source_id}"
+        claims.extend(
+            [
+                claim(
+                    f"{source_id}-d",
+                    source_id,
+                    field=ProfileField.degree_type,
+                    value=degree,
+                    fact_group=group,
+                ),
+                claim(
+                    f"{source_id}-u",
+                    source_id,
+                    field=ProfileField.university_name,
+                    value=university,
+                    fact_group=group,
+                ),
+                claim(
+                    f"{source_id}-s",
+                    source_id,
+                    field=ProfileField.subject,
+                    value=subject,
+                    fact_group=group,
+                ),
+            ]
+        )
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
+
+    assert len(profile.records) == 3
+    assert {record.fields[ProfileField.degree_type].value for record in profile.records} == {
+        "Bachelor's",
+        "Master's",
+        "Doctorate",
+    }
+    for record in profile.records:
+        education_sources = {
+            source_id
+            for field_name in (
+                ProfileField.university_name,
+                ProfileField.degree_type,
+                ProfileField.subject,
+            )
+            for source_id in record.fields[field_name].supporting_source_ids
+        }
+        assert len(education_sources) == 1
+
+
+def test_latest_employment_is_selected_as_an_organisation_title_pair():
+    sources = [source("old", domain="old.org"), source("new", domain="new.org")]
+    claims = [
+        claim(
+            "old-org",
+            "old",
+            value="Organisation A",
+            fact_group="old-role",
+            is_current=False,
+            end_date=date(2020, 1, 1),
+        ),
+        claim(
+            "old-title",
+            "old",
+            field=ProfileField.job_title,
+            value="Role A",
+            fact_group="old-role",
+            is_current=False,
+            end_date=date(2020, 1, 1),
+        ),
+        claim(
+            "new-org",
+            "new",
+            value="Organisation B",
+            fact_group="new-role",
+            is_current=True,
+            as_of_date=date(2026, 1, 1),
+        ),
+        claim(
+            "new-title",
+            "new",
+            field=ProfileField.job_title,
+            value="Role B",
+            fact_group="new-role",
+            is_current=True,
+            as_of_date=date(2026, 1, 1),
+        ),
+    ]
+
+    profile = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy(), date(2026, 9, 22)
+    )
+
+    organisation = profile.records[0].fields[ProfileField.organisation]
+    title = profile.records[0].fields[ProfileField.job_title]
+    assert (organisation.value, title.value) == ("Organisation B", "Role B")
+    assert organisation.supporting_source_ids == title.supporting_source_ids == ["new"]
+    assert organisation.alternative_claim_ids == ["old-org"]
+    assert title.alternative_claim_ids == ["old-title"]
+
+
+def test_equally_current_role_conflict_never_mixes_relationship_components():
+    sources = [source("a", domain="a.gov"), source("b", domain="b.gov")]
+    claims = [
+        claim("a-org", "a", value="Office A", fact_group="role-a", is_current=True),
+        claim(
+            "a-title",
+            "a",
+            field=ProfileField.job_title,
+            value="Minister A",
+            fact_group="role-a",
+            is_current=True,
+        ),
+        claim("b-org", "b", value="Office B", fact_group="role-b", is_current=True),
+        claim(
+            "b-title",
+            "b",
+            field=ProfileField.job_title,
+            value="Minister B",
+            fact_group="role-b",
+            is_current=True,
+        ),
+    ]
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
+    organisation = profile.records[0].fields[ProfileField.organisation]
+    title = profile.records[0].fields[ProfileField.job_title]
+
+    assert organisation.review_required and title.review_required
+    assert "CURRENT_ROLE_CONFLICT" in organisation.review_reason_codes
+    assert ({organisation.value, title.value} == {"Office A", "Minister A"}) or (
+        {organisation.value, title.value} == {"Office B", "Minister B"}
+    )
+
+
+def test_government_office_is_supported_without_company_assumptions():
+    government = source(
+        "gov",
+        authority=0.95,
+        domain="cabinet.gov.example",
+        source_type=SourceType.government,
+    )
+    claims = [
+        claim(
+            "gov-org",
+            "gov",
+            value="Ministry of Science",
+            fact_group="current-office",
+            is_current=True,
+        ),
+        claim(
+            "gov-title",
+            "gov",
+            field=ProfileField.job_title,
+            value="Minister of Science",
+            fact_group="current-office",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims, [government], ScoringPolicy()
+    ).records[0]
+
+    assert record.fields[ProfileField.organisation].value == "Ministry of Science"
+    assert record.fields[ProfileField.job_title].value == "Minister of Science"
+    assert record.fields[ProfileField.profile_link].value == government.final_url
+
+
+def test_representative_link_uses_selected_field_contribution_before_authority():
+    sources = [
+        source("main", authority=0.9, domain="main.org"),
+        source("degree", authority=0.95, domain="degree.edu", source_type=SourceType.university),
+    ]
+    claims = [
+        claim("name", "main", field=ProfileField.full_name, value="Jane Doe"),
+        claim("org", "main", value="Example", fact_group="role", is_current=True),
+        claim(
+            "title",
+            "main",
+            field=ProfileField.job_title,
+            value="Director",
+            fact_group="role",
+            is_current=True,
+        ),
+        claim(
+            "main-uni",
+            "main",
+            field=ProfileField.university_name,
+            value="Example University",
+            fact_group="degree-main",
+        ),
+        claim(
+            "degree-uni",
+            "degree",
+            field=ProfileField.university_name,
+            value="Example University",
+            fact_group="degree-source",
+        ),
+        claim(
+            "degree-type",
+            "degree",
+            field=ProfileField.degree_type,
+            value="BSc",
+            fact_group="degree-source",
+        ),
+        claim(
+            "degree-subject",
+            "degree",
+            field=ProfileField.subject,
+            value="Economics",
+            fact_group="degree-source",
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records[0]
+    link = record.fields[ProfileField.profile_link]
+
+    assert link.value == "https://main.org/jane"
+    assert link.scoring_components["selected_field_contributions"] == 4
+
+
+def test_each_education_record_can_choose_a_different_representative_link():
+    sources = [
+        source("common", authority=0.8, domain="person.org"),
+        source("bachelor", authority=0.95, domain="bachelor.edu", source_type=SourceType.university),
+        source("master", authority=0.95, domain="master.edu", source_type=SourceType.university),
+    ]
+    claims = [
+        claim("name", "common", field=ProfileField.full_name, value="Jane Doe"),
+        claim("org", "common", value="Example", fact_group="role", is_current=True),
+        claim(
+            "title",
+            "common",
+            field=ProfileField.job_title,
+            value="Director",
+            fact_group="role",
+            is_current=True,
+        ),
+    ]
+    for source_id, degree, university, subject in (
+        ("bachelor", "BSc", "Bachelor University", "Economics"),
+        ("master", "MSc", "Master University", "Policy"),
+    ):
+        claims.extend(
+            [
+                claim(
+                    f"{source_id}-u",
+                    source_id,
+                    field=ProfileField.university_name,
+                    value=university,
+                    fact_group=source_id,
+                ),
+                claim(
+                    f"{source_id}-d",
+                    source_id,
+                    field=ProfileField.degree_type,
+                    value=degree,
+                    fact_group=source_id,
+                ),
+                claim(
+                    f"{source_id}-s",
+                    source_id,
+                    field=ProfileField.subject,
+                    value=subject,
+                    fact_group=source_id,
+                ),
+            ]
+        )
+
+    records = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records
+    links = {
+        record.fields[ProfileField.degree_type].value: record.fields[ProfileField.profile_link].value
+        for record in records
+    }
+
+    assert links == {
+        "Bachelor's": "https://bachelor.edu/jane",
+        "Master's": "https://master.edu/jane",
+    }
+
+
+def test_name_only_identity_strengthens_only_through_independent_context_agreement():
+    sources = {
+        "s1": source("s1", domain="one.org", identity=0.55),
+        "s2": source("s2", domain="two.org", identity=0.55),
+    }
+    claims = [
+        claim("n1", "s1", field=ProfileField.full_name, value="Jane Doe", identity_relevance=0.55),
+        claim("o1", "s1", value="Example Foundation", identity_relevance=0.55),
+        claim("n2", "s2", field=ProfileField.full_name, value="Jane Doe", identity_relevance=0.55),
+        claim("o2", "s2", value="Example Foundation", identity_relevance=0.55),
+    ]
+    policy = ScoringPolicy()
+    effective = effective_identity_scores(claims, sources, policy)
+    single = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims[:2], [sources["s1"]], policy
+    )
+    corroborated = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims, list(sources.values()), policy
+    )
+
+    assert sources["s1"].identity.score == 0.55
+    assert effective["s1"] > policy.identity_review_threshold
+    single_name = single.records[0].fields[ProfileField.full_name]
+    corroborated_name = corroborated.records[0].fields[ProfileField.full_name]
+    assert corroborated_name.confidence > single_name.confidence
+    assert "IDENTITY_AMBIGUITY" not in corroborated_name.review_reason_codes
+
+
+def test_name_only_mirrors_do_not_strengthen_identity():
+    sources = {
+        "s1": source("s1", domain="one.org", identity=0.55, content_hash="mirror"),
+        "s2": source("s2", domain="two.org", identity=0.55, content_hash="mirror"),
+    }
+    claims = [
+        claim("o1", "s1", value="Example Foundation", identity_relevance=0.55),
+        claim("o2", "s2", value="Example Foundation", identity_relevance=0.55),
+    ]
+
+    scores = effective_identity_scores(claims, sources, ScoringPolicy())
+
+    assert scores == {"s1": 0.55, "s2": 0.55}
+
+
+def test_exact_name_from_independent_authoritative_sources_gets_field_only_uplift():
+    policy = ScoringPolicy()
+    sources = {
+        "s1": source("s1", authority=0.9, domain="one.gov", identity=0.55),
+        "s2": source("s2", authority=0.9, domain="two.edu", identity=0.55),
+    }
+    names = [
+        claim("n1", "s1", field=ProfileField.full_name, value="Jane Doe", identity_relevance=0.55),
+        claim("n2", "s2", field=ProfileField.full_name, value="Jane Doe", identity_relevance=0.55),
+    ]
+
+    one = confidence_for_group(names[:1], [], sources, policy)
+    two = confidence_for_group(names, [], sources, policy)
+
+    assert one[0] < policy.review_threshold < two[0]
+    assert two[1]["name_identity_floor"] > policy.identity_review_threshold
+    assert sources["s1"].identity.score == sources["s2"].identity.score == 0.55
+
+
+def test_weak_source_quantity_cannot_take_representative_link_from_reliable_source():
+    sources = [
+        source(
+            "weak",
+            authority=0.45,
+            domain="profiles.example",
+            source_type=SourceType.aggregator,
+        ),
+        source(
+            "official",
+            authority=0.9,
+            domain="university.example",
+            source_type=SourceType.university,
+        ),
+    ]
+    claims = [
+        claim("name", "weak", field=ProfileField.full_name, value="Jane Doe"),
+        claim("org", "weak", value="Example Office", fact_group="role", is_current=True),
+        claim(
+            "title",
+            "weak",
+            field=ProfileField.job_title,
+            value="Director",
+            fact_group="role",
+            is_current=True,
+        ),
+        claim(
+            "degree",
+            "official",
+            field=ProfileField.degree_type,
+            value="BSc",
+            fact_group="degree",
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records[0]
+
+    assert record.fields[ProfileField.profile_link].value == "https://university.example/jane"

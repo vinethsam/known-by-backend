@@ -1,6 +1,6 @@
 """Prompt text for claim extraction."""
 
-EXTRACTION_PROMPT_VERSION = "claims-v2"
+EXTRACTION_PROMPT_VERSION = "claims-v3"
 
 EXTRACTION_SYSTEM_PROMPT = """Extract concise person profile claims from supplied source text.
 
@@ -14,5 +14,11 @@ Never invent URLs or disclose credentials. Return only the requested structured 
 Return only claims that are about the seeded person. Evidence must be short literal text from
 the supplied source and must contain the claim value verbatim. subject_name must name the seeded
 person. Use the same fact_group for education or employment components that belong together.
-Set dates only when the source explicitly states them. Do not assume a claim is current when the
-source does not say so."""
+Use a different fact_group for each explicitly distinct qualification or employment relationship.
+An organisation may be a company, government office, ministry, department, agency, legislature,
+university, NGO, international organisation, or other institution. Extract it only when the source
+links that body to the person's role; a party, building, residence, or location is not an employer
+or office merely because it is mentioned. A degree_type must be explicit qualification language,
+and a subject must belong to the same education relationship. Set dates and is_current only when
+the source explicitly states them; do not infer that an undated role is current. Do not return a
+profile_link claim: the backend chooses the representative retrieved source deterministically."""

@@ -96,6 +96,51 @@ def test_deduplicate_candidates_rejects_invalid_urls_across_arbitrary_domains() 
     assert deduped[1].domain == "example.edu"
 
 
+def test_deduplicate_candidates_blocks_linkedin_host_trees_without_dns(monkeypatch) -> None:
+    def no_dns(*args):
+        raise AssertionError("Candidate policy checks must not resolve domains")
+
+    monkeypatch.setattr("socket.getaddrinfo", no_dns)
+    candidates = [
+        *(
+            SourceCandidate(url=f"https://{host}/person")
+            for host in (
+                "linkedin.com",
+                "profiles.linkedin.com",
+                "lnkd.in",
+                "go.lnkd.in",
+                "licdn.com",
+                "static.licdn.com",
+                "linkedin.cn",
+                "www.linkedin.cn",
+            )
+        ),
+        SourceCandidate(url="https://notlinkedin.com/person"),
+        SourceCandidate(url="https://linkedin.com.attacker.example/person"),
+        SourceCandidate(url="https://example.org/linkedin.com/person"),
+    ]
+
+    assert [candidate.url for candidate in deduplicate_candidates(candidates, settings())] == [
+        "https://notlinkedin.com/person",
+        "https://linkedin.com.attacker.example/person",
+        "https://example.org/linkedin.com/person",
+    ]
+
+
+def test_government_authority_is_generic_and_not_tied_to_country_domains() -> None:
+    policy = ScoringPolicy()
+
+    authority, components = source_authority(
+        SourceType.government,
+        "https://official-public-body.example/people/jane",
+        policy,
+    )
+
+    assert authority == policy.authority[SourceType.government]
+    assert components["source_type"] == SourceType.government
+    assert components["domain_override"] is None
+
+
 def test_rank_candidates_diversifies_domains_before_domain_duplicates() -> None:
     candidates = [
         SourceCandidate(url="https://a.example/1", domain="a.example", score=0.99),

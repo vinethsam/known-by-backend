@@ -62,6 +62,8 @@ _COMMON_TWO_PART_SUFFIXES = {
 }
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 _BLOCKED_SUFFIXES = (".localhost",)
+_BLOCKED_SOURCE_HOSTS = frozenset({"licdn.com", "linkedin.cn", "linkedin.com", "lnkd.in"})
+_BLOCKED_SOURCE_SUFFIXES = tuple(f".{host}" for host in sorted(_BLOCKED_SOURCE_HOSTS))
 _METADATA_IPS = {
     ipaddress.ip_address("169.254.169.254"),
     ipaddress.ip_address("100.100.100.200"),
@@ -151,7 +153,16 @@ def domain_key(url: str) -> str:
     return ".".join(labels[-2:])
 
 
+def is_blocked_source_host(host: str) -> bool:
+    """Return whether automated source access is forbidden for this exact host tree."""
+
+    normalized = _host_to_ascii(host)
+    return normalized in _BLOCKED_SOURCE_HOSTS or normalized.endswith(_BLOCKED_SOURCE_SUFFIXES)
+
+
 def _reject_blocked_hostname(host: str) -> None:
+    if is_blocked_source_host(host):
+        raise URLValidationError("URL host is blocked by the automated-source policy")
     if host in _BLOCKED_HOSTS or any(host.endswith(suffix) for suffix in _BLOCKED_SUFFIXES):
         raise URLValidationError("URL host is not public")
 

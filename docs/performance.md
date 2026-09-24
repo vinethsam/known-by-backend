@@ -55,10 +55,11 @@ resolved before acquiring network slots. These limits apply per worker process;
 adding worker replicas increases deployment-wide concurrency.
 
 Source prefetch uses a bounded window and consumes results in rank order. Fetching a
-later source can overlap processing/extraction of an earlier one. Some speculative
-fetches may finish before an early-stop decision cancels pending work; compare
-`static_fetches` as well as duration when tuning. Ranked evidence decisions and source
-caps are preserved, while unused pending tasks are cancelled and awaited.
+later source can overlap processing/extraction of an earlier one. Target confidence
+is evaluated after the selected discovery set is drained so corroboration and another
+credential are not lost. Hard source/no-new-evidence limits can still cancel pending
+work. Compare `static_fetches` as well as duration when tuning; unused tasks are always
+cancelled and awaited.
 
 `MAX_SOURCES_PER_PERSON` continues to cap processed source records. Redirect aliases
 already known before a fetch starts are skipped. An alias already in flight can add

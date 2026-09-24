@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import command
 from app.config import Settings
-from app.db.models import EvidenceClaimRow, PersonTaskRow, SourceRow, UsageRecordRow
+from app.db.models import EvidenceClaimRow, PersonTaskRow, ProfileRow, SourceRow, UsageRecordRow
 from app.db.store import Store
 from app.schemas import (
     EvidenceClaim,
@@ -20,6 +20,7 @@ from app.schemas import (
     PersonSeed,
     PersonStatus,
     ProfileField,
+    ProfileRecord,
     ResearchMetrics,
     ResearchResult,
     SourceRecord,
@@ -126,6 +127,80 @@ def test_create_claim_finish_and_results_round_trip(tmp_path):
     assert results.people[0].result.profile.profile_confidence == 91
     assert results.people[0].result.sources[0].canonical_url == "https://example.com/profile"
     assert store.get_columns(created.job_id) == ["name", "note"]
+
+
+def test_profile_records_survive_checkpoint_and_final_result_without_migration(tmp_path):
+    store = _store(tmp_path)
+    created = store.create_job([PersonSeed(full_name="Ada Lovelace")])
+    lease = store.claim_task("worker-1")
+    assert lease is not None
+    result = _result(lease.person_id)
+    result.usage[0].job_id = lease.job_id
+
+    def record(record_id, degree, university, source_url):
+        fields = {field: decision.model_copy(deep=True) for field, decision in result.profile.fields.items()}
+        fields[ProfileField.degree_type] = FieldDecision(
+            value=degree,
+            confidence=92,
+            selected_claim_id=f"{record_id}-degree",
+            supporting_claim_ids=[f"{record_id}-degree"],
+            supporting_source_ids=[f"{record_id}-source"],
+            sources=[source_url],
+            review_required=False,
+        )
+        fields[ProfileField.university_name] = FieldDecision(
+            value=university,
+            confidence=91,
+            selected_claim_id=f"{record_id}-university",
+            supporting_claim_ids=[f"{record_id}-university"],
+            supporting_source_ids=[f"{record_id}-source"],
+            sources=[source_url],
+            review_required=False,
+        )
+        return ProfileRecord(
+            record_id=record_id,
+            fields=fields,
+            profile_confidence=91.5,
+            coverage=100,
+            review_required=False,
+            status=PersonStatus.completed,
+            sources_used=1,
+        )
+
+    result.profile.records = [
+        record("bachelors", "Bachelor's", "University A", "https://a.example/ada"),
+        record("masters", "Master's", "University B", "https://b.example/ada"),
+        record("doctorate", "PhD", "University C", "https://c.example/ada"),
+    ]
+    expected = [item.model_dump(mode="json") for item in result.profile.records]
+
+    assert store.checkpoint(lease, result)
+    checkpoint = store.get_results(created.job_id).people[0].result
+    assert [item.model_dump(mode="json") for item in checkpoint.profile.records] == expected
+    with store.session_factory() as session:
+        persisted = session.get(ProfileRow, lease.person_id)
+        assert persisted.data_json["records"] == expected
+
+    result.profile.records[1].fields[ProfileField.subject] = FieldDecision(
+        value="Mathematics",
+        confidence=90,
+        sources=["https://b.example/ada"],
+        review_required=False,
+    )
+    assert store.finish_task(lease, result)
+    final = store.get_results(created.job_id).people[0].result
+    assert final.profile.records == result.profile.records
+    assert final.profile.records[1].fields[ProfileField.subject].value == "Mathematics"
+
+
+def test_legacy_profile_json_without_records_uses_empty_default():
+    profile = _result("legacy-person").profile
+    legacy = profile.model_dump(mode="json", exclude={"records"})
+
+    restored = PersonProfile.model_validate(legacy)
+
+    assert restored.records == []
+    assert restored.fields == profile.fields
 
 
 def test_lease_recovery_fencing_and_max_attempts(tmp_path):

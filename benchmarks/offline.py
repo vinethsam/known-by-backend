@@ -37,6 +37,8 @@ from app.schemas import JobResults, PersonSeed
 from app.worker import process_lease
 
 URLS = ("https://employer.example.org/directory", "https://university.example.edu/directory")
+FIXTURE_VERSION = 1
+NORMALIZATION_VERSION = 3
 
 
 def evidence(name: str) -> str:
@@ -85,10 +87,15 @@ def normalized_results(results: JobResults) -> dict:
             mode="json", exclude={"person_id", "started_at", "completed_at", "metrics"}
         )
         # Equal-scoring copies of one fact can choose a different UUID as their
-        # representative. All supporting source-linked claims remain compared.
-        for decision in profile["fields"].values():
-            selected = decision["selected_claim_id"]
-            decision["selected_claim_id"] = representatives.get(selected, selected)
+        # representative. Apply the same normalization to the legacy projection
+        # and every education-specific record. All supporting source-linked claims
+        # remain compared by the recursive source/claim reference normalization.
+        decision_sets = [profile["fields"]]
+        decision_sets.extend(record["fields"] for record in profile.get("records", []))
+        for fields in decision_sets:
+            for decision in fields.values():
+                selected = decision["selected_claim_id"]
+                decision["selected_claim_id"] = representatives.get(selected, selected)
         sources = [
             source.model_dump(
                 mode="json",
@@ -346,8 +353,8 @@ async def benchmark(sizes=(1, 5, 25, 100), *, latency_ms=2):
         with tempfile.TemporaryDirectory(prefix="knownby-offline-") as path:
             reports.append(await run_batch(size, Path(path), latency_ms=latency_ms))
     return {
-        "fixture_version": 1,
-        "normalization_version": 2,
+        "fixture_version": FIXTURE_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
         "mock_latency_ms": latency_ms,
         "batches": reports,
     }

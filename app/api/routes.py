@@ -171,10 +171,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None, fet
         return await get_job(job_id)
 
     @application.get("/v1/jobs/{job_id}/export", dependencies=secured)
-    async def export(job_id: UUID, format: Literal["csv", "xlsx"] = Query(default="csv")):
+    async def export(
+        job_id: UUID,
+        format: Literal["csv", "xlsx"] = Query(default="csv"),
+        provenance: Literal["none", "field"] = Query(default="none"),
+    ):
         results = await get_results(job_id)
         columns = await asyncio.to_thread(store.get_columns, str(job_id))
-        data = await asyncio.to_thread(export_results, results, columns, format)
+        data = await asyncio.to_thread(export_results, results, columns, format, provenance=provenance)
         mime = (
             "text/csv; charset=utf-8"
             if format == "csv"

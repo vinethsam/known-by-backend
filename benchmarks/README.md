@@ -40,12 +40,16 @@ and include awaited persistence, so their sums must not be treated as wall time.
 `--compare` checks normalized result hashes and exits unsuccessfully on a
 difference. It retains selected values, evidence, every claim's source URL,
 support/conflict/alternative sets, confidence, coverage, review reasons and
-terminal status. It excludes generated IDs, timestamps, operational prompt-version
-labels, usage metrics and retained processing buffers. Equal-scoring copies of an identical fact may choose a
-different internal representative UUID; only that representative is compared by
-its complete fact content, while the full source-linked evidence/support sets
-are still compared. Full normalized results are available in each generated
-report for investigating differences.
+terminal status for the legacy projection and every education-specific record.
+It excludes generated IDs, timestamps, operational prompt-version labels, usage
+metrics and retained processing buffers. Record lists and their nested references
+are normalized deterministically. Equal-scoring copies of an identical fact may
+choose a different internal representative UUID; only that representative is
+compared by its complete fact content, while the full source-linked
+evidence/support sets are still compared. Full normalized results are available
+in each generated report for investigating differences. Reports produced before
+normalization version 3 intentionally cannot be compared because they did not
+normalize nested education-record decisions.
 
 The checked-in measurement summary records one before/after run. It contains
 counts and hashes, not multi-megabyte duplicated result bodies. To compare another
@@ -85,9 +89,12 @@ depend on mocked response duration and disk scheduling; explicit regression
 tests enforce the configured limits and overlapping requests.
 
 Machine-readable counts, hashes and final stage totals are in
-[`baseline.json`](baseline.json) and [`after.json`](after.json). Compare current
-code with the checked-in baseline using:
+[`baseline.json`](baseline.json) and [`after.json`](after.json). A comparison
+requires matching fixture and normalization versions. When a checked-in report
+predates the current normalization, first generate a new reference report and
+then compare another run against it:
 
 ```powershell
-python -m benchmarks.offline --compare benchmarks/baseline.json --output benchmark-report.json
+python -m benchmarks.offline --output benchmark-reference.json
+python -m benchmarks.offline --compare benchmark-reference.json --output benchmark-report.json
 ```

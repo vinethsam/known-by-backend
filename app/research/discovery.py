@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy, Settings, get_settings
-from app.retrieval.urls import canonicalise_url, domain_key
+from app.retrieval.urls import canonicalise_url, domain_key, is_blocked_source_host
 from app.schemas import PersonSeed, SourceCandidate, SourceType
 
 
@@ -175,6 +175,8 @@ def _valid_url_parts(url: str) -> UrlParts | None:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         return None
     host = parsed.hostname.lower().removeprefix("www.").rstrip(".")
+    if is_blocked_source_host(host):
+        return None
     if "." not in host and host != "localhost":
         return None
     return UrlParts(url=canonical, domain=host)

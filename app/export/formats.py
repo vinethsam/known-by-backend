@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import Any
+from typing import Any, Literal
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -12,10 +12,19 @@ from openpyxl.utils import get_column_letter
 from app.schemas import JobResults, ProfileField
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+ProvenanceMode = Literal["none", "field"]
 
 
-def export_results(results: JobResults, columns: list[str], format: str) -> bytes:
-    rows, output_columns = _flatten_results(results, columns)
+def export_results(
+    results: JobResults,
+    columns: list[str],
+    format: str,
+    *,
+    provenance: ProvenanceMode = "none",
+) -> bytes:
+    if provenance not in {"none", "field"}:
+        raise ValueError("Unsupported provenance mode")
+    rows, output_columns = _flatten_results(results, columns, provenance=provenance)
     normalized = format.lower()
     if normalized == "csv":
         return _export_csv(rows, output_columns)
@@ -24,11 +33,18 @@ def export_results(results: JobResults, columns: list[str], format: str) -> byte
     raise ValueError("Unsupported export format")
 
 
-def _flatten_results(results: JobResults, columns: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+def _flatten_results(
+    results: JobResults,
+    columns: list[str],
+    *,
+    provenance: ProvenanceMode = "none",
+) -> tuple[list[dict[str, Any]], list[str]]:
     original_columns = list(columns)
     enrichments = ["status", "error_code"]
     for field in ProfileField:
         enrichments.extend([field.value, f"{field.value}_confidence"])
+        if provenance == "field":
+            enrichments.append(f"{field.value}_source_urls")
     enrichments.extend(["profile_confidence", "coverage", "review_required", "source_urls"])
     used_columns = list(original_columns)
     output_columns = original_columns + [_unique_column(name, used_columns) for name in enrichments]
@@ -36,31 +52,49 @@ def _flatten_results(results: JobResults, columns: list[str]) -> tuple[list[dict
 
     rows: list[dict[str, Any]] = []
     for person in results.people:
-        row = {column: person.original_row.get(column, "") for column in original_columns}
-        row[enrichment_map["status"]] = person.status.value
-        row[enrichment_map["error_code"]] = person.error_code or ""
         if person.result:
             profile = person.result.profile
-            for field in ProfileField:
-                decision = profile.fields.get(field)
-                row[enrichment_map[field.value]] = (
-                    decision.value if decision and decision.value is not None else ""
-                )
-                row[enrichment_map[f"{field.value}_confidence"]] = decision.confidence if decision else 0
-            row[enrichment_map["profile_confidence"]] = profile.profile_confidence
-            row[enrichment_map["coverage"]] = profile.coverage
-            row[enrichment_map["review_required"]] = profile.review_required
-            row[enrichment_map["source_urls"]] = _compact_source_urls(person.result)
+            # Historical profiles have no records. Treat their flat decision set as
+            # one record so the established export remains byte-for-byte compatible.
+            records = list(getattr(profile, "records", ()) or (profile,))
+            for record in records:
+                row = _base_row(person, original_columns, enrichment_map, status=record.status)
+                for field in ProfileField:
+                    decision = record.fields.get(field)
+                    row[enrichment_map[field.value]] = (
+                        decision.value if decision and decision.value is not None else ""
+                    )
+                    row[enrichment_map[f"{field.value}_confidence"]] = decision.confidence if decision else 0
+                    if provenance == "field":
+                        row[enrichment_map[f"{field.value}_source_urls"]] = _compact_urls(
+                            decision.sources if decision else ()
+                        )
+                row[enrichment_map["profile_confidence"]] = record.profile_confidence
+                row[enrichment_map["coverage"]] = record.coverage
+                row[enrichment_map["review_required"]] = record.review_required
+                row[enrichment_map["source_urls"]] = _compact_source_urls(person.result)
+                rows.append(row)
         else:
+            row = _base_row(person, original_columns, enrichment_map)
             for field in ProfileField:
                 row[enrichment_map[field.value]] = ""
                 row[enrichment_map[f"{field.value}_confidence"]] = ""
+                if provenance == "field":
+                    row[enrichment_map[f"{field.value}_source_urls"]] = ""
             row[enrichment_map["profile_confidence"]] = ""
             row[enrichment_map["coverage"]] = ""
             row[enrichment_map["review_required"]] = ""
             row[enrichment_map["source_urls"]] = ""
-        rows.append(row)
+            rows.append(row)
     return rows, output_columns
+
+
+def _base_row(person, original_columns, enrichment_map, *, status=None) -> dict[str, Any]:
+    row = {column: person.original_row.get(column, "") for column in original_columns}
+    effective_status = status or person.status
+    row[enrichment_map["status"]] = getattr(effective_status, "value", effective_status)
+    row[enrichment_map["error_code"]] = person.error_code or ""
+    return row
 
 
 def _unique_column(name: str, existing: list[str]) -> str:
@@ -79,12 +113,19 @@ def _unique_column(name: str, existing: list[str]) -> str:
 
 
 def _compact_source_urls(result) -> str:
+    return _compact_urls(
+        (source.canonical_url or source.final_url or source.requested_url for source in result.sources),
+        limit=10,
+    )
+
+
+def _compact_urls(values, *, limit: int | None = None) -> str:
     urls: list[str] = []
-    for source in result.sources:
-        url = source.canonical_url or source.final_url or source.requested_url
+    for value in values:
+        url = str(value)
         if url and url not in urls:
             urls.append(url)
-    return "; ".join(urls[:10])
+    return "; ".join(urls if limit is None else urls[:limit])
 
 
 def _safe_cell(value: Any) -> Any:

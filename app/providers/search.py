@@ -13,6 +13,7 @@ from app.retrieval.urls import (
     _reject_blocked_hostname,
     _validate_public_ip,
     canonicalise_url,
+    is_blocked_source_host,
 )
 from app.schemas import SourceCandidate, UsageRecord
 
@@ -130,6 +131,8 @@ class OpenRouterSearchProvider:
                         continue
                     url = canonicalise_url(raw_url)
                     host = urlsplit(url).hostname or ""
+                    if is_blocked_source_host(host):
+                        continue
                     _reject_blocked_hostname(host)
                     try:
                         literal_ip = ipaddress.ip_address(host)

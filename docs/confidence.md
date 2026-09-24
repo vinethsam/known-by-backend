@@ -1,9 +1,8 @@
-# Evidence confidence, version `evidence-v1`
+# Evidence confidence, version `evidence-v2`
 
-Scores describe the strength of the evidence used by this implementation. They are
-deterministic heuristics, **not calibrated probabilities that a fact is true**.
-Calibration against reviewed profiles is future work. Neither runtime model emits
-the final numeric field or profile confidence.
+KnownBy calculates confidence in Python. Model responses supply grounded claims and
+source classifications; they never supply confidence percentages. Scores are
+deterministic evidence-strength heuristics, not calibrated probabilities.
 
 ## Source authority
 
@@ -21,115 +20,145 @@ the final numeric field or profile confidence.
 | Social/user-generated | 0.35 |
 | Unknown | 0.25 |
 
-Model A classifies the source from discovered metadata. This is a judgment signal,
-not verification of a domain's institutional ownership. Operator domain overrides
-can correct known classifications. A longest matching hostname suffix override wins;
-`example.gov` never matches `example.gov.attacker.net`. Authority and identity remain
-separate: an official page about the wrong person is rejected.
+Authority and identity remain separate. An authoritative page about another person
+is rejected. Government classification is country-neutral and includes official
+ministries, departments, agencies, legislatures, public bodies and public-office
+biographies when the evidence supports that classification. A party, residence,
+building, location or news page is not treated as the person's organisation merely
+because it is mentioned. Operator hostname overrides still use suffix-boundary
+matching; there are no country-specific office mappings.
 
 ## Identity
 
-The complete normalized seed name must occur as a bounded phrase in selected source
-text. A different extracted `subject_name` rejects that claim. Exact name alone has
-identity strength **0.55** and requires review. Each distinct supplied identity clue
-found in the text adds **0.18**, capped at 1. Repeated copies of a clue and the person's
-own name do not count twice. Clues include organisation, country, location, university,
-subject, program year and explicitly supplied `known_attributes`.
+The complete normalized seed name must occur as a bounded phrase in source text and
+the extracted `subject_name` must match it. Exact name alone starts at **0.55**.
+Distinct supplied clues found in the page add **0.18** each. A model assessment may
+reject or constrain a match, but cannot promote it to certainty.
 
-Model A can reject an unrelated candidate or cap an ambiguous match at 0.80; it cannot
-raise an otherwise ambiguous same-name match to certainty. Identity below **0.45** is
-excluded from field decisions, and below **0.80** requires review. Missing a clue is
-not proof of a mismatch: employers and locations may change. Near-name variants are
-conservatively rejected and require an improved seed/review.
+Name-only research can strengthen identity after extraction. An explicit normalized
+organisation, title, university, degree or subject must agree on another independent
+domain with different content. The source cannot validate itself, same-domain pages
+do not help, exact mirrors do not help, and sources below directory-level authority
+do not create new identity anchors. Context bonuses are capped and leave the stored
+page-level identity assessment unchanged.
 
-Identity clues are user-supplied anchors. Facts learned during research refine search
-queries; they do not silently become trusted identity anchors. Unrelated batch columns
-stay in the original row and are never used as identity evidence.
+The full-name field has one additional narrow rule. Two independent, non-mirrored,
+explicit exact-name claims from publication-or-better sources receive a field-only
+identity floor above the review threshold. This prevents a well-corroborated name
+from remaining near the name-only baseline while avoiding trust transfer to that
+source's other facts.
 
-## Claim eligibility and normalisation
+## Claim eligibility and field quality
 
-Model B returns a validated `ExtractionResponse`, not a flat profile or biography.
-The excerpt must occur literally in the provided chunk (Unicode/whitespace insensitive),
-and the extracted raw value must occur within the excerpt. The subject must match the
-seed name. Unknown values remain absent. Dates cannot be in the future and must occur
-in the excerpt as ISO dates or supported English full-date forms. A year alone does not
-justify inventing a month/day. Dates remain model-extracted signals rather than verified
-publication metadata; reviewers can inspect the preserved excerpt and raw claim.
+Every model claim must be literal in the supplied source chunk, contain its raw value,
+name the seeded person, and use grounded dates. Raw values and excerpts remain in the
+claim ledger. Deterministic normalization handles Unicode, punctuation, conservative
+organisation suffixes, subject aliases and common degree forms.
 
-Raw values are always kept. Deterministic normalization produces comparison keys:
-case, Unicode, whitespace, punctuation, limited legal suffixes and conservative subject
-aliases. Recognized degrees map to Bachelor's, Master's or Doctorate. Unrecognized
-degree descriptions retain their comparison text with normalization certainty 0.75.
-Job-title synonyms are not merged by an LLM in this version; uncertain differences
-remain visible for review.
+Field quality is relationship-aware:
+
+- a selected name should normalize to the seed name;
+- a job title without an organisation in its source-local employment group is
+  penalized and reviewed;
+- a subject without a university or degree relationship is penalized and reviewed;
+- an unrecognized degree phrase retains its raw evidence, receives both normalization
+  and field-quality reductions, and is reviewed;
+- education fields can support a record only from the credential cluster assigned to
+  that record.
+
+The code does not use a large organisation, role or country dictionary.
 
 ## Field formula
 
-For each eligible claim `c`:
+For an eligible claim `c`:
 
 ```text
 A = source authority, 0..1
-I = min(source identity score, claim identity relevance), 0..1
+I = effective identity for this source/field, 0..1
 D = directness: explicit 1.00; implied 0.72; ambiguous 0.35
 N = normalization certainty, 0..1
+Q = deterministic field quality, 0..1
 P = 0.02 for a preferred source; otherwise 0
 R = recency factor
 
 base(c) = 0.55*A + 0.30*D + 0.15*R
-strength(c) = I * N * min(1, base(c) + P)
+strength(c) = I * N * Q * min(1, base(c) + P)
 ```
 
-For organisation and job title, `R = 2^(-age_days/730)` when an explicit as-of or
-publication date is available. Unknown recency is **0.65**. Retrieval time is never
-treated as publication time. For stable/historical education fields, names and profile
-links, `R = 1`. Claims explicitly marked former/ended are retained as alternatives,
-and do not populate a current-role field. The scoring helper gives such claims a
-0.25 recency factor if evaluated independently.
+For organisation and job title, dated evidence decays with a 730-day half-life.
+Unknown recency is **0.65**. Explicitly ended/former roles are historical alternatives
+and do not populate current fields. Education and name claims do not decay; the
+representative-link score is derived from the selected claims it summarizes.
 
-Equivalent normalized values form a support group. Let `B` be its strongest claim,
-`k` its number of independent domains/content hashes, `Imax` its maximum supporting
-identity and `C` the strongest conflicting claim:
+Equivalent normalized values form a support group. Independent support is computed
+with a maximum distinct domain/content-hash pairing. The strongest claim is the base;
+each additional independent representative adds `0.08 * its own strength`, capped at
+**0.20**. This makes strong corroboration useful without allowing many weak pages to
+outvote first-party evidence. The strongest conflicting claim applies a
+`0.25 * conflict_strength` penalty.
 
 ```text
-bonus = min(0.20, 0.08 * max(0, k - 1))
-penalty = 0.25 * strength(C)      # zero when no credible conflict exists
-field_confidence = round(100 * clamp(B + bonus*Imax - penalty, 0, 1), 2)
+field_confidence = 100 * clamp(best_strength + corroboration_bonus
+                               - conflict_penalty, 0, 1)
 ```
 
-Multiple pages on one domain do not increase `k`. The same content copied to several
-domains also counts once. A maximum domain/content pairing makes independence counts
-order-independent and ensures adding corroboration cannot reduce the score. Domain
-grouping uses a conservative common-public-suffix heuristic; it does not establish
-that separate publishers have separate ownership. Identical body hashes catch exact
-mirrors; lightly edited syndication may require manual review.
+Reasons and all components are returned with the field decision. Review remains
+required for missing evidence, meaningful conflicts, low confidence, unresolved
+identity, unpaired relationships, unrecognized degree language, unclear current-role
+selection or ambiguous education grouping. `LOW_SOURCE_COUNT` is diagnostic; one
+strong direct authoritative source can still be usable.
 
-Default candidate *retrieval ranking* is a separate weighted sum: authority 0.45,
-relevance 0.35, metadata identity 0.15, preferred status 0.05. Candidates are then
-interleaved across domains. These values help allocate the research budget; they are
-not the final field score.
+## Education records
 
-## Selection and conflicts
+`fact_group` is local to one source. Reconciliation first creates source-local
+education bundles, then merges bundles from other sources only when at least one
+normalized component agrees and no populated component conflicts.
 
-Select the support group with the best deterministic score. Preserve supporting,
-conflicting and alternative claim IDs, supporting source IDs/URLs, selected claim ID,
-and the full component dictionary. Education/employment `fact_group` values associate
-components from one source record. A flat result does not borrow a university or
-subject from a different degree to fill a gap. The backend selects one strong
-record; it does not attempt a complete career/education timeline.
+- Different normalized degree levels establish separate credentials.
+- The same degree and compatible institution/subject merge into one record and retain
+  all supporting sources.
+- Explicit source-local groups can establish distinct same-level credentials when
+  their populated details conflict.
+- Cross-source same-level evidence with incompatible details remains one ambiguous
+  review record until the relationship can be resolved.
+- Ungrouped components are never spliced together merely to fill missing fields.
 
-Different degrees, institutions or subjects can coexist. They remain alternatives
-and trigger `MULTIPLE_VALUES` review, instead of automatically becoming contradictions.
-Explicitly historical employment stays alternative evidence. Disagreeing eligible
-current claims on different sources incur the conflict penalty and `SOURCE_CONFLICT`.
-Several legitimate profile links are alternatives, not contradictory biographical facts.
+Each confirmed credential becomes a `ProfileRecord`. Name and selected current-role
+decisions are copied into every record; university, degree and subject decisions are
+scoped to that credential. No confirmed education produces one general record.
+`PersonProfile.fields` remains the deterministic primary-record projection for older
+clients, while `PersonProfile.records` is the complete additive result.
 
-Review is required for missing values, conflicts, low confidence (below **75**),
-identity ambiguity, or multiple education/employment alternatives. Additional reason
-codes include `LOW_SOURCE_COUNT`, `LOW_DIRECTNESS`, `UNKNOWN_RECENCY`,
-`OUTDATED_CURRENT_ROLE`, `UNPAIRED_FACT`, and `MISSING_FIELD`. Reasons are structured
-codes; there is no generated confidence narrative.
+## Current employment
 
-## Profile confidence versus coverage
+Organisation and job title are ranked as relationship clusters. Explicit current
+status wins first, then the newest supported observation, relationship completeness,
+evidence strength and a stable signature. Both selected fields come from the same
+cluster. Historical roles remain alternatives. Equally current, similarly supported
+relationships produce `CURRENT_ROLE_CONFLICT` and review instead of mixed fields.
+
+## Representative profile link
+
+The representative link is derived after the other six fields for each record. For
+every source, reconciliation counts distinct selected fields that source supports.
+If a directory-or-better source contributed, aggregator, social and unknown sources
+are excluded from winning. Remaining candidates are ordered by:
+
+1. selected-field contribution count;
+2. authority;
+3. directness;
+4. effective identity;
+5. relevant recency;
+6. aggregate contribution strength;
+7. canonical URL.
+
+If only weak sources exist, the best deterministic fallback is returned with
+`LOW_SOURCE_AUTHORITY` review. Because education support is record-scoped, separate
+credentials can choose separate representative links. No extra model call is used.
+
+## Profile confidence and coverage
+
+For each output record:
 
 ```text
 present = fields whose selected value is not null
@@ -137,28 +166,10 @@ profile_confidence = weighted mean(field_confidence for present fields)
 coverage = 100 * number_of_present_fields / 7
 ```
 
-All field weights default to 1. An empty profile has confidence 0 and coverage 0.
-One populated field at confidence 95 gives profile confidence **95** and coverage
-**14.29%**. Adding a second populated field at confidence 45 gives confidence **70**
-and coverage **28.57%**. Missing fields are not filled from the seed just to improve
-coverage. Every missing field still returns a decision with confidence 0.
+Coverage measures completeness and never changes a field's confidence. The legacy
+profile exposes the primary record's confidence and coverage; every `ProfileRecord`
+has its own values.
 
-## Configuration and tests
-
-All numeric evidence and candidate weights live in `ScoringPolicy` in `app/config.py`.
-Set nested environment overrides, for example:
-
-```dotenv
-SCORING__REVIEW_THRESHOLD=80
-SCORING__CORROBORATION_STEP=0.06
-SCORING__DOMAIN_OVERRIDES={"example.gov":"government"}
-```
-
-Whole policy maps can be supplied using `SCORING=<JSON object>`. Partial nested maps
-merge with defaults through explicit policy validation. Base and candidate ranking weights must sum
-to one. Invalid weights fail configuration validation.
-
-`tests/test_evidence.py` protects authority, corroboration, copied content, conflict
-penalties, identity, recency, normalization, grounding, missing values, multiple facts,
-score bounds and the separate profile/coverage formula. Provider and pipeline tests
-verify schema validation, usage accounting, and budgets around retry attempts.
+All tunable numeric weights remain in `ScoringPolicy`. Partial nested environment
+overrides merge with defaults, for example `SCORING__REVIEW_THRESHOLD=80`. Tests use
+the production reconciliation and scoring modules with deterministic source fixtures.

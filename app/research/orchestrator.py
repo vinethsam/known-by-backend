@@ -27,14 +27,12 @@ from app.research.discovery import (
     source_authority,
 )
 from app.research.extraction import extract_chunks
-from app.research.identity import assess_identity, contains_phrase
-from app.research.normalisation import comparison_key
+from app.research.identity import assess_identity, effective_identity_scores
 from app.research.reconciliation import reconcile
 from app.research.telemetry import count, person_performance, stage
 from app.retrieval.service import FetchError, RetrievedPage
 from app.retrieval.urls import canonicalise_url, domain_key
 from app.schemas import (
-    EvidenceClaim,
     PersonSeed,
     ProfileField,
     ResearchMetrics,
@@ -140,22 +138,27 @@ class ResearchOrchestrator:
 
         client.checkpoint = save
 
-        def stopped():
+        def stopped(*, include_target: bool = True):
             if metrics.sources_fetched >= settings.MAX_SOURCES_PER_PERSON:
                 metrics.stop_reason = "MAX_SOURCES"
-                return True
-            profile = result().profile
-            if all(
-                d.value is not None
-                and d.confidence >= settings.TARGET_FIELD_CONFIDENCE
-                and not d.review_required
-                for d in profile.fields.values()
-            ):
-                metrics.stop_reason = "TARGET_CONFIDENCE"
                 return True
             if no_new_claims >= settings.MAX_SOURCES_WITHOUT_NEW_CLAIMS:
                 metrics.stop_reason = "NO_NEW_CLAIMS"
                 return True
+            if include_target:
+                profile = result().profile
+                record_fields = [record.fields for record in profile.records] or [profile.fields]
+                if all(
+                    all(
+                        decision.value is not None
+                        and decision.confidence >= settings.TARGET_FIELD_CONFIDENCE
+                        and not decision.review_required
+                        for decision in fields.values()
+                    )
+                    for fields in record_fields
+                ):
+                    metrics.stop_reason = "TARGET_CONFIDENCE"
+                    return True
             return False
 
         async def process_candidate(candidate, page=None):
@@ -233,35 +236,6 @@ class ResearchOrchestrator:
                         )
                         await save()
                 claims = deduplicate_claims(claims)
-                # A link to a known, person-labelled profile is derived from the retrieved
-                # URL. A generic listing URL is never promoted into a personal profile link.
-                profile_types = {
-                    SourceType.first_party,
-                    SourceType.employer,
-                    SourceType.university,
-                    SourceType.professional_body,
-                }
-                if (
-                    source.source_type in profile_types
-                    and contains_phrase(comparison_key(source.title), comparison_key(seed.full_name))
-                    and any(
-                        c.source_id == source.source_id and c.field == ProfileField.full_name for c in claims
-                    )
-                ):
-                    claims.append(
-                        EvidenceClaim(
-                            person_id=person_id,
-                            source_id=source.source_id,
-                            field=ProfileField.profile_link,
-                            raw_value=page.final_url,
-                            normalised_value=source.canonical_url,
-                            evidence_text=source.title,
-                            evidence_location="source_title",
-                            subject_name=seed.full_name,
-                            identity_relevance=source.identity.score,
-                            extraction_model="deterministic:retrieved-profile-link",
-                        )
-                    )
                 source.processing_status = "extracted"
             except (FetchError, ValueError) as exc:
                 source.processing_status = "failed"
@@ -408,18 +382,21 @@ class ResearchOrchestrator:
             # Only I/O runs ahead. Evidence and stop decisions keep ranked source
             # order, and exiting the window cancels/awaits every speculative fetch.
             def fetch_capacity():
-                if stopped():
+                # Once a discovery round has selected sources, consume that bounded
+                # evidence set even if its first page fills the legacy primary record.
+                # Hard source/no-new-evidence limits still stop work immediately.
+                if stopped(include_target=False):
                     return 0
                 return min(
                     settings.MAX_CONCURRENT_FETCHES, settings.MAX_SOURCES_PER_PERSON - metrics.sources_fetched
                 )
 
-            if selected and not stopped():
+            if selected and not stopped(include_target=False):
                 # Recompute available slots after each source: skipped redirect
                 # aliases must not discard later selected evidence from this round.
                 async with ordered_window(selected, fetch, fetch_capacity) as fetched:
                     async for candidate, page in fetched:
-                        if stopped():
+                        if stopped(include_target=False):
                             break
                         count("candidates_selected")
                         pending_candidates.pop(candidate.url, None)
@@ -429,7 +406,7 @@ class ResearchOrchestrator:
         try:
             # Operator-configured public structured datasets may serve the whole batch.
             for plan in settings.STRUCTURED_SOURCES:
-                if stopped():
+                if stopped(include_target=False):
                     break
                 try:
                     bounded_plan = dict(
@@ -451,14 +428,14 @@ class ResearchOrchestrator:
                 SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
                 for url in seed.preferred_urls
             ]
-            if preferred and not stopped():
+            if preferred and not stopped(include_target=False):
                 await validate_and_process(preferred)
             if not stopped():
                 # Start with the exact name and supplied clues. Pay for further planning
                 # only after useful already-discovered candidates have been processed.
                 queue = deque([build_query(seed)])
                 last_planned_clues = None
-                while not stopped():
+                while not stopped(include_target=not bool(pending_candidates)):
                     if pending_candidates:
                         await validate_and_process(
                             list(pending_candidates.values()), limit=settings.SOURCES_PER_ROUND
@@ -477,6 +454,9 @@ class ResearchOrchestrator:
                         metrics.stop_reason = "MAX_SEARCH_RESULTS"
                         break
                     if not queue:
+                        identity_scores = effective_identity_scores(
+                            claims, {source.source_id: source for source in sources}, settings.SCORING
+                        )
                         clues = tuple(
                             dict.fromkeys(
                                 c.raw_value
@@ -487,18 +467,26 @@ class ResearchOrchestrator:
                                     ProfileField.university_name,
                                     ProfileField.subject,
                                 }
-                                and c.identity_relevance >= settings.SCORING.identity_review_threshold
+                                and identity_scores.get(c.source_id, c.identity_relevance)
+                                >= settings.SCORING.identity_review_threshold
                             )
                         )[:12]
                         if clues == last_planned_clues:
                             break
                         last_planned_clues = clues
+                        profile = result().profile
+                        record_fields = [record.fields for record in profile.records] or [
+                            profile.fields
+                        ]
                         unresolved = [
                             field.value
-                            for field, decision in result().profile.fields.items()
-                            if decision.value is None
-                            or decision.review_required
-                            or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
+                            for field in ProfileField
+                            if any(
+                                (decision := fields[field]).value is None
+                                or decision.review_required
+                                or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
+                                for fields in record_fields
+                            )
                         ]
                         try:
                             with stage("discovery_ms"):

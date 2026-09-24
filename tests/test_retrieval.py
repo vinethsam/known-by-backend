@@ -28,6 +28,7 @@ from app.retrieval.urls import (
     URLValidationError,
     canonicalise_url,
     domain_key,
+    is_blocked_source_host,
     validate_public_url,
 )
 
@@ -204,6 +205,46 @@ def test_domain_key_groups_subdomains():
     assert domain_key("https://people.example.com") == "example.com"
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "linkedin.com",
+        "www.linkedin.com",
+        "lnkd.in",
+        "go.lnkd.in",
+        "licdn.com",
+        "static.licdn.com",
+        "linkedin.cn",
+        "people.linkedin.cn",
+    ],
+)
+def test_automated_source_policy_blocks_linkedin_exact_hosts_and_subdomains(host):
+    assert is_blocked_source_host(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["notlinkedin.com", "linkedin.com.attacker.example", "lnkd.invalid", "example.org"],
+)
+def test_automated_source_policy_allows_hostname_lookalikes(host):
+    assert not is_blocked_source_host(host)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host",
+    ["linkedin.com", "www.linkedin.com", "lnkd.in", "licdn.com", "linkedin.cn"],
+)
+async def test_validate_public_url_blocks_linkedin_before_dns(monkeypatch, host):
+    def no_dns(*args):
+        raise AssertionError("Blocked source hosts must not be resolved")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+
+    with pytest.raises(URLValidationError, match="automated-source policy"):
+        await validate_public_url(f"https://{host}/person", settings())
+
+
 @pytest.mark.asyncio
 async def test_validate_public_url_rejects_private_dns(monkeypatch):
     public_dns(monkeypatch, "10.0.0.5")
@@ -217,6 +258,23 @@ async def test_validate_public_url_accepts_arbitrary_public_sources(monkeypatch)
     public_dns(monkeypatch)
     assert await validate_public_url("https://employer.example/alumni", settings())
     assert await validate_public_url("https://outside.example/profile", settings())
+
+
+@pytest.mark.asyncio
+async def test_browser_route_rejects_redirect_to_linkedin_before_request(monkeypatch):
+    public_dns(monkeypatch)
+    requests = []
+
+    def handler(request):
+        requests.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://www.linkedin.com/in/jane"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        route_client = BrowserRouteHTTPClient(settings(), client)
+        with pytest.raises(FetchError, match="automated-source policy"):
+            await route_client.fetch("https://allowed.example/profile")
+
+    assert requests == ["https://allowed.example/profile"]
 
 
 @pytest.mark.asyncio

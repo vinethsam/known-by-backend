@@ -9,7 +9,8 @@ persisted profiles with provenance, explainable confidence, and separate coverag
 ```text
 Person / Batch → Durable job → OpenRouter discovery → Source validation
   → Cloudflare static retrieval / Playwright fallback → Markdown
-  → Claim extraction → Reconciliation → Deterministic confidence
+  → Claim extraction → Multi-source reconciliation → Deterministic confidence
+  → Education-scoped records with field provenance
   → Persisted profile → JSON / CSV / XLSX
 ```
 
@@ -38,13 +39,18 @@ of being reported as an infrastructure failure.
 - Single-person research and CSV/TSV/XLSX batch enrichment with original rows preserved.
 - Iterative public-source discovery, identity checks, canonical URL deduplication,
   bounded retrieval, and within-job content caching.
-- Seven profile fields: name, organisation, job title, university, degree, subject,
-  and profile link, with claim-level evidence and source provenance.
+- Multi-source selection of seven profile fields: name, current organisation, current
+  job title, university, degree, subject, and a representative profile link.
+- Field-level supporting URLs, claim IDs, conflicts, confidence, and review reasons.
+  Distinct supported education credentials produce separate records while shared
+  identity and current-employment decisions repeat safely.
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
   coverage remains distinct from confidence. See [scoring rules](docs/confidence.md).
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
-- Rich JSON results and CSV/XLSX exports with spreadsheet formula protection.
+- Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. The
+  default export stays compact; an additive [field-provenance mode](docs/exports.md)
+  includes the supporting URLs for every selected field.
 
 Trial runs use the production pipeline and settings. No dataset or sample-source
 allowlist restricts discovery. Automated tests replace external calls with fixtures.
@@ -88,6 +94,10 @@ installation. It does not make paid provider calls or prove Chromium can launch.
 Verify the existing Cloudflare Worker's upstream URL/redirect protections and
 Chromium sandbox support on the target runtime.
 
+The multi-source/education-record contract is stored in the existing profile JSON;
+it adds no Alembic migration. Keep the normal `alembic upgrade head` pre-deploy step
+and redeploy the web and worker from the same revision.
+
 ## Configuration
 
 Environment-variable names are grouped below. [.env.example](.env.example) is the
@@ -114,6 +124,11 @@ positive configured values are forwarded.
 Worker crash recovery is separately attempt-limited. Use plain model IDs and ensure
 OpenRouter workspace settings permit Exa without forced legacy web plugins.
 
+LinkedIn and LinkedIn-owned redirect/content hosts are excluded before source
+validation and again at the network boundary. They never enter automated static or
+browser retrieval, extraction, or evidence records. The separately deployed static
+Worker must enforce the same deny policy before each redirect hop.
+
 Provider, transport, retrieval, and structured-response failures that leave zero
 coverage remain failed tasks. Their specific safe error code is stored on the terminal
 task instead of being collapsed to a generic research failure; a profile with partial
@@ -130,6 +145,8 @@ process does not read attempt records written by the newer contract.
 ## Performance and input safety
 
 Selected sources use bounded fetch overlap and are consumed in their ranked order.
+Once a bounded discovery round selects a set, that set is consumed before a
+confidence stop so later pages can corroborate fields or establish another credential.
 Independent extraction chunks can overlap when their complete retry reservations fit
 the person budget; otherwise they run serially. Canonical URL caching shares retrieved
 public content within a job, while claims remain specific to each person. Existing
@@ -160,7 +177,7 @@ available at `/docs`; health and readiness are public.
 | GET | `/v1/jobs/{job_id}` | Status and progress |
 | GET | `/v1/jobs/{job_id}/results` | Profiles, evidence, and original rows |
 | POST | `/v1/jobs/{job_id}/cancel` | Cancel outstanding work |
-| GET | `/v1/jobs/{job_id}/export` | Export using `format=csv` or `format=xlsx` |
+| GET | `/v1/jobs/{job_id}/export` | Export using `format=csv|xlsx`; add `provenance=field` for field source URLs |
 | POST | `/process` | Preserved static URL-to-Markdown interface |
 
 ## Status and limitations

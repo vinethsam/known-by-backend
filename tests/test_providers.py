@@ -8,7 +8,9 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
+from app.prompts.source_advisor import SOURCE_ADVISOR_SYSTEM_PROMPT
 from app.providers.openrouter import (
+    WEB_SEARCH_SYSTEM_PROMPT,
     OpenRouterClient,
     OpenRouterError,
     strict_json_schema,
@@ -37,6 +39,18 @@ def settings(**overrides) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def test_source_prompts_exclude_linkedin_and_cover_public_sector_sources() -> None:
+    advisor_prompt = SOURCE_ADVISOR_SYSTEM_PROMPT.casefold()
+    search_prompt = WEB_SEARCH_SYSTEM_PROMPT.casefold()
+
+    assert "linkedin" in advisor_prompt and "linkedin" in search_prompt
+    assert all(
+        term in advisor_prompt for term in ("government", "ministr", "agenc", "legislatur", "public bod")
+    )
+    assert "regardless of country or domain suffix" in advisor_prompt
+    assert "political-party" in advisor_prompt
 
 
 class TinyResponse(Contract):

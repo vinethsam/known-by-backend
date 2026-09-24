@@ -108,7 +108,7 @@ async def test_shared_openrouter_search_uses_hard_caps_and_citation_metadata():
     assert "response_format" not in body and "plugins" not in body
     assert json.loads(body["messages"][1]["content"])["query"] == "Jane Doe fellowship"
     assert len(before) == len(usage) == 1
-    assert before[0]["prompt_version"] == "web-discovery-v2"
+    assert before[0]["prompt_version"] == "web-discovery-v3"
     assert usage[0].prompt_tokens == 21 and usage[0].completion_tokens == 13
     assert usage[0].web_search_requests == 1 and usage[0].cost == 0.007
     assert usage[0].role == "source" and usage[0].success
@@ -203,6 +203,40 @@ def test_citations_canonicalise_deduplicate_filter_and_bound_results_without_dns
     assert [r.url for r in results] == ["https://example.org/jane", "https://other.example/jane"]
     assert len(results[0].title) == 300 and len(results[0].snippet) == 700
     assert results[1].title == results[1].snippet == ""
+
+
+def test_linkedin_citations_are_filtered_before_the_result_limit_without_dns(monkeypatch):
+    def no_dns(*args):
+        raise AssertionError("Discovery must not resolve citation domains")
+
+    monkeypatch.setattr("socket.getaddrinfo", no_dns)
+    annotations = [
+        citation(f"https://{host}/person")
+        for host in (
+            "linkedin.com",
+            "profiles.linkedin.com",
+            "lnkd.in",
+            "go.lnkd.in",
+            "licdn.com",
+            "static.licdn.com",
+            "linkedin.cn",
+            "www.linkedin.cn",
+        )
+    ]
+    annotations.extend(
+        [
+            citation("https://notlinkedin.com/person"),
+            citation("https://linkedin.com.attacker.example/person"),
+        ]
+    )
+    data = {"choices": [{"message": {"annotations": annotations}}]}
+
+    results = OpenRouterSearchProvider._parse_results(data, 2)
+
+    assert [candidate.url for candidate in results] == [
+        "https://notlinkedin.com/person",
+        "https://linkedin.com.attacker.example/person",
+    ]
 
 
 @pytest.mark.asyncio

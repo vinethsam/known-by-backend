@@ -1,15 +1,23 @@
 # Validation record
 
-Validated locally for the performance/security hardening pass on **2026-09-21–22**, Windows, Python
-**3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API, queue,
-worker, providers, and settings; automated tests replace external network responses
-without a second research pipeline.
+The multi-source product-model change was completed on **2026-09-24**. At the user's
+explicit direction, its final full-suite and benchmark runs were skipped. The tests in
+this revision cover multi-source reconciliation, education records, record-specific
+provenance/profile links, current-role pairing, name-only identity strengthening,
+public-sector sources, LinkedIn blocking, exports, persistence and benchmark
+normalization. CI or the deployment pipeline should run them before release.
 
-## Executed checks
+The most recent complete local baseline, before this product-model change, was the
+performance/security hardening pass on **2026-09-21–22**, Windows, Python **3.14.7**.
+Docker and CI target Python 3.13. Trial jobs use the production API, queue, worker,
+providers, and settings; fixtures replace external network responses without a second
+research pipeline.
+
+## Previous complete baseline
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **244 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Full test suite | **244 passed, 5 skipped** before the current product-model change; PostgreSQL integration requires `TEST_POSTGRES_URL` |
 | Ruff lint and formatting | Passed |
 | Python compilation and application/compatibility imports | Passed |
 | Dependency consistency | No broken requirements |
@@ -21,6 +29,17 @@ without a second research pipeline.
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Current product-model coverage
+
+The current revision adds deterministic fixtures for the requested cases A–K:
+multi-source field assembly and provenance, independent university corroboration,
+conflicts, three credentials, same-credential merging, latest paired employment,
+government offices, contribution-based representative links, record-specific links,
+name-only cross-source identity, and LinkedIn exclusion before advisor/retrieval.
+Additional checks cover legacy/new profile JSON, multi-row rich exports, source-column
+isolation, weak-source link gating, mirrored evidence, and nested benchmark
+normalization. These checks were not rerun after the final edits at the user's request.
 
 ## Hardening regression coverage
 
@@ -89,7 +108,9 @@ offline and make no paid OpenRouter calls.
   OpenRouter workspace settings permit Exa and no forced legacy web plugin adds
   implicit search. Search costs are additional to model tokens.
 - **Cloudflare protections:** the separately deployed Worker must enforce upstream
-  public-address and redirect checks; its code is outside this repository.
+  public-address, redirect, and LinkedIn host-policy checks before every hop; its code
+  is outside this repository. Backend final-URL validation cannot undo a request that
+  an external Worker already followed.
 - **Chromium:** local browser fixtures do not establish real launch/rendering or
   sandbox compatibility. Verify both on the deployment host when fallback is enabled.
 - **Docker and Railway:** no local Docker build or Railway deployment was executed.
