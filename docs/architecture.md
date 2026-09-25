@@ -4,6 +4,15 @@ KnownBy starts with a person seed, not a target website. FastAPI validates input
 creates durable jobs; a separate async worker discovers, retrieves, and reconciles
 public evidence. Trial runs use these same production modules and settings.
 
+CSV/TSV/XLSX uploads are flexible seed schemas. After existing file, archive, row,
+column, cell, Unicode, and control-character validation, the importer normalizes each
+header once and applies a centralized deterministic alias/pattern table. A usable
+person-name mapping is required; organisation, role, country/location, university,
+subject, and program-year mappings populate existing `PersonSeed` clues. Unknown or
+ambiguous optional columns are not guessed. Original rows and row indexes remain the
+traceability mechanism. Spreadsheet values are seed clues only and never become web
+evidence, provenance, or confidence inputs by themselves.
+
 ## Data and persistence
 
 Shared contracts live in `app/schemas/__init__.py`. IDs are UUID strings, timestamps

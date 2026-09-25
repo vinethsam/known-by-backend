@@ -11,9 +11,7 @@ VOLATILE_FIELDS = {ProfileField.organisation, ProfileField.job_title}
 EDUCATION_FIELDS = {ProfileField.university_name, ProfileField.degree_type, ProfileField.subject}
 
 
-def claim_tie_key(
-    claim: EvidenceClaim, sources: dict[str, SourceRecord]
-) -> tuple[str, ...]:
+def claim_tie_key(claim: EvidenceClaim, sources: dict[str, SourceRecord]) -> tuple[str, ...]:
     """Stable evidence ordering that never depends on generated UUIDs."""
 
     source = sources[claim.source_id]
@@ -32,9 +30,7 @@ def claim_tie_key(
     )
 
 
-def _independent_pairs(
-    claims: list[EvidenceClaim], sources: dict[str, SourceRecord]
-) -> dict[str, str]:
+def _independent_pairs(claims: list[EvidenceClaim], sources: dict[str, SourceRecord]) -> dict[str, str]:
     """Return a maximum distinct content-hash -> domain pairing."""
 
     domain_hashes: dict[str, set[str]] = {}
@@ -125,15 +121,12 @@ def confidence_for_group(
             for claim in support
             if claim.directness == "explicit"
             and claim.normalisation_certainty >= 0.9
-            and sources[claim.source_id].authority_score
-            >= policy.authority[SourceType.publication]
+            and sources[claim.source_id].authority_score >= policy.authority[SourceType.publication]
         ]
         if len(_independent_pairs(authoritative_exact, sources)) >= 2:
             # This uplift applies only to the exact-name field. It does not promote
             # either source into a trusted identity anchor for unrelated facts.
-            name_identity_floor = min(
-                1.0, policy.identity_review_threshold + policy.corroboration_step / 2
-            )
+            name_identity_floor = min(1.0, policy.identity_review_threshold + policy.corroboration_step / 2)
             for claim in authoritative_exact:
                 field_identities[claim.source_id] = max(
                     field_identities.get(claim.source_id, 0), name_identity_floor
@@ -167,10 +160,13 @@ def confidence_for_group(
         content_hash = source.content_hash or source.source_id
         pair = (source.domain, content_hash)
         candidate = (strength, claim)
-        if pair not in pair_scores or candidate[0] > pair_scores[pair][0] or (
-            candidate[0] == pair_scores[pair][0]
-            and claim_tie_key(candidate[1], sources)
-            < claim_tie_key(pair_scores[pair][1], sources)
+        if (
+            pair not in pair_scores
+            or candidate[0] > pair_scores[pair][0]
+            or (
+                candidate[0] == pair_scores[pair][0]
+                and claim_tie_key(candidate[1], sources) < claim_tie_key(pair_scores[pair][1], sources)
+            )
         ):
             pair_scores[pair] = candidate
     # Maximum distinct domain/content pairing avoids order-dependent duplicate counting:
@@ -208,9 +204,10 @@ def confidence_for_group(
         reasons.append("LOW_SOURCE_COUNT")
     if conflicts:
         reasons.append("SOURCE_CONFLICT")
-    if components["identity"] < policy.identity_review_threshold or sources[
-        selected.source_id
-    ].identity.signals.get("model_relevance") == "ambiguous":
+    if (
+        components["identity"] < policy.identity_review_threshold
+        or sources[selected.source_id].identity.signals.get("model_relevance") == "ambiguous"
+    ):
         reasons.append("IDENTITY_AMBIGUITY")
     if selected.directness != "explicit":
         reasons.append("LOW_DIRECTNESS")

@@ -11,8 +11,8 @@ from app.config import ScoringPolicy
 from app.research.confidence import (
     EDUCATION_FIELDS,
     VOLATILE_FIELDS,
-    claim_tie_key,
     claim_strength,
+    claim_tie_key,
     confidence_for_group,
     profile_scores,
 )
@@ -63,9 +63,7 @@ def _value_key(field_name: ProfileField, value: str) -> str:
     return " ".join(tokens)
 
 
-def _build_bundles(
-    claims: list[EvidenceClaim], fields: set[ProfileField]
-) -> list[_FactBundle]:
+def _build_bundles(claims: list[EvidenceClaim], fields: set[ProfileField]) -> list[_FactBundle]:
     bundles: dict[tuple[str, str], _FactBundle] = {}
     for claim in claims:
         if claim.field not in fields:
@@ -106,18 +104,12 @@ def _values(claims: list[EvidenceClaim]) -> dict[ProfileField, set[str]]:
     return values
 
 
-def _overlap_and_conflict(
-    left: list[EvidenceClaim], right: list[EvidenceClaim]
-) -> tuple[int, int]:
+def _overlap_and_conflict(left: list[EvidenceClaim], right: list[EvidenceClaim]) -> tuple[int, int]:
     left_values, right_values = _values(left), _values(right)
     shared_fields = left_values.keys() & right_values.keys()
-    overlap = sum(
-        bool(left_values[field_name] & right_values[field_name])
-        for field_name in shared_fields
-    )
+    overlap = sum(bool(left_values[field_name] & right_values[field_name]) for field_name in shared_fields)
     conflict = sum(
-        bool(left_values[field_name].isdisjoint(right_values[field_name]))
-        for field_name in shared_fields
+        bool(left_values[field_name].isdisjoint(right_values[field_name])) for field_name in shared_fields
     )
     return overlap, conflict
 
@@ -146,8 +138,7 @@ def _bundle_strength(
 
 def _cluster_signature(cluster: _EvidenceCluster) -> str:
     parts = sorted(
-        f"{claim.field.value}:{_value_key(claim.field, claim.normalised_value)}"
-        for claim in cluster.claims
+        f"{claim.field.value}:{_value_key(claim.field, claim.normalised_value)}" for claim in cluster.claims
     )
     return "|".join(parts)
 
@@ -204,9 +195,7 @@ def _education_clusters(
             clusters.append(_EvidenceCluster(bundles=[bundle]))
             continue
 
-        candidates = [
-            cluster for cluster in clusters if not _definitely_distinct_education(bundle, cluster)
-        ]
+        candidates = [cluster for cluster in clusters if not _definitely_distinct_education(bundle, cluster)]
         candidates.sort(
             key=lambda cluster: (
                 -_overlap_and_conflict(bundle.claims, cluster.claims)[0],
@@ -227,10 +216,7 @@ def _education_clusters(
 
     def cluster_order(cluster: _EvidenceCluster) -> tuple[float, str]:
         strength = max(
-            (
-                _bundle_strength(bundle, sources, policy, today, identities)
-                for bundle in cluster.bundles
-            ),
+            (_bundle_strength(bundle, sources, policy, today, identities) for bundle in cluster.bundles),
             default=0,
         )
         return -strength, _cluster_signature(cluster)
@@ -276,11 +262,7 @@ def _quality_for_claim(
 ) -> tuple[float, str | None]:
     related = relation_fields.get(claim.claim_id, {claim.field})
     if claim.field == ProfileField.full_name:
-        return (
-            (1, None)
-            if name_key(claim.raw_value) == name_key(seed.full_name)
-            else (0.65, "NAME_VARIANT")
-        )
+        return (1, None) if name_key(claim.raw_value) == name_key(seed.full_name) else (0.65, "NAME_VARIANT")
     if claim.field == ProfileField.job_title and ProfileField.organisation not in related:
         return 0.65, "UNPAIRED_FACT"
     if claim.field == ProfileField.subject and not related.intersection(
@@ -352,9 +334,7 @@ def _decision(
     # A concurrent role may disagree about the title while corroborating its organisation.
     # Preserve that agreement without using the other role's mismatched components.
     matching_external = [
-        claim
-        for claim in conflicts
-        if _value_key(field_name, claim.normalised_value) == chosen_value
+        claim for claim in conflicts if _value_key(field_name, claim.normalised_value) == chosen_value
     ]
     support = sorted(
         _unique_claims([*support, *matching_external]),
@@ -470,8 +450,7 @@ def _employment_decisions(
         return explicitly_current, observed.toordinal(), completeness, strength
 
     clusters.sort(
-        key=lambda cluster: tuple(-value for value in rank(cluster))
-        + (_cluster_signature(cluster),)
+        key=lambda cluster: tuple(-value for value in rank(cluster)) + (_cluster_signature(cluster),)
     )
     selected = clusters[0]
     selected_rank = rank(selected)
@@ -481,8 +460,7 @@ def _employment_decisions(
         candidate_rank = rank(cluster)
         same_current_state = candidate_rank[0] == selected_rank[0]
         same_observation = (
-            candidate_rank[1] == selected_rank[1]
-            and abs(candidate_rank[3] - selected_rank[3]) <= 0.1
+            candidate_rank[1] == selected_rank[1] and abs(candidate_rank[3] - selected_rank[3]) <= 0.1
         )
         if same_current_state and same_observation:
             unresolved.append(cluster)
@@ -549,9 +527,13 @@ def _representative_link(
             if strength < policy.identity_minimum:
                 continue
             existing = per_source_fields[claim.source_id].get(field_name)
-            if existing is None or strength > existing[0] or (
-                strength == existing[0]
-                and claim_tie_key(claim, sources) < claim_tie_key(existing[1], sources)
+            if (
+                existing is None
+                or strength > existing[0]
+                or (
+                    strength == existing[0]
+                    and claim_tie_key(claim, sources) < claim_tie_key(existing[1], sources)
+                )
             ):
                 per_source_fields[claim.source_id][field_name] = (strength, claim)
 
@@ -659,11 +641,7 @@ def _record_id(fields: dict[ProfileField, FieldDecision]) -> str:
         for field_name in sorted(EDUCATION_FIELDS, key=lambda value: value.value)
         if fields[field_name].value
     )
-    suffix = (
-        hashlib.sha256(education.encode("utf-8")).hexdigest()[:16]
-        if education
-        else "general"
-    )
+    suffix = hashlib.sha256(education.encode("utf-8")).hexdigest()[:16] if education else "general"
     return "general" if suffix == "general" else f"education:{suffix}"
 
 
@@ -683,14 +661,11 @@ def reconcile(
         for claim in claims
         if claim.source_id in sources
         and not sources[claim.source_id].identity.rejected
-        and min(claim.identity_relevance, sources[claim.source_id].identity.score)
-        >= policy.identity_minimum
+        and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
     ]
     identities = effective_identity_scores(accepted, sources, policy)
     relation_fields = _relation_fields_by_claim(accepted)
-    quality_pairs = {
-        claim.claim_id: _quality_for_claim(claim, seed, relation_fields) for claim in accepted
-    }
+    quality_pairs = {claim.claim_id: _quality_for_claim(claim, seed, relation_fields) for claim in accepted}
     qualities = {claim_id: quality for claim_id, (quality, _) in quality_pairs.items()}
     quality_reasons = {
         claim_id: reason for claim_id, (_, reason) in quality_pairs.items() if reason is not None
@@ -785,8 +760,7 @@ def reconcile(
     primary = records[0]
     overall_review = any(record.review_required for record in records)
     legacy_fields = {
-        field_name: decision.model_copy(deep=True)
-        for field_name, decision in primary.fields.items()
+        field_name: decision.model_copy(deep=True) for field_name, decision in primary.fields.items()
     }
     # Preserve the old flat projection's visibility of unselected education evidence,
     # while record-scoped decisions remain isolated from other credentials.

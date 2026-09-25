@@ -229,7 +229,7 @@ def test_reconciliation_preserves_conflicts_and_missing_fields():
         "p1",
         PersonSeed(full_name="Jane Doe"),
         [first, other],
-        [source(), source("s2", authority=0.4, domain="two.org")],
+        [source(), source("s2", authority=0.9, domain="two.org")],
         ScoringPolicy(),
     )
     field = profile.fields[ProfileField.organisation]
@@ -374,9 +374,7 @@ def test_same_credential_many_sources_merges_and_corroborates_field():
         )
 
     profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
-    single = reconcile(
-        "p1", PersonSeed(full_name="Jane Doe"), claims[:2], sources[:1], ScoringPolicy()
-    )
+    single = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims[:2], sources[:1], ScoringPolicy())
 
     assert len(profile.records) == 1
     degree = profile.records[0].fields[ProfileField.degree_type]
@@ -559,9 +557,9 @@ def test_government_office_is_supported_without_company_assumptions():
         ),
     ]
 
-    record = reconcile(
-        "p1", PersonSeed(full_name="Jane Doe"), claims, [government], ScoringPolicy()
-    ).records[0]
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [government], ScoringPolicy()).records[
+        0
+    ]
 
     assert record.fields[ProfileField.organisation].value == "Ministry of Science"
     assert record.fields[ProfileField.job_title].value == "Minister of Science"
@@ -694,12 +692,8 @@ def test_name_only_identity_strengthens_only_through_independent_context_agreeme
     ]
     policy = ScoringPolicy()
     effective = effective_identity_scores(claims, sources, policy)
-    single = reconcile(
-        "p1", PersonSeed(full_name="Jane Doe"), claims[:2], [sources["s1"]], policy
-    )
-    corroborated = reconcile(
-        "p1", PersonSeed(full_name="Jane Doe"), claims, list(sources.values()), policy
-    )
+    single = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims[:2], [sources["s1"]], policy)
+    corroborated = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, list(sources.values()), policy)
 
     assert sources["s1"].identity.score == 0.55
     assert effective["s1"] > policy.identity_review_threshold

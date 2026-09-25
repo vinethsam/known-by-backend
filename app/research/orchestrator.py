@@ -475,9 +475,7 @@ class ResearchOrchestrator:
                             break
                         last_planned_clues = clues
                         profile = result().profile
-                        record_fields = [record.fields for record in profile.records] or [
-                            profile.fields
-                        ]
+                        record_fields = [record.fields for record in profile.records] or [profile.fields]
                         unresolved = [
                             field.value
                             for field in ProfileField

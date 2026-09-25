@@ -37,6 +37,9 @@ of being reported as an infrastructure failure.
 ## Core capabilities
 
 - Single-person research and CSV/TSV/XLSX batch enrichment with original rows preserved.
+  Batch headers are inferred deterministically across common space, snake-case,
+  kebab-case, camelCase, and punctuation variants; only a usable person-name column
+  is required.
 - Iterative public-source discovery, identity checks, canonical URL deduplication,
   bounded retrieval, and within-job content caching.
 - Multi-source selection of seven profile fields: name, current organisation, current
@@ -179,6 +182,14 @@ available at `/docs`; health and readiness are public.
 | POST | `/v1/jobs/{job_id}/cancel` | Cancel outstanding work |
 | GET | `/v1/jobs/{job_id}/export` | Export using `format=csv|xlsx`; add `provenance=field` for field source URLs |
 | POST | `/process` | Preserved static URL-to-Markdown interface |
+
+Batch uploads are seed data and may use headers such as `alumni_full_name`,
+`memberName`, `company`, `government_office`, `role`, `country_of_origin`, or
+`university_name`. The importer infers one mapping per file and passes recognized
+context into the normal research seed. Unknown columns remain in the preserved input
+row but do not influence research. Equally strong name candidates return an explicit
+ambiguity error; a missing-name error lists the observed headers. The optional legacy
+`name_column` form field remains available as an explicit override.
 
 ## Status and limitations
 

@@ -255,9 +255,7 @@ async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_linkedin_search_result_never_reaches_advisor_retrieval_or_evidence(
-    tmp_path, monkeypatch
-):
+async def test_linkedin_search_result_never_reaches_advisor_retrieval_or_evidence(tmp_path, monkeypatch):
     settings = configured(tmp_path, SOURCES_PER_ROUND=2)
     store = migrated_store(settings)
     job = store.create_job([PersonSeed(full_name="Jane Doe")])
@@ -651,7 +649,6 @@ def test_api_batch_and_export_contracts(tmp_path, kind):
             "/v1/research/batch",
             headers=AUTH,
             files={"file": (f"people.{kind}", content)},
-            data={"name_column": "Person"},
         )
         assert response.status_code == 202, response.text
         job_id = response.json()["job_id"]

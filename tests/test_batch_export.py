@@ -9,7 +9,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from app.config import Settings
-from app.export.batch import BatchParseError, parse_batch
+from app.export.batch import BatchParseError, normalize_header, parse_batch
 from app.export.formats import export_results
 from app.schemas import (
     FieldDecision,
@@ -51,12 +51,141 @@ def test_parse_csv_preserves_rows_columns_and_row_indexes():
 
 
 @pytest.mark.parametrize(
+    "header",
+    [
+        "Full Name",
+        "fullname",
+        "full_name",
+        "FULL-NAME",
+        "fullName",
+        "full.name",
+        "  Full---Name  ",
+        "Ｆｕｌｌ　Ｎａｍｅ",
+    ],
+)
+def test_header_normalization_handles_common_schema_styles(header):
+    assert normalize_header(header) == "full name"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Full Name",
+        "fullname",
+        "alumni_full_name",
+        "memberName",
+        "candidate_name",
+        "person",
+        "official-name",
+    ],
+)
+def test_flexible_person_name_aliases_create_seeds(header):
+    batch = parse_batch(f"{header}\nAda Lovelace\n".encode(), "people.csv", None, _settings())
+
+    assert [seed.full_name for seed in batch.seeds] == ["Ada Lovelace"]
+
+
+@pytest.mark.parametrize(
+    ("context_header", "value", "seed_field"),
+    [
+        ("company_name", "Analytical Engines", "organisation"),
+        ("university_name", "Example University", "university_name"),
+        ("government_office", "Ministry of Science", "organisation"),
+        ("job_title", "Director", "job_title"),
+        ("country_of_origin", "Kenya", "country"),
+        ("currentLocation", "Nairobi", "location"),
+        ("field_of_study", "Economics", "subject"),
+        ("graduation_year", "2020", "program_year"),
+    ],
+)
+def test_context_headers_map_to_the_correct_seed_field(context_header, value, seed_field):
+    content = f"candidate_name,{context_header}\nJane Doe,{value}\n".encode()
+    seed = parse_batch(content, "people.csv", None, _settings()).seeds[0]
+
+    assert seed.full_name == "Jane Doe"
+    assert getattr(seed, seed_field) == value
+    if context_header in {"company_name", "university_name"}:
+        wrong_field = "university_name" if seed_field == "organisation" else "organisation"
+        assert getattr(seed, wrong_field) is None
+
+
+def test_flexible_schema_uses_context_and_ignores_unknown_columns():
+    content = b"name,company,country,favorite_colour,random_code\nJane Doe,Ministry X,Kenya,blue,ABC-123\n"
+    batch = parse_batch(content, "people.csv", None, _settings())
+    seed = batch.seeds[0]
+
+    assert seed.full_name == "Jane Doe"
+    assert seed.organisation == "Ministry X"
+    assert seed.country == "Kenya"
+    assert seed.known_attributes == {}
+    assert batch.rows[0]["favorite_colour"] == "blue"
+    assert batch.rows[0]["random_code"] == "ABC-123"
+
+
+def test_more_specific_person_name_alias_beats_generic_name():
+    batch = parse_batch(
+        b"name,alumni_full_name\nAda,Adelaide Lovelace\n",
+        "people.csv",
+        None,
+        _settings(),
+    )
+
+    assert batch.seeds[0].full_name == "Adelaide Lovelace"
+
+
+def test_explicit_name_column_override_remains_backward_compatible():
+    batch = parse_batch(
+        b"display_label,company\nAda Lovelace,Analytical Engines\n",
+        "people.csv",
+        "display_label",
+        _settings(),
+    )
+
+    assert batch.seeds[0].full_name == "Ada Lovelace"
+    assert batch.seeds[0].organisation == "Analytical Engines"
+
+
+def test_equal_person_name_candidates_report_the_headers():
+    with pytest.raises(BatchParseError, match="ambiguous name columns") as error:
+        parse_batch(
+            b"candidate_name,member_name\nJane Doe,Jane Doe\n",
+            "people.csv",
+            None,
+            _settings(),
+        )
+
+    assert "candidate_name" in str(error.value)
+    assert "member_name" in str(error.value)
+
+
+def test_missing_name_error_lists_observed_headers():
+    with pytest.raises(BatchParseError, match="missing a name column") as error:
+        parse_batch(
+            b"company_name,random_code\nExample Ltd,123\n",
+            "people.csv",
+            None,
+            _settings(),
+        )
+
+    assert "company_name" in str(error.value)
+    assert "random_code" in str(error.value)
+
+
+@pytest.mark.parametrize("value", ["123456", "https://example.org/profile", "person@example.org", ""])
+def test_obvious_non_name_columns_are_not_accepted(value):
+    content = f"candidate,company\n{value},Example Ltd\n".encode()
+
+    with pytest.raises(BatchParseError, match="missing a name column"):
+        parse_batch(content, "people.csv", None, _settings())
+
+
+@pytest.mark.parametrize(
     ("content", "message"),
     [
         (b"name,name\nAda,Again\n", "duplicate"),
         (b"name,\nAda,x\n", "blank"),
-        (b"person\nAda\n", "missing"),
-        (b"name,full_name\nAda,Ada Lovelace\n", "ambiguous"),
+        (b"favorite_colour\nblue\n", "missing"),
+        (b"candidate_name,member_name\nAda Lovelace,Ada Lovelace\n", "ambiguous"),
         (b"name\n\n", "Blank row"),
     ],
 )

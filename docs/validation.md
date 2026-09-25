@@ -1,45 +1,41 @@
 # Validation record
 
-The multi-source product-model change was completed on **2026-09-24**. At the user's
-explicit direction, its final full-suite and benchmark runs were skipped. The tests in
-this revision cover multi-source reconciliation, education records, record-specific
-provenance/profile links, current-role pairing, name-only identity strengthening,
-public-sector sources, LinkedIn blocking, exports, persistence and benchmark
-normalization. CI or the deployment pipeline should run them before release.
+Validated locally after the flexible batch-schema change on **2026-09-25**, Windows,
+Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
+queue, worker, providers, and settings; fixtures replace external network responses
+without a second research pipeline or paid provider calls.
 
-The most recent complete local baseline, before this product-model change, was the
-performance/security hardening pass on **2026-09-21–22**, Windows, Python **3.14.7**.
-Docker and CI target Python 3.13. Trial jobs use the production API, queue, worker,
-providers, and settings; fixtures replace external network responses without a second
-research pipeline.
-
-## Previous complete baseline
+## Current checks
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **244 passed, 5 skipped** before the current product-model change; PostgreSQL integration requires `TEST_POSTGRES_URL` |
-| Ruff lint and formatting | Passed |
-| Python compilation and application/compatibility imports | Passed |
-| Dependency consistency | No broken requirements |
-| Application imports and API health fixtures | Passed; real Uvicorn startup/HTTP 200 was separately verified on 2026-09-20 |
-| SQLite Alembic upgrade/downgrade and readiness | Passed in the suite |
-| PostgreSQL migration DDL and locking SQL compilation | Passed offline |
+| Full test suite | **319 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Focused batch-import tests | **53 passed** |
+| Input-hardening and production API fixtures | **52 passed** |
+| Ruff lint | `ruff check .` passed |
+| Ruff formatting | All 75 Python files formatted |
 | Git diff whitespace check | Passed |
-| Offline production-pipeline benchmark | 1/5/25/100-person fixtures preserve normalized research outputs; [measurements and method](../benchmarks/README.md) |
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
 
-## Current product-model coverage
+## Current coverage
 
-The current revision adds deterministic fixtures for the requested cases A–K:
+Flexible-input fixtures cover Unicode header normalization, snake/kebab/camel/punctuation
+variants, strong and generic person-name aliases, field-specific precedence, contextual
+organisation/role/country/location/university/subject/year mappings, unknown columns,
+explicit overrides, ambiguous name candidates, missing-name diagnostics, and numeric,
+URL, email, and empty false positives. The production batch API fixture now exercises
+automatic inference for CSV and XLSX without a manual mapping.
+
+The multi-source fixtures cover the requested product-model cases A–K:
 multi-source field assembly and provenance, independent university corroboration,
 conflicts, three credentials, same-credential merging, latest paired employment,
 government offices, contribution-based representative links, record-specific links,
 name-only cross-source identity, and LinkedIn exclusion before advisor/retrieval.
 Additional checks cover legacy/new profile JSON, multi-row rich exports, source-column
 isolation, weak-source link gating, mirrored evidence, and nested benchmark
-normalization. These checks were not rerun after the final edits at the user's request.
+normalization.
 
 ## Hardening regression coverage
 
