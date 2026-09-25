@@ -284,6 +284,45 @@ def test_export_xlsx_is_readable_and_formula_safe():
     assert row[headers.index("full_name")] == "'=Ada"
 
 
+def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
+    results = _results()
+    fields = results.people[0].result.profile.fields
+    fields[ProfileField.subject] = FieldDecision(value="Weak Subject", confidence=49.99, review_required=True)
+    fields[ProfileField.degree_type] = FieldDecision(
+        value="Master's Degree", confidence=50, review_required=False
+    )
+    fields[ProfileField.university_name] = FieldDecision(value=None, confidence=10, review_required=False)
+
+    data = export_results(
+        results,
+        ["subject", "subject_confidence"],
+        "xlsx",
+        low_confidence_threshold=50,
+    )
+    workbook = load_workbook(io.BytesIO(data), data_only=False)
+    sheet = workbook.active
+    headers = [cell.value for cell in sheet[1]]
+
+    def cell(column):
+        return sheet.cell(2, headers.index(column) + 1)
+
+    assert cell("subject (2)").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("subject_confidence (2)").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("degree_type").fill.fill_type is None
+    assert cell("degree_type_confidence").fill.fill_type is None
+    assert cell("university_name").fill.fill_type is None
+    assert cell("university_name_confidence").fill.fill_type is None
+    assert cell("full_name").fill.fill_type is None
+    workbook.close()
+
+    custom = export_results(results, [], "xlsx", low_confidence_threshold=40)
+    workbook = load_workbook(io.BytesIO(custom), data_only=False)
+    sheet = workbook.active
+    headers = [item.value for item in sheet[1]]
+    assert sheet.cell(2, headers.index("subject") + 1).fill.fill_type is None
+    workbook.close()
+
+
 def test_default_export_is_unchanged_for_one_record_projection():
     results = _results()
     expected = export_results(results, ["name", "status"], "csv")
@@ -338,8 +377,8 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
     bachelor_url = "https://university-a.example/ada"
     master_url = "https://university-b.example/ada"
     profile.records = [
-        record("Bachelor's", "University A", bachelor_url, bachelor_url, 91),
-        record("Master's", "University B", master_url, master_url, 89),
+        record("Bachelor's Degree", "University A", bachelor_url, bachelor_url, 91),
+        record("Master's Degree", "University B", master_url, master_url, 89),
     ]
 
     data = export_results(results, ["name", "status"], format, provenance="field")
@@ -355,7 +394,7 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
 
     assert len(rows) == 2
     assert headers.index("degree_type_source_urls") == headers.index("degree_type_confidence") + 1
-    assert [row["degree_type"] for row in rows] == ["Bachelor's", "Master's"]
+    assert [row["degree_type"] for row in rows] == ["Bachelor's Degree", "Master's Degree"]
     assert [row["name"] for row in rows] == ["'+Ada Lovelace", "'+Ada Lovelace"]
     assert rows[0]["degree_type_source_urls"] == bachelor_url
     assert rows[1]["degree_type_source_urls"] == master_url

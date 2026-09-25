@@ -240,7 +240,7 @@ async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, m
     person = finished.people[0]
     assert person.status in {"completed", "review_required"}, person.error_code
     assert person.result.profile.fields[ProfileField.organisation].value == "Example Foundation"
-    assert person.result.profile.fields[ProfileField.degree_type].value == "Bachelor's"
+    assert person.result.profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert person.result.profile.coverage == 100
     assert len(person.result.sources) == 2
     assert all(c.source_id in {s.source_id for s in person.result.sources} for c in person.result.claims)
@@ -285,7 +285,9 @@ async def test_linkedin_search_result_never_reaches_advisor_retrieval_or_evidenc
     ],
     ids=["prose-url-without-citations", "malformed-citation"],
 )
-async def test_no_usable_search_citations_finish_as_review_required(tmp_path, monkeypatch, fixture_options):
+async def test_no_usable_search_citations_finish_as_insufficient_evidence(
+    tmp_path, monkeypatch, fixture_options
+):
     settings = configured(
         tmp_path,
         MAX_SEARCH_QUERIES_PER_PERSON=3,
@@ -303,17 +305,17 @@ async def test_no_usable_search_citations_finish_as_review_required(tmp_path, mo
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "review_required"
+    assert person.status == "completed"
     assert person.error_code is None
     assert person.result is not None
     assert person.result.profile.coverage == 0
-    assert person.result.profile.research_status == "completed"
+    assert person.result.profile.research_status == "insufficient_evidence"
     assert person.result.profile.metrics.error_codes == []
     assert person.result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
     assert not calls["validated"] and not calls["fetched"]
     assert calls["plans"] == calls["advisor_requests"] == 0
-    assert len(person.result.usage) == 1
-    assert person.result.usage[0].success
+    assert len(person.result.usage) == person.result.profile.metrics.queries_performed == 2
+    assert all(item.success for item in person.result.usage)
 
 
 @pytest.mark.asyncio
@@ -389,10 +391,10 @@ async def test_all_unrelated_candidates_finish_without_retrieval(tmp_path, monke
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "review_required"
+    assert person.status == "completed"
     assert person.error_code is None
     assert person.result is not None
-    assert person.result.profile.research_status == "completed"
+    assert person.result.profile.research_status == "insufficient_evidence"
     assert person.result.profile.metrics.error_codes == []
     assert person.result.profile.metrics.stop_reason == "NO_SELECTED_SOURCES"
     assert calls["validated"] and not calls["fetched"]
@@ -413,10 +415,11 @@ async def test_candidates_empty_after_filtering_finish_without_advisor(tmp_path,
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "review_required"
+    assert person.status == "completed"
     assert person.error_code is None
     assert person.result is not None
     assert person.result.profile.metrics.stop_reason == "NO_ELIGIBLE_CANDIDATES"
+    assert person.result.profile.research_status == "insufficient_evidence"
     assert calls["advisor_requests"] == 0
     assert not calls["validated"] and not calls["fetched"]
 
@@ -501,18 +504,20 @@ async def test_search_result_reservations_cap_request_and_reject_prose_urls(tmp_
 
 
 @pytest.mark.asyncio
-async def test_zero_citation_search_stops_without_advisor_and_usage_persists(tmp_path, monkeypatch):
+async def test_zero_citation_search_uses_bounded_fallback_without_advisor_and_persists_usage(
+    tmp_path, monkeypatch
+):
     settings = configured(tmp_path, MAX_SEARCH_QUERIES_PER_PERSON=2, MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=100)
     store = migrated_store(settings)
     pipeline, calls = fake_services(settings, store, monkeypatch, prose_only=True, always_new_query=True)
     job = store.create_job([PersonSeed(full_name="Jane Doe")])
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
     result = store.get_results(job.job_id).people[0].result
-    assert len(calls["queries"]) == result.profile.metrics.queries_performed == 1
+    assert len(calls["queries"]) == result.profile.metrics.queries_performed == 2
     assert calls["plans"] == calls["advisor_requests"] == 0
     assert result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
-    assert sum(u.web_search_requests or 0 for u in result.usage) == 1
-    assert result.profile.metrics.web_search_requests == 1
+    assert sum(u.web_search_requests or 0 for u in result.usage) == 2
+    assert result.profile.metrics.web_search_requests == 2
 
 
 @pytest.mark.asyncio

@@ -48,8 +48,9 @@ choose a different internal representative UUID; only that representative is
 compared by its complete fact content, while the full source-linked
 evidence/support sets are still compared. Full normalized results are available
 in each generated report for investigating differences. Reports produced before
-normalization version 3 intentionally cannot be compared because they did not
-normalize nested education-record decisions.
+normalization version 4 intentionally cannot be compared: version 3 added nested
+education-record normalization, while version 4 records the controlled degree
+vocabulary and revised review/status decisions from the data-quality pass.
 
 The checked-in measurement summary records one before/after run. It contains
 counts and hashes, not multi-megabyte duplicated result bodies. To compare another
@@ -98,3 +99,23 @@ then compare another run against it:
 python -m benchmarks.offline --output benchmark-reference.json
 python -m benchmarks.offline --compare benchmark-reference.json --output benchmark-report.json
 ```
+
+## Data-quality pass measurement
+
+Normalization version 4 was run on 2026-09-25 with the same 2 ms mocked latency.
+The controlled output vocabulary intentionally changes result hashes, so hashes are
+not compared with the older version-2 reports. Cache reuse, two physical fetches per
+batch, three-person concurrency, two-extraction concurrency at size 100, and the
+six-query completed-result read remained intact.
+
+| People | Elapsed (s) | SQL statements | Model attempts | Searches | Extractions |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.502 | 173 | 4 | 1 | 2 |
+| 5 | 2.050 | 749 | 20 | 5 | 10 |
+| 25 | 10.035 | 3,629 | 100 | 25 | 50 |
+| 100 | 77.090 | 25,028 | 800 | 100 | 600 |
+
+Compared with the prior checked-in after-run, SQL statements fell by 6.7%–11.0%
+and model attempts fell from 5/25/125/900 to 4/20/100/800 because completed fixture
+profiles no longer enter unnecessary review-driven follow-up planning. Wall-clock
+results were slower on this individual run and remain non-gating machine measurements.

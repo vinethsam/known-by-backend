@@ -11,6 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.schemas import Contract, ProfileField, SourceType
 
+DEFAULT_REVIEW_THRESHOLD = 50.0
+
 
 class ScoringPolicy(Contract):
     @model_validator(mode="before")
@@ -66,7 +68,7 @@ class ScoringPolicy(Contract):
     conflict_penalty: float = Field(default=0.25, ge=0, le=1)
     identity_minimum: float = Field(default=0.45, ge=0, le=1)
     identity_review_threshold: float = Field(default=0.80, ge=0, le=1)
-    review_threshold: float = Field(default=75, ge=0, le=100)
+    review_threshold: float = Field(default=DEFAULT_REVIEW_THRESHOLD, ge=0, le=100)
     current_half_life_days: int = Field(default=730, ge=1)
     unknown_recency: float = Field(default=0.65, ge=0, le=1)
     historical_current_factor: float = Field(default=0.25, ge=0, le=1)

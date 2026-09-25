@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.config import ScoringPolicy, Settings
 from app.research.discovery import (
+    build_fallback_queries,
     build_queries,
     build_query,
     candidate_score,
@@ -173,3 +174,13 @@ def test_build_query_uses_seed_clues() -> None:
     assert '"Jane Doe"' in query
     assert "Example Org" in query
     assert "Example University" in query
+
+
+def test_fallback_queries_relax_seed_clues_deterministically():
+    person = seed()
+    queries = build_fallback_queries(person)
+
+    assert queries[0] == '"Jane Doe" Example Org'
+    assert '"Jane Doe" Example University' in queries
+    assert queries[-1] == '"Jane Doe" biography education career'
+    assert build_query(person) not in queries

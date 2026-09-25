@@ -53,7 +53,12 @@ source's other facts.
 Every model claim must be literal in the supplied source chunk, contain its raw value,
 name the seeded person, and use grounded dates. Raw values and excerpts remain in the
 claim ledger. Deterministic normalization handles Unicode, punctuation, conservative
-organisation suffixes, subject aliases and common degree forms.
+organisation suffixes, subject aliases and common degree forms. Selected degree output
+uses `Bachelor's Degree`, `Master's Degree`, or `Doctoral Degree`; common terms such as
+`maestría`, `licence`, `laurea`, and `promovierte` use explicit accent-insensitive
+mappings. A generic `degree` defaults to `Bachelor's Degree` with
+`GENERIC_DEGREE_DEFAULT` metadata and reduced normalization certainty. Unknown terms
+remain readable and receive `AMBIGUOUS_EDUCATION`; no translation API is used.
 
 Field quality is relationship-aware:
 
@@ -102,26 +107,43 @@ field_confidence = 100 * clamp(best_strength + corroboration_bonus
                                - conflict_penalty, 0, 1)
 ```
 
-Reasons and all components are returned with the field decision. Review remains
-required for missing evidence, meaningful conflicts, low confidence, unresolved
-identity, unpaired relationships, unrecognized degree language, unclear current-role
-selection or ambiguous education grouping. `LOW_SOURCE_COUNT` is diagnostic; one
-strong direct authoritative source can still be usable.
+Reasons and all components are returned with the field decision. A populated field is
+reviewable when confidence is below the centrally configured threshold (**50** by
+default), evidence meaningfully conflicts, normalization is ambiguous, source quality
+is weak, identity is unresolved, or a relationship/grouping is uncertain. Missing
+fields and `LOW_SOURCE_COUNT` are diagnostic and do not themselves require field or
+record review; one strong direct authoritative source can still be usable.
+
+Record review is separate. A record is escalated only for identity ambiguity, an
+unresolved current-role conflict or incomplete role relationship, education-grouping
+ambiguity, a critical-field conflict whose strength is at least `0.50` and at least
+75% of the selected claim's strength, no reliable representative source, or at least
+two populated critical fields below the threshold.
+One weak optional subject, one fetch failure, or incomplete coverage does not escalate
+the record. Zero-coverage discovery outcomes use `research_status=insufficient_evidence`;
+provider/retrieval errors remain retry/research failures, while clean and reviewable
+profiles use `clean` and `needs_review` respectively.
 
 ## Education records
 
-`fact_group` is local to one source. Reconciliation first creates source-local
-education bundles, then merges bundles from other sources only when at least one
-normalized component agrees and no populated component conflicts.
+Degree terminology is normalized and classified before `fact_group` bundles are
+reconciled. `fact_group` is local to one source. Reconciliation then merges bundles
+from other sources only when at least one normalized component agrees and no populated
+component conflicts.
 
 - Different normalized degree levels establish separate credentials.
 - The same degree and compatible institution/subject merge into one record and retain
   all supporting sources.
 - Explicit source-local groups can establish distinct same-level credentials when
   their populated details conflict.
-- Cross-source same-level evidence with incompatible details remains one ambiguous
-  review record until the relationship can be resolved.
+- Cross-source same-level evidence with two incompatible contextual components
+  (institution and subject) establishes distinct credentials; one contextual
+  disagreement remains an ambiguous review record.
 - Ungrouped components are never spliced together merely to fill missing fields.
+- A safe compound claim containing distinct levels, such as `maestría y un doctorado`,
+  expands before grouping while every expanded claim retains the same literal raw value.
+- Certifications, executive programmes, honorary awards, postdoctoral work, ongoing
+  study, and training remain alternative evidence and do not create earned-degree rows.
 
 Each confirmed credential becomes a `ProfileRecord`. Name and selected current-role
 decisions are copied into every record; university, degree and subject decisions are
@@ -132,10 +154,19 @@ clients, while `PersonProfile.records` is the complete additive result.
 ## Current employment
 
 Organisation and job title are ranked as relationship clusters. Explicit current
-status wins first, then the newest supported observation, relationship completeness,
-evidence strength and a stable signature. Both selected fields come from the same
-cluster. Historical roles remain alternatives. Equally current, similarly supported
-relationships produce `CURRENT_ROLE_CONFLICT` and review instead of mixed fields.
+status wins first, then the newest supported observation, relationship type,
+relationship completeness, evidence strength and a stable signature. The compact
+taxonomy covers government office, executive/primary employment, academic, board,
+advisory, political-party, historical and other affiliations. Current government
+office outranks an equally current party/private affiliation; executive employment
+outranks an equally current board/advisory role. Both selected fields come from the
+same cluster. Historical roles remain alternatives. Equally current, same-type,
+similarly supported relationships produce `CURRENT_ROLE_CONFLICT` instead of mixed
+fields. An exact seed country/location is excluded as an organisation and retained as
+alternative evidence; the reconciler never invents an office name.
+Public residences and similarly named government buildings are excluded under the
+same rule when the paired title and government source identify them as places rather
+than employing organisations.
 
 ## Representative profile link
 
@@ -171,5 +202,5 @@ profile exposes the primary record's confidence and coverage; every `ProfileReco
 has its own values.
 
 All tunable numeric weights remain in `ScoringPolicy`. Partial nested environment
-overrides merge with defaults, for example `SCORING__REVIEW_THRESHOLD=80`. Tests use
+overrides merge with defaults, for example `SCORING__REVIEW_THRESHOLD=50`. Tests use
 the production reconciliation and scoring modules with deterministic source fixtures.

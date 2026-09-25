@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the flexible batch-schema change on **2026-09-25**, Windows,
+Validated locally after the deterministic data-quality pass on **2026-09-25**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,9 +9,9 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **319 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
-| Focused batch-import tests | **53 passed** |
-| Input-hardening and production API fixtures | **52 passed** |
+| Full test suite | **367 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Focused data-quality, export, discovery, API, and benchmark tests | **191 passed** |
+| Offline production-pipeline benchmark | Completed for 1, 5, 25, and 100 people with mocked HTTP and no paid calls |
 | Ruff lint | `ruff check .` passed |
 | Ruff formatting | All 75 Python files formatted |
 | Git diff whitespace check | Passed |
@@ -36,6 +36,13 @@ name-only cross-source identity, and LinkedIn exclusion before advisor/retrieval
 Additional checks cover legacy/new profile JSON, multi-row rich exports, source-column
 isolation, weak-source link gating, mirrored evidence, and nested benchmark
 normalization.
+
+Data-quality fixtures cover English and multilingual degree aliases, generic-degree
+metadata, unknown qualifications, compound-level splitting, non-degree filtering,
+equivalent and distinct same-level credentials, subject formatting, Unicode/mojibake,
+field-versus-record review, executive/board and government/party role priority,
+country and public-residence rejection, collision-safe XLSX highlighting, and bounded
+empty-search fallbacks.
 
 ## Hardening regression coverage
 
@@ -62,15 +69,15 @@ and orchestration path with network responses replaced locally. They cover:
 | Case | Expected contract |
 | --- | --- |
 | Valid `url_citation` | Canonical citation URLs become source candidates and valid advisor output proceeds to retrieval. |
-| No citation | Model prose URLs remain ignored; the person ends `review_required` with `NO_SEARCH_CITATIONS`. |
+| No citation | Model prose URLs remain ignored; bounded deterministic fallback queries run when budget remains, then the person ends `completed` with `research_status=insufficient_evidence` and `NO_SEARCH_CITATIONS`. |
 | Malformed citation metadata | Invalid annotations do not become candidates or cause an opaque exception. |
 | Advisor provider or HTTP failure | The zero-coverage task preserves `SOURCE_ADVISOR_PROVIDER_ERROR`; its attempt record retains the HTTP category and status. |
 | Advisor invalid JSON | The provider attempt records `OPENROUTER_SCHEMA_ERROR` and retains its safe diagnostic reason. |
 | Advisor schema mismatch | The task records a validation/schema code without logging the raw response. |
-| Empty candidates after filtering | The person ends `review_required` with `NO_ELIGIBLE_CANDIDATES`. |
+| Empty candidates after filtering | The person ends `completed` with `research_status=insufficient_evidence` and `NO_ELIGIBLE_CANDIDATES`. |
 | Budget exhausted before advisor | No request is sent and the bounded budget outcome remains distinguishable from a zero-token provider attempt. |
 | OpenRouter 4xx/5xx | HTTP status, retry number, request/body flags, and safe terminal error code are retained. |
-| Valid discovery with no selected source | The person ends `review_required` with `NO_SELECTED_SOURCES`. |
+| Valid discovery with no selected source | The person ends `completed` with `research_status=insufficient_evidence` and `NO_SELECTED_SOURCES`. |
 
 Schema fixtures also verify that strict OpenRouter schemas recursively omit Pydantic
 `default` annotations while retaining required fields and closed objects. Usage

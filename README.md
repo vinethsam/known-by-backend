@@ -9,7 +9,8 @@ persisted profiles with provenance, explainable confidence, and separate coverag
 ```text
 Person / Batch → Durable job → OpenRouter discovery → Source validation
   → Cloudflare static retrieval / Playwright fallback → Markdown
-  → Claim extraction → Multi-source reconciliation → Deterministic confidence
+  → Claim extraction → Deterministic normalization/classification
+  → Multi-source reconciliation → Deterministic confidence
   → Education-scoped records with field provenance
   → Persisted profile → JSON / CSV / XLSX
 ```
@@ -30,9 +31,10 @@ Search uses existing OpenRouter credits and incurs tool charges in addition to m
 tokens; no separate search account or key is required. The
 [server-tool API is currently beta](https://openrouter.ai/docs/guides/features/server-tools/web-search).
 When search returns no usable citations, or filtering/advisor selection leaves no
-sources, the person finishes as `review_required` with a specific empty-result code
-(`NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES`) instead
-of being reported as an infrastructure failure.
+sources, the person finishes without human review and uses
+`research_status=insufficient_evidence` plus `NO_SEARCH_CITATIONS`,
+`NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES`. Provider and retrieval failures
+remain separate retry/research failures with their specific error codes.
 
 ## Core capabilities
 
@@ -47,13 +49,21 @@ of being reported as an infrastructure failure.
 - Field-level supporting URLs, claim IDs, conflicts, confidence, and review reasons.
   Distinct supported education credentials produce separate records while shared
   identity and current-employment decisions repeat safely.
+- Central deterministic normalization keeps literal claims for provenance while
+  exporting controlled English degree levels, repaired Unicode, and conservatively
+  formatted subject, institution, organisation, and title values. Certifications,
+  honorary awards, ongoing study, postdoctoral work, and training stay in the evidence
+  ledger without becoming earned-degree rows.
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
-  coverage remains distinct from confidence. See [scoring rules](docs/confidence.md).
+  coverage remains distinct from confidence. The default field-review threshold is
+  50%; record review is reserved for serious identity, relationship, grouping,
+  contradiction, or representative-source issues. See [scoring rules](docs/confidence.md).
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
 - Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. The
   default export stays compact; an additive [field-provenance mode](docs/exports.md)
-  includes the supporting URLs for every selected field.
+  includes the supporting URLs for every selected field. XLSX marks only populated
+  fields below the configured review threshold, and their confidence cells, in pale yellow.
 
 Trial runs use the production pipeline and settings. No dataset or sample-source
 allowlist restricts discovery. Automated tests replace external calls with fixtures.
@@ -117,6 +127,8 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
   `PERSON_TIMEOUT_SECONDS`, `WORKER_MAX_ATTEMPTS`.
 - **Concurrency:** `MAX_CONCURRENT_PEOPLE`, `MAX_CONCURRENT_FETCHES`,
   `PER_DOMAIN_CONCURRENCY`, `MAX_CONCURRENT_EXTRACTIONS` (default `2` per worker).
+- **Review policy:** `SCORING__REVIEW_THRESHOLD` (default `50`). Remove or update an
+  older Railway value such as `75` if the deployment should use the new default.
 
 Search attempts cap server-tool execution to one call per request. The aggregate
 result budget reserves requested slots, including retries with unknown usage.
@@ -156,13 +168,20 @@ public content within a job, while claims remain specific to each person. Existi
 HTTP pools and the reusable Chromium process retain explicit shutdown and isolated
 browser contexts.
 
+If the fully constrained first search returns no citations, deterministic fallback
+queries relax supplied organisation, education, geography, role, subject, year, and
+known-attribute clues one at a time. They remain inside the existing per-person query,
+tool, result, token, source, and time budgets.
+
 Each person attempt emits one structured `person_performance` log containing stage
 durations, cache/fetch counts, model attempts, tokens, and reported cost. See
 [performance and tuning](docs/performance.md) for counter meanings, cancellation,
 speculative-fetch tradeoffs, and the offline benchmark procedure.
 
 Input validation preserves Unicode names and original spreadsheet text while bounding
-cells, headers, and URLs. XLSX archives are checked before workbook parsing, including
+cells, headers, and URLs. A narrow UTF-8-as-Latin-1/CP1252 repair fixes obvious mojibake
+without transliterating or changing already-correct Unicode. XLSX archives are checked
+before workbook parsing, including
 entity/DTD rejection. CSV/XLSX formula escaping remains enabled. Model prompts keep
 user fields and retrieved content inside a JSON data envelope; extraction has no tools
 and every returned claim still passes deterministic grounding checks.

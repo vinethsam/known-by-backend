@@ -7,7 +7,12 @@ import unicodedata
 from datetime import date
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION
-from app.research.normalisation import comparison_key, name_key, normalise
+from app.research.normalisation import (
+    comparison_key,
+    name_key,
+    normalise_degree_candidates,
+    normalise_value,
+)
 from app.schemas import EvidenceClaim, ExtractionResponse, PersonSeed, ProfileField, SourceRecord, utcnow
 
 
@@ -59,33 +64,38 @@ def validate_claims(
         ):
             reasons.append("UNGROUNDED_CLAIM_DATE")
             continue
-        normalised, certainty = normalise(claim.field, claim.value)
-        if not normalised:
-            reasons.append("EMPTY_NORMALISED_VALUE")
-            continue
-        claims.append(
-            EvidenceClaim(
-                person_id=source.person_id,
-                source_id=source.source_id,
-                field=claim.field,
-                raw_value=claim.value,
-                normalised_value=normalised,
-                normalisation_certainty=certainty,
-                evidence_text=claim.evidence,
-                evidence_location=claim.evidence_location,
-                temporal_context=claim.temporal_context,
-                as_of_date=claim.as_of_date,
-                end_date=claim.end_date,
-                is_current=claim.is_current,
-                directness=claim.directness,
-                source_claim_type=claim.source_claim_type,
-                fact_group=claim.fact_group,
-                subject_name=claim.subject_name,
-                identity_relevance=source.identity.score,
-                extraction_model=model,
-                prompt_version=EXTRACTION_PROMPT_VERSION,
-            )
+        normalisations = (
+            normalise_degree_candidates(claim.value)
+            if claim.field == ProfileField.degree_type
+            else [normalise_value(claim.field, claim.value)]
         )
+        for normalisation in normalisations:
+            if not normalisation.value:
+                reasons.append("EMPTY_NORMALISED_VALUE")
+                continue
+            claims.append(
+                EvidenceClaim(
+                    person_id=source.person_id,
+                    source_id=source.source_id,
+                    field=claim.field,
+                    raw_value=claim.value,
+                    normalised_value=normalisation.value,
+                    normalisation_certainty=normalisation.certainty,
+                    evidence_text=claim.evidence,
+                    evidence_location=claim.evidence_location,
+                    temporal_context=claim.temporal_context,
+                    as_of_date=claim.as_of_date,
+                    end_date=claim.end_date,
+                    is_current=claim.is_current,
+                    directness=claim.directness,
+                    source_claim_type=claim.source_claim_type,
+                    fact_group=claim.fact_group,
+                    subject_name=claim.subject_name,
+                    identity_relevance=source.identity.score,
+                    extraction_model=model,
+                    prompt_version=EXTRACTION_PROMPT_VERSION,
+                )
+            )
     return deduplicate_claims(claims), sorted(set(reasons))
 
 
@@ -97,6 +107,7 @@ def deduplicate_claims(claims: list[EvidenceClaim]) -> list[EvidenceClaim]:
             claim.source_id,
             claim.field,
             comparison_key(claim.raw_value),
+            claim.normalised_value,
             claim.as_of_date,
             claim.end_date,
             claim.is_current,

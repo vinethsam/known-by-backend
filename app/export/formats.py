@@ -9,6 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from app.config import DEFAULT_REVIEW_THRESHOLD
 from app.schemas import JobResults, ProfileField
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -21,15 +22,22 @@ def export_results(
     format: str,
     *,
     provenance: ProvenanceMode = "none",
+    low_confidence_threshold: float = DEFAULT_REVIEW_THRESHOLD,
 ) -> bytes:
     if provenance not in {"none", "field"}:
         raise ValueError("Unsupported provenance mode")
     rows, output_columns = _flatten_results(results, columns, provenance=provenance)
+    field_columns = _field_column_pairs(output_columns, len(columns), provenance)
     normalized = format.lower()
     if normalized == "csv":
         return _export_csv(rows, output_columns)
     if normalized == "xlsx":
-        return _export_xlsx(rows, output_columns)
+        return _export_xlsx(
+            rows,
+            output_columns,
+            field_columns=field_columns,
+            low_confidence_threshold=low_confidence_threshold,
+        )
     raise ValueError("Unsupported export format")
 
 
@@ -97,6 +105,17 @@ def _base_row(person, original_columns, enrichment_map, *, status=None) -> dict[
     return row
 
 
+def _field_column_pairs(
+    output_columns: list[str], original_count: int, provenance: ProvenanceMode
+) -> list[tuple[str, str]]:
+    cursor = original_count + 2  # status and error_code
+    pairs = []
+    for _ in ProfileField:
+        pairs.append((output_columns[cursor], output_columns[cursor + 1]))
+        cursor += 3 if provenance == "field" else 2
+    return pairs
+
+
 def _unique_column(name: str, existing: list[str]) -> str:
     seen = set(existing)
     candidate = name
@@ -143,7 +162,15 @@ def _export_csv(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-def _export_xlsx(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
+def _export_xlsx(
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    *,
+    field_columns: list[tuple[str, str]] = (),
+    low_confidence_threshold: float = DEFAULT_REVIEW_THRESHOLD,
+) -> bytes:
+    if not 0 <= low_confidence_threshold <= 100:
+        raise ValueError("Low-confidence threshold must be between 0 and 100")
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Results"
@@ -155,6 +182,20 @@ def _export_xlsx(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
     for row_index, row in enumerate(rows, start=2):
         for column_index, column in enumerate(columns, start=1):
             sheet.cell(row=row_index, column=column_index, value=_xlsx_cell(row.get(column, "")))
+    pale_yellow = PatternFill(fill_type="solid", fgColor="FFF2CC")
+    column_indexes = {column: index for index, column in enumerate(columns, start=1)}
+    for row_index, row in enumerate(rows, start=2):
+        for value_column, confidence_column in field_columns:
+            value = row.get(value_column)
+            confidence = row.get(confidence_column)
+            if (
+                value not in {None, ""}
+                and isinstance(confidence, (int, float))
+                and not isinstance(confidence, bool)
+                and confidence < low_confidence_threshold
+            ):
+                sheet.cell(row=row_index, column=column_indexes[value_column]).fill = pale_yellow
+                sheet.cell(row=row_index, column=column_indexes[confidence_column]).fill = pale_yellow
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for index, column in enumerate(columns, start=1):

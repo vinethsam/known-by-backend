@@ -19,6 +19,7 @@ from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
 from app.research.concurrency import Outcome, ordered_window
 from app.research.discovery import (
+    build_fallback_queries,
     build_queries,
     build_query,
     deduplicate_candidates,
@@ -124,7 +125,18 @@ class ResearchOrchestrator:
             profile.started_at = started
             profile.completed_at = utcnow()
             profile.sources_considered = metrics.sources_discovered
-            profile.research_status = "partial" if metrics.error_codes else "completed"
+            if metrics.error_codes:
+                profile.research_status = "retryable_research_failure" if profile.coverage == 0 else "partial"
+            elif profile.coverage == 0 and metrics.stop_reason in {
+                "NO_SEARCH_CITATIONS",
+                "NO_ELIGIBLE_CANDIDATES",
+                "NO_SELECTED_SOURCES",
+            }:
+                profile.research_status = "insufficient_evidence"
+            elif profile.review_required:
+                profile.research_status = "needs_review"
+            else:
+                profile.research_status = "clean"
             return ResearchResult(profile=profile, sources=sources, claims=claims, usage=usage)
 
         async def save():
@@ -434,6 +446,7 @@ class ResearchOrchestrator:
                 # Start with the exact name and supplied clues. Pay for further planning
                 # only after useful already-discovered candidates have been processed.
                 queue = deque([build_query(seed)])
+                fallback_queued = False
                 last_planned_clues = None
                 while not stopped(include_target=not bool(pending_candidates)):
                     if pending_candidates:
@@ -569,6 +582,23 @@ class ResearchOrchestrator:
                         ),
                     )
                     if not candidates:
+                        if not fallback_queued:
+                            fallback_queued = True
+                            remaining_queries = (
+                                settings.MAX_SEARCH_QUERIES_PER_PERSON - metrics.queries_performed
+                            )
+                            remaining_result_budget = (
+                                settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
+                            )
+                            queue.extend(
+                                query
+                                for query in build_fallback_queries(seed)[
+                                    : remaining_queries if remaining_result_budget > 0 else 0
+                                ]
+                                if query_key(query) not in queries_done
+                            )
+                        if queue:
+                            continue
                         metrics.stop_reason = "NO_SEARCH_CITATIONS"
                         break
                     selected_count = await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)

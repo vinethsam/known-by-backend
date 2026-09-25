@@ -61,6 +61,10 @@ credential are not lost. Hard source/no-new-evidence limits can still cancel pen
 work. Compare `static_fetches` as well as duration when tuning; unused tasks are always
 cancelled and awaited.
 
+An empty fully constrained search can enqueue deterministic single-clue fallbacks.
+These queries do not add a new budget or unbounded retry path: the existing query,
+server-tool, aggregate-result, token, source, and person-time limits still apply.
+
 `MAX_SOURCES_PER_PERSON` continues to cap processed source records. Redirect aliases
 already known before a fetch starts are skipped. An alias already in flight can add
 speculative I/O without consuming another evidence slot: selected-source retrieval
@@ -90,6 +94,12 @@ batched at six queries; checkpoint evidence/usage writes use batched upserts and
 transactions, skipping updates to unchanged ledger rows. Lease renewal and fencing
 remain intact; renewal failures also cancel and drain owned research work. There is no new infrastructure,
 database migration, or telemetry persistence service.
+
+The 2026-09-25 normalization-version-4 offline run preserved the two-fetch cache
+pattern, configured concurrency peaks, and six-query result reads. It used
+173/749/3,629/25,028 SQL statements and 4/20/100/800 model attempts for
+1/5/25/100-person fixtures. Those work counts are lower than the prior recorded run;
+wall-clock timings remain non-gating and varied with local machine load.
 
 Redeploy the web and worker from the same revision. The extraction setting may be
 omitted to use its conservative default. After deployment, one ordinary person run

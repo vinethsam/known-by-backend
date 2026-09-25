@@ -3,10 +3,16 @@ from datetime import date
 import pytest
 
 from app.config import ScoringPolicy, Settings
+from app.input_validation import repair_mojibake
 from app.research.claims import validate_claims
 from app.research.confidence import confidence_for_group, profile_scores
 from app.research.identity import assess_identity, effective_identity_scores
-from app.research.normalisation import normalise
+from app.research.normalisation import (
+    EducationKind,
+    classify_education,
+    normalise,
+    normalise_degree_candidates,
+)
 from app.research.reconciliation import reconcile
 from app.schemas import (
     EvidenceClaim,
@@ -45,13 +51,15 @@ def source(
 
 def claim(identifier="c1", source_id="s1", field=ProfileField.organisation, value="Example", **kwargs):
     identity_relevance = kwargs.pop("identity_relevance", 1)
+    normalised_value, normalisation_certainty = normalise(field, value)
     return EvidenceClaim(
         claim_id=identifier,
         person_id="p1",
         source_id=source_id,
         field=field,
         raw_value=value,
-        normalised_value=normalise(field, value)[0],
+        normalised_value=normalised_value,
+        normalisation_certainty=normalisation_certainty,
         evidence_text=f"Jane Doe works for {value}.",
         subject_name="Jane Doe",
         identity_relevance=identity_relevance,
@@ -89,16 +97,37 @@ def test_configuration_errors_do_not_echo_credentials():
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("BSc", "Bachelor's"),
-        ("B.Sc.", "Bachelor's"),
-        ("Bachelor of Science", "Bachelor's"),
-        ("BSc (Hons)", "Bachelor's"),
-        ("MSc", "Master's"),
-        ("MA", "Master's"),
-        ("MBA", "Master's"),
-        ("MPH", "Master's"),
-        ("PhD", "Doctorate"),
-        ("DPhil", "Doctorate"),
+        ("BSc", "Bachelor's Degree"),
+        ("B.Sc.", "Bachelor's Degree"),
+        ("Bachelor of Science", "Bachelor's Degree"),
+        ("BSc (Hons)", "Bachelor's Degree"),
+        ("b tech", "Bachelor's Degree"),
+        ("B.Tech", "Bachelor's Degree"),
+        ("btech", "Bachelor's Degree"),
+        ("bachelor s", "Bachelor's Degree"),
+        ("bachelor degree", "Bachelor's Degree"),
+        ("undergraduate degree", "Bachelor's Degree"),
+        ("licence", "Bachelor's Degree"),
+        ("laurea", "Bachelor's Degree"),
+        ("diplômé", "Bachelor's Degree"),
+        ("MSc", "Master's Degree"),
+        ("MA", "Master's Degree"),
+        ("MBA", "Master's Degree"),
+        ("MPH", "Master's Degree"),
+        ("m s", "Master's Degree"),
+        ("master s", "Master's Degree"),
+        ("master degree", "Master's Degree"),
+        ("master 2", "Master's Degree"),
+        ("mba degree", "Master's Degree"),
+        ("executive mba", "Master's Degree"),
+        ("maestría", "Master's Degree"),
+        ("laurea magistrale", "Master's Degree"),
+        ("PhD", "Doctoral Degree"),
+        ("DPhil", "Doctoral Degree"),
+        ("ph.d.", "Doctoral Degree"),
+        ("phd degree", "Doctoral Degree"),
+        ("doctorate", "Doctoral Degree"),
+        ("promovierte", "Doctoral Degree"),
     ],
 )
 def test_degree_aliases(raw, expected):
@@ -111,7 +140,328 @@ def test_conservative_normalisation():
         normalise(ProfileField.job_title, "Senior Research Fellow")[0]
         != normalise(ProfileField.job_title, "Research Fellow")[0]
     )
-    assert normalise(ProfileField.degree_type, "Basket weaving")[0] == "basket weaving"
+    assert normalise(ProfileField.degree_type, "Basket weaving")[0] == "Basket weaving"
+
+
+def test_conservative_display_formatting_preserves_acronyms_and_normalizes_connectors():
+    claims = [
+        claim(
+            "university",
+            field=ProfileField.university_name,
+            value="MIT UNIVERSITY OF TECHNOLOGY",
+            fact_group="education",
+        )
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy()).records[0]
+
+    assert record.fields[ProfileField.university_name].value == "MIT University of Technology"
+
+
+def test_unicode_cleanup_is_narrow_and_preserves_valid_international_names():
+    assert repair_mojibake("JosÃ© NicolÃ¡s YamandÃº") == "José Nicolás Yamandú"
+    assert repair_mojibake("José Nicolás Yamandú") == "José Nicolás Yamandú"
+    assert repair_mojibake("François Łukasz") == "François Łukasz"
+
+
+@pytest.mark.parametrize(
+    ("value", "kind"),
+    [
+        ("PMP certification", EducationKind.certification),
+        ("senior executive programme", EducationKind.executive_education),
+        ("senior executive programs", EducationKind.executive_education),
+        ("honorary doctorate", EducationKind.honorary_degree),
+        ("postdoctoral work", EducationKind.postdoctoral),
+        ("doctoral candidate", EducationKind.ongoing_study),
+        ("ongoing study", EducationKind.ongoing_study),
+        ("graduate training", EducationKind.training),
+        ("executive MBA", EducationKind.academic_degree),
+    ],
+)
+def test_education_classification_precedes_degree_aliases(value, kind):
+    assert classify_education(value) == kind
+
+
+def test_generic_and_unknown_degrees_keep_normalisation_meaning():
+    generic = normalise_degree_candidates("degree")[0]
+    unknown = normalise_degree_candidates("Diplôme supérieur inconnu")[0]
+
+    assert generic.value == "Bachelor's Degree"
+    assert generic.reason_code == "GENERIC_DEGREE_DEFAULT"
+    assert generic.certainty < 1
+    assert unknown.value == "Diplôme supérieur inconnu"
+    assert unknown.reason_code == "AMBIGUOUS_EDUCATION"
+
+    evidence_source = source(
+        "official", authority=0.95, domain="official.example", source_type=SourceType.first_party
+    )
+    generic_profile = reconcile(
+        "p1",
+        PersonSeed(full_name="Jane Doe"),
+        [
+            claim("name", "official", field=ProfileField.full_name, value="Jane Doe"),
+            claim(
+                "generic",
+                "official",
+                field=ProfileField.degree_type,
+                value="degree",
+                fact_group="education",
+            ),
+        ],
+        [evidence_source],
+        ScoringPolicy(),
+    )
+    generic_decision = generic_profile.records[0].fields[ProfileField.degree_type]
+    assert generic_decision.scoring_components["normalisation_reason"] == "GENERIC_DEGREE_DEFAULT"
+
+    unknown_profile = reconcile(
+        "p1",
+        PersonSeed(full_name="Jane Doe"),
+        [
+            claim("name", "official", field=ProfileField.full_name, value="Jane Doe"),
+            claim(
+                "unknown",
+                "official",
+                field=ProfileField.degree_type,
+                value="Diplôme supérieur inconnu",
+                fact_group="education",
+            ),
+        ],
+        [evidence_source],
+        ScoringPolicy(),
+    )
+    unknown_decision = unknown_profile.records[0].fields[ProfileField.degree_type]
+    assert unknown_decision.value == "Diplôme supérieur inconnu"
+    assert unknown_decision.review_required
+    assert not unknown_profile.records[0].review_required
+
+
+def test_compound_degree_claim_expands_before_reconciliation_and_keeps_raw_evidence():
+    text = "Jane Doe obtuvo una maestría y un doctorado en Example University."
+    response = ExtractionResponse(
+        claims=[
+            ExtractedClaim(
+                field=ProfileField.degree_type,
+                value="maestría y un doctorado",
+                evidence=text,
+                subject_name="Jane Doe",
+                fact_group="education-1",
+            )
+        ]
+    )
+    claims, reasons = validate_claims(
+        response,
+        PersonSeed(full_name="Jane Doe"),
+        source(),
+        text,
+        "fake",
+    )
+
+    assert not reasons
+    assert {item.normalised_value for item in claims} == {"Master's Degree", "Doctoral Degree"}
+    assert {item.raw_value for item in claims} == {"maestría y un doctorado"}
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy())
+    assert {record.fields[ProfileField.degree_type].value for record in profile.records} == {
+        "Master's Degree",
+        "Doctoral Degree",
+    }
+
+
+def test_non_degree_education_stays_in_evidence_without_creating_degree_rows():
+    values = [
+        "PMP certification",
+        "senior executive programme",
+        "honorary doctorate",
+        "postdoctoral work",
+        "doctoral candidate",
+        "graduate training",
+    ]
+    claims = [
+        claim(
+            f"non-degree-{index}",
+            field=ProfileField.degree_type,
+            value=value,
+            fact_group=f"education-{index}",
+        )
+        for index, value in enumerate(values)
+    ]
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy())
+
+    assert len(profile.records) == 1
+    degree = profile.records[0].fields[ProfileField.degree_type]
+    assert degree.value is None
+    assert set(degree.alternative_claim_ids) == {item.claim_id for item in claims}
+    assert not degree.review_required
+    assert not profile.records[0].review_required
+
+
+def test_non_degree_claim_cannot_displace_academic_degree_in_mixed_source_group():
+    claims = [
+        claim(
+            "academic",
+            field=ProfileField.degree_type,
+            value="MSc",
+            fact_group="education",
+        ),
+        claim(
+            "certification",
+            field=ProfileField.degree_type,
+            value="PMP certification",
+            fact_group="education",
+        ),
+        claim(
+            "university",
+            field=ProfileField.university_name,
+            value="Example University",
+            fact_group="education",
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy()).records[0]
+
+    assert record.fields[ProfileField.degree_type].value == "Master's Degree"
+    assert record.fields[ProfileField.degree_type].alternative_claim_ids == ["certification"]
+
+
+def test_normalized_equivalent_masters_merge_with_matching_context():
+    sources = [source(f"s{index}", domain=f"{index}.edu") for index in range(1, 4)]
+    claims = []
+    for index, degree in enumerate(("Master's", "master s", "MA APP"), start=1):
+        group = f"credential-{index}"
+        claims.extend(
+            [
+                claim(
+                    f"d{index}",
+                    f"s{index}",
+                    field=ProfileField.degree_type,
+                    value=degree,
+                    fact_group=group,
+                ),
+                claim(
+                    f"u{index}",
+                    f"s{index}",
+                    field=ProfileField.university_name,
+                    value="Example University",
+                    fact_group=group,
+                ),
+                claim(
+                    f"sub{index}",
+                    f"s{index}",
+                    field=ProfileField.subject,
+                    value="public policy",
+                    fact_group=group,
+                ),
+            ]
+        )
+
+    profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy())
+
+    assert len(profile.records) == 1
+    assert profile.records[0].fields[ProfileField.degree_type].value == "Master's Degree"
+    assert profile.records[0].fields[ProfileField.subject].value == "Public Policy"
+
+
+def test_two_explicit_same_level_degrees_with_distinct_context_stay_separate():
+    claims = []
+    for index, (university, subject) in enumerate(
+        (("University One", "Economics"), ("University Two", "Engineering")), start=1
+    ):
+        group = f"credential-{index}"
+        claims.extend(
+            [
+                claim(
+                    f"d{index}",
+                    field=ProfileField.degree_type,
+                    value="MSc",
+                    fact_group=group,
+                ),
+                claim(
+                    f"u{index}",
+                    field=ProfileField.university_name,
+                    value=university,
+                    fact_group=group,
+                ),
+                claim(
+                    f"s{index}",
+                    field=ProfileField.subject,
+                    value=subject,
+                    fact_group=group,
+                ),
+            ]
+        )
+
+    records = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy()).records
+
+    assert len(records) == 2
+    assert {record.fields[ProfileField.university_name].value for record in records} == {
+        "University One",
+        "University Two",
+    }
+
+
+def test_missing_optional_fields_and_one_weak_optional_field_do_not_escalate_record():
+    strong = source("strong", authority=0.95, domain="official.example", source_type=SourceType.first_party)
+    weak = source("weak", authority=0.9, domain="secondary.example")
+    claims = [claim("name", "strong", field=ProfileField.full_name, value="Jane Doe")]
+    clean = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [strong], ScoringPolicy()).records[0]
+
+    assert not clean.fields[ProfileField.subject].review_required
+    assert not clean.review_required
+
+    claims.append(
+        claim(
+            "subject",
+            "weak",
+            field=ProfileField.subject,
+            value="chemical engineering",
+            directness="ambiguous",
+        )
+    )
+    one_weak = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims, [strong, weak], ScoringPolicy()
+    ).records[0]
+
+    assert one_weak.fields[ProfileField.subject].value == "Chemical Engineering"
+    assert one_weak.fields[ProfileField.subject].review_required
+    assert not one_weak.review_required
+
+
+def test_weak_name_conflict_stays_field_review_without_escalating_record():
+    strong = source(
+        "strong",
+        authority=0.95,
+        domain="official.example",
+        source_type=SourceType.first_party,
+    )
+    weak = source(
+        "weak",
+        authority=0.25,
+        domain="aggregator.example",
+        identity=0.55,
+        source_type=SourceType.aggregator,
+    )
+    claims = [
+        claim("exact-name", "strong", field=ProfileField.full_name, value="Jane Doe"),
+        claim(
+            "weak-variant",
+            "weak",
+            field=ProfileField.full_name,
+            value="Jane A. Doe",
+            directness="ambiguous",
+        ),
+    ]
+
+    record = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe"), claims, [strong, weak], ScoringPolicy()
+    ).records[0]
+
+    name = record.fields[ProfileField.full_name]
+    assert name.value == "Jane Doe"
+    assert name.conflicting_claim_ids == ["weak-variant"]
+    assert name.review_required
+    assert name.scoring_components["conflict_strength"] < 0.5
+    assert not record.review_required
 
 
 def test_identity_name_only_is_ambiguous_and_clues_help():
@@ -264,7 +614,7 @@ def test_multiple_education_records_are_preserved_and_not_mixed():
         [source(), source("s2", authority=0.4, domain="two.org")],
         ScoringPolicy(),
     )
-    assert profile.fields[ProfileField.degree_type].value == "Bachelor's"
+    assert profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert not profile.fields[ProfileField.degree_type].conflicting_claim_ids
     assert profile.fields[ProfileField.university_name].value is None
     assert profile.fields[ProfileField.university_name].alternative_claim_ids == ["u2"]
@@ -287,7 +637,7 @@ def test_ungrouped_degree_component_cannot_be_attached_to_selected_record():
         [source(), source("s2", authority=0.4, domain="two.org")],
         ScoringPolicy(),
     )
-    assert profile.fields[ProfileField.degree_type].value == "Bachelor's"
+    assert profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert profile.fields[ProfileField.university_name].value is None
     assert "UNPAIRED_FACT" in profile.fields[ProfileField.university_name].review_reason_codes
 
@@ -337,7 +687,7 @@ def test_multi_source_person_assembles_one_record_with_field_provenance():
     assert len(profile.records) == 1
     record = profile.records[0]
     assert record.fields[ProfileField.organisation].value == "Example Foundation"
-    assert record.fields[ProfileField.degree_type].value == "Bachelor's"
+    assert record.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert record.fields[ProfileField.organisation].supporting_source_ids == ["s1"]
     assert record.fields[ProfileField.university_name].supporting_source_ids == ["s2"]
     assert record.fields[ProfileField.university_name].sources == ["https://two.edu/jane"]
@@ -379,7 +729,7 @@ def test_same_credential_many_sources_merges_and_corroborates_field():
     assert len(profile.records) == 1
     degree = profile.records[0].fields[ProfileField.degree_type]
     university = profile.records[0].fields[ProfileField.university_name]
-    assert degree.value == "Bachelor's"
+    assert degree.value == "Bachelor's Degree"
     assert set(degree.supporting_source_ids) == {"s1", "s2", "s3"}
     assert set(university.supporting_source_ids) == {"s1", "s2", "s3"}
     assert university.scoring_components["independent_domains"] == 3
@@ -430,9 +780,9 @@ def test_three_distinct_degrees_create_three_record_scopes():
 
     assert len(profile.records) == 3
     assert {record.fields[ProfileField.degree_type].value for record in profile.records} == {
-        "Bachelor's",
-        "Master's",
-        "Doctorate",
+        "Bachelor's Degree",
+        "Master's Degree",
+        "Doctoral Degree",
     }
     for record in profile.records:
         education_sources = {
@@ -566,6 +916,154 @@ def test_government_office_is_supported_without_company_assumptions():
     assert record.fields[ProfileField.profile_link].value == government.final_url
 
 
+def test_current_government_office_outranks_party_role_with_equal_currentness():
+    sources = [
+        source("gov", domain="cabinet.gov.example", source_type=SourceType.government),
+        source("party", domain="party.example"),
+    ]
+    claims = [
+        claim("gov-org", "gov", value="Office of the Prime Minister", fact_group="office", is_current=True),
+        claim(
+            "gov-title",
+            "gov",
+            field=ProfileField.job_title,
+            value="Prime Minister",
+            fact_group="office",
+            is_current=True,
+        ),
+        claim("party-org", "party", value="Example National Party", fact_group="party", is_current=True),
+        claim(
+            "party-title",
+            "party",
+            field=ProfileField.job_title,
+            value="Party Leader",
+            fact_group="party",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records[0]
+
+    assert record.fields[ProfileField.organisation].value == "Office of the Prime Minister"
+    assert record.fields[ProfileField.job_title].value == "Prime Minister"
+    assert not record.fields[ProfileField.organisation].conflicting_claim_ids
+    assert (
+        record.fields[ProfileField.organisation].scoring_components["relationship_type"]
+        == "current_government_office"
+    )
+
+
+def test_primary_executive_role_outranks_board_membership():
+    sources = [source("company", domain="company.example"), source("board", domain="board.example")]
+    claims = [
+        claim("company-org", "company", value="Example Holdings", fact_group="executive", is_current=True),
+        claim(
+            "company-title",
+            "company",
+            field=ProfileField.job_title,
+            value="Chief Executive Officer",
+            fact_group="executive",
+            is_current=True,
+        ),
+        claim("board-org", "board", value="Example Trust", fact_group="board", is_current=True),
+        claim(
+            "board-title",
+            "board",
+            field=ProfileField.job_title,
+            value="Board Member",
+            fact_group="board",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records[0]
+
+    assert record.fields[ProfileField.organisation].value == "Example Holdings"
+    assert record.fields[ProfileField.job_title].value == "Chief Executive Officer"
+    assert (
+        record.fields[ProfileField.job_title].scoring_components["relationship_type"]
+        == "current_executive_role"
+    )
+
+
+def test_country_is_not_selected_as_government_organisation_or_replaced_with_invented_office():
+    government = source("gov", domain="government.example", source_type=SourceType.government)
+    claims = [
+        claim("country", "gov", value="Ghana", fact_group="office", is_current=True),
+        claim(
+            "president",
+            "gov",
+            field=ProfileField.job_title,
+            value="President",
+            fact_group="office",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile(
+        "p1", PersonSeed(full_name="Jane Doe", country="Ghana"), claims, [government], ScoringPolicy()
+    ).records[0]
+
+    organisation = record.fields[ProfileField.organisation]
+    assert organisation.value is None
+    assert organisation.alternative_claim_ids == ["country"]
+    assert record.fields[ProfileField.job_title].value == "President"
+    assert record.review_required
+    assert "CURRENT_ROLE_RELATIONSHIP_UNCERTAIN" in record.review_reason_codes
+
+
+def test_public_residence_is_not_selected_as_the_office_organisation():
+    government = source("gov", domain="government.example", source_type=SourceType.government)
+    claims = [
+        claim(
+            "residence",
+            "gov",
+            value="Presidential Palace",
+            fact_group="office",
+            is_current=True,
+        ),
+        claim(
+            "president",
+            "gov",
+            field=ProfileField.job_title,
+            value="President",
+            fact_group="office",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [government], ScoringPolicy()).records[
+        0
+    ]
+
+    organisation = record.fields[ProfileField.organisation]
+    assert organisation.value is None
+    assert organisation.alternative_claim_ids == ["residence"]
+    assert "INVALID_ORGANISATION_VALUE" in organisation.review_reason_codes
+    assert record.fields[ProfileField.job_title].value == "President"
+    assert "CURRENT_ROLE_RELATIONSHIP_UNCERTAIN" in record.review_reason_codes
+
+
+def test_corporate_president_is_classified_as_executive_not_government():
+    claims = [
+        claim("org", value="Example Corporation", fact_group="role", is_current=True),
+        claim(
+            "title",
+            field=ProfileField.job_title,
+            value="President",
+            fact_group="role",
+            is_current=True,
+        ),
+    ]
+
+    record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy()).records[0]
+
+    assert (
+        record.fields[ProfileField.job_title].scoring_components["relationship_type"]
+        == "current_executive_role"
+    )
+
+
 def test_representative_link_uses_selected_field_contribution_before_authority():
     sources = [
         source("main", authority=0.9, domain="main.org"),
@@ -674,8 +1172,8 @@ def test_each_education_record_can_choose_a_different_representative_link():
     }
 
     assert links == {
-        "Bachelor's": "https://bachelor.edu/jane",
-        "Master's": "https://master.edu/jane",
+        "Bachelor's Degree": "https://bachelor.edu/jane",
+        "Master's Degree": "https://master.edu/jane",
     }
 
 
@@ -703,6 +1201,28 @@ def test_name_only_identity_strengthens_only_through_independent_context_agreeme
     assert "IDENTITY_AMBIGUITY" not in corroborated_name.review_reason_codes
 
 
+def test_identity_ambiguity_still_escalates_the_record():
+    ambiguous_source = source("ambiguous", authority=0.9, identity=0.55)
+    profile = reconcile(
+        "p1",
+        PersonSeed(full_name="Jane Doe"),
+        [
+            claim(
+                "name",
+                "ambiguous",
+                field=ProfileField.full_name,
+                value="Jane Doe",
+                identity_relevance=0.55,
+            )
+        ],
+        [ambiguous_source],
+        ScoringPolicy(),
+    )
+
+    assert profile.records[0].review_required
+    assert "IDENTITY_AMBIGUITY" in profile.records[0].review_reason_codes
+
+
 def test_name_only_mirrors_do_not_strengthen_identity():
     sources = {
         "s1": source("s1", domain="one.org", identity=0.55, content_hash="mirror"),
@@ -719,7 +1239,7 @@ def test_name_only_mirrors_do_not_strengthen_identity():
 
 
 def test_exact_name_from_independent_authoritative_sources_gets_field_only_uplift():
-    policy = ScoringPolicy()
+    policy = ScoringPolicy(review_threshold=60)
     sources = {
         "s1": source("s1", authority=0.9, domain="one.gov", identity=0.55),
         "s2": source("s2", authority=0.9, domain="two.edu", identity=0.55),

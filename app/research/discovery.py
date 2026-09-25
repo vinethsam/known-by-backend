@@ -120,6 +120,26 @@ def build_query(seed: PersonSeed) -> str:
     return " ".join(terms)[:600]
 
 
+def build_fallback_queries(seed: PersonSeed) -> list[str]:
+    """Relax an over-constrained seed query without widening the configured budget."""
+
+    name = f'"{seed.full_name}"'
+    clues = [
+        seed.organisation,
+        seed.university_name,
+        seed.country,
+        seed.location,
+        seed.job_title,
+        seed.subject,
+        seed.program_year,
+        *seed.known_attributes.values(),
+    ]
+    queries = [f"{name} {value}"[:600] for value in clues if value]
+    queries.append(f"{name} biography education career")
+    base_key = query_key(build_query(seed))
+    return [query for query in _unique(queries) if query_key(query) != base_key]
+
+
 def build_queries(
     seed: PersonSeed, settings: Settings | None = None, *, extra_queries: Iterable[str] = ()
 ) -> list[str]:

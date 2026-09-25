@@ -82,8 +82,10 @@ are canonicalized and deduplicated, and URLs that fail safety checks never becom
 candidates. Ordinary assistant content is never parsed for URLs. If no citations are
 available, or filtering or advisor selection leaves no source, orchestration records
 `NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES` and returns
-a `review_required` profile with explicit missing fields. These expected empty states
-do not become infrastructure-level failed jobs.
+a completed zero-coverage profile with `research_status=insufficient_evidence` and
+explicit missing fields. These expected empty states are neither human-review items nor
+infrastructure-level failed jobs. An empty first query may use deterministic clue-relaxing
+fallbacks, always within the existing hard budgets.
 
 Per-query and aggregate result, query, tool-attempt, model-attempt, token, source,
 and time budgets bound each person attempt. Aggregate results reserve requested
@@ -123,8 +125,11 @@ reconciliation. Search citations identify acquisition targets; they do not repla
 retrieved evidence for extracted profile claims.
 
 Source-local `fact_group` values link education and employment components but are not
-global identifiers. Reconciliation merges compatible bundles across sources by their
-normalized values. It ranks current organisation/title as one relationship, computes
+global identifiers. Before grouping, centralized deterministic normalization maps common
+English and multilingual degree terms to broad English levels, classifies non-degree
+education, and safely expands recognizable compound qualifications. Literal claims remain
+unchanged in the evidence ledger. Reconciliation merges compatible bundles across sources
+by normalized values. It ranks current organisation/title as one relationship, computes
 confidence and coverage per record, and derives a representative URL from selected
 field contributions. The representative choice is deterministic and requires no
 additional model request.
@@ -176,7 +181,7 @@ existing route/DNS, redirect, request, byte, and timeout checks enforced for fal
 
 ## Input and performance boundaries
 
-Person identity text is normalized with Unicode NFC, preserving non-Latin names and
+Person identity text is normalized with Unicode NFC and narrow mojibake repair, preserving non-Latin names and
 joiners. Unsupported controls/surrogates and excessive values are rejected. Preferred
 URLs are bounded to 4096 characters before URL parsing and network validation. Original
 CSV/TSV/XLSX cells remain unchanged; cells allow tabs and line breaks and are bounded

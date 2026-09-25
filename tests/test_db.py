@@ -168,8 +168,8 @@ def test_profile_records_survive_checkpoint_and_final_result_without_migration(t
         )
 
     result.profile.records = [
-        record("bachelors", "Bachelor's", "University A", "https://a.example/ada"),
-        record("masters", "Master's", "University B", "https://b.example/ada"),
+        record("bachelors", "Bachelor's Degree", "University A", "https://a.example/ada"),
+        record("masters", "Master's Degree", "University B", "https://b.example/ada"),
         record("doctorate", "PhD", "University C", "https://c.example/ada"),
     ]
     expected = [item.model_dump(mode="json") for item in result.profile.records]

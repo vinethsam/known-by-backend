@@ -178,7 +178,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None, fet
     ):
         results = await get_results(job_id)
         columns = await asyncio.to_thread(store.get_columns, str(job_id))
-        data = await asyncio.to_thread(export_results, results, columns, format, provenance=provenance)
+        data = await asyncio.to_thread(
+            export_results,
+            results,
+            columns,
+            format,
+            provenance=provenance,
+            low_confidence_threshold=settings.SCORING.review_threshold,
+        )
         mime = (
             "text/csv; charset=utf-8"
             if format == "csv"

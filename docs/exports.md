@@ -29,4 +29,8 @@ historical flat profiles still produce one row. Failed tasks and tasks without a
 result also produce one row with empty enrichment values.
 
 Both modes apply the same CSV/XLSX spreadsheet-formula and XML character
-protections.
+protections. XLSX also fills a populated selected-value cell and its associated
+confidence cell with pale yellow (`#FFF2CC`) when confidence is strictly below the
+configured `SCORING.review_threshold` (50 by default). Blank fields, confidence equal
+to 50, higher-confidence fields, unrelated cells, and whole rows are not highlighted.
+CSV retains the deterministic confidence and review columns but has no styling.
