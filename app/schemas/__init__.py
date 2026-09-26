@@ -43,6 +43,7 @@ class SourceType(StrEnum):
     university = "university"
     professional_body = "professional_body"
     publication = "publication"
+    encyclopedia = "encyclopedia"
     conference = "conference"
     directory = "directory"
     aggregator = "aggregator"

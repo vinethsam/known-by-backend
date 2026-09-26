@@ -15,7 +15,9 @@ from app.config import Settings
 from app.retrieval.service import (
     BrowserRenderer,
     BrowserRouteHTTPClient,
+    FetchConfigurationError,
     FetchError,
+    FetchTimeoutError,
     PinnedAsyncHTTPTransport,
     PinnedPublicNetworkBackend,
     RetrievalService,
@@ -488,7 +490,7 @@ async def test_browser_route_client_allows_only_get_and_head(monkeypatch):
         await route_client.fetch("https://example.com/page", method="POST")
 
 
-def test_needs_browser_only_for_successful_js_shells():
+def test_needs_browser_for_recoverable_static_failures_and_unusable_content():
     cfg = settings(PLAYWRIGHT_ENABLED=True, STATIC_MIN_READABLE_CHARS=250)
     shell = RetrievedPage(
         requested_url="https://example.com",
@@ -497,10 +499,49 @@ def test_needs_browser_only_for_successful_js_shells():
         content_type="text/html",
         html="<div id='root'></div><script></script><script></script>",
     )
-    blocked = shell.model_copy(update={"status": 403, "html": "Access denied captcha"})
+    blocked = shell.model_copy(update={"html": "<h1>Access denied</h1><p>Verify you are human</p>"})
+    empty = shell.model_copy(update={"html": ""})
+    title_only = shell.model_copy(update={"html": "<html><title>Jane Doe</title><body></body></html>"})
+    chrome_only = shell.model_copy(
+        update={
+            "html": "<nav>" + " ".join(f"<a href='/{i}'>Directory item {i}</a>" for i in range(40)) + "</nav>"
+        }
+    )
+    forbidden = shell.model_copy(update={"status": 403, "html": "Forbidden"})
+    limited = shell.model_copy(update={"status": 429, "html": "Try later"})
 
     assert needs_browser(shell, cfg)
-    assert not needs_browser(blocked, cfg)
+    assert needs_browser(blocked, cfg)
+    assert needs_browser(empty, cfg)
+    assert needs_browser(title_only, cfg)
+    assert needs_browser(chrome_only, cfg)
+    assert needs_browser(forbidden, cfg)
+    assert needs_browser(limited, cfg)
+
+
+def test_needs_browser_leaves_useful_static_and_nonrenderable_content_alone():
+    cfg = settings(PLAYWRIGHT_ENABLED=True, STATIC_MIN_READABLE_CHARS=250)
+    biography = "Jane Doe leads Example Foundation. " * 12
+    useful = RetrievedPage(
+        requested_url="https://example.com",
+        final_url="https://example.com",
+        status=200,
+        content_type="text/html",
+        html=f"<main><h1>Jane Doe</h1><p>{biography}</p></main>",
+    )
+    missing = useful.model_copy(update={"status": 404, "html": "Not found"})
+    structured = useful.model_copy(
+        update={"status": 500, "content_type": "application/json", "html": '{"error":"later"}'}
+    )
+    script_word = useful.model_copy(
+        update={"html": f"<script>const captcha = 'widget';</script><main><p>{biography}</p></main>"}
+    )
+
+    assert not needs_browser(useful, cfg)
+    assert not needs_browser(script_word, cfg)
+    assert not needs_browser(missing, cfg)
+    assert not needs_browser(structured, cfg)
+    assert not needs_browser(useful, settings(PLAYWRIGHT_ENABLED=False))
 
 
 @pytest.mark.asyncio
@@ -633,6 +674,212 @@ async def test_retrieval_service_uses_cache_and_browser_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retrieval_service_keeps_useful_static_content_without_browser(monkeypatch):
+    public_dns(monkeypatch)
+    calls = {"static": 0, "browser": 0}
+
+    class UsefulStatic:
+        async def fetch(self, url):
+            calls["static"] += 1
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="<main><p>" + ("Jane Doe leads Example Foundation. " * 20) + "</p></main>",
+            )
+
+        async def close(self):
+            pass
+
+    class UnusedBrowser:
+        async def fetch(self, url):
+            calls["browser"] += 1
+            raise AssertionError("useful static content must not be rendered")
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(PLAYWRIGHT_ENABLED=True),
+        static_fetcher=UsefulStatic(),
+        renderer=UnusedBrowser(),
+    )
+
+    page = await service.retrieve("https://example.com/profile", job_id="job-1")
+
+    assert page.retrieval_method == "static"
+    assert calls == {"static": 1, "browser": 0}
+
+
+@pytest.mark.asyncio
+async def test_cached_unusable_static_content_is_upgraded_without_static_refetch(monkeypatch):
+    public_dns(monkeypatch)
+    url = "https://example.com/profile"
+    cache = {
+        ("job-1", url): RetrievedPage(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<div id='root'></div><script></script><script></script>",
+            retrieval_method="static",
+        )
+    }
+    calls = {"static": 0, "browser": 0}
+
+    class UnusedStatic:
+        async def fetch(self, url):
+            calls["static"] += 1
+            raise AssertionError("cached static content must go directly to browser fallback")
+
+        async def close(self):
+            pass
+
+    class UsefulBrowser:
+        async def fetch(self, url):
+            calls["browser"] += 1
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="<main><p>" + ("Rendered Jane Doe profile. " * 20) + "</p></main>",
+                retrieval_method="browser",
+            )
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(PLAYWRIGHT_ENABLED=True),
+        static_fetcher=UnusedStatic(),
+        renderer=UsefulBrowser(),
+        cache=cache,
+    )
+
+    page = await service.retrieve(url, job_id="job-1")
+
+    assert page.retrieval_method == "browser"
+    assert calls == {"static": 0, "browser": 1}
+    assert cache[("job-1", url)]["retrieval_method"] == "browser"
+
+
+@pytest.mark.asyncio
+async def test_static_timeout_uses_one_browser_recovery_attempt(monkeypatch):
+    public_dns(monkeypatch)
+    calls = {"browser": 0}
+
+    class TimedOutStatic:
+        async def fetch(self, url):
+            raise FetchTimeoutError("static timeout")
+
+        async def close(self):
+            pass
+
+    class UsefulBrowser:
+        async def fetch(self, url):
+            calls["browser"] += 1
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="<main><p>" + ("Jane Doe profile evidence. " * 20) + "</p></main>",
+                retrieval_method="browser",
+            )
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(PLAYWRIGHT_ENABLED=True),
+        static_fetcher=TimedOutStatic(),
+        renderer=UsefulBrowser(),
+    )
+
+    page = await service.retrieve("https://example.com/profile", job_id="job-1")
+
+    assert page.retrieval_method == "browser"
+    assert calls["browser"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unusable_browser_result_ends_the_single_fallback_attempt(monkeypatch):
+    public_dns(monkeypatch)
+    calls = {"browser": 0}
+
+    class EmptyStatic:
+        async def fetch(self, url):
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="",
+            )
+
+        async def close(self):
+            pass
+
+    class FailedBrowser:
+        async def fetch(self, url):
+            calls["browser"] += 1
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=503,
+                content_type="text/html",
+                html="Service unavailable",
+                retrieval_method="browser",
+            )
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(PLAYWRIGHT_ENABLED=True),
+        static_fetcher=EmptyStatic(),
+        renderer=FailedBrowser(),
+    )
+
+    with pytest.raises(FetchError, match=r"browser returned unusable content \(http_503\)"):
+        await service.retrieve("https://example.com/profile", job_id="job-1")
+    assert calls["browser"] == 1
+
+
+@pytest.mark.asyncio
+async def test_static_configuration_failure_never_bypasses_policy_with_browser(monkeypatch):
+    public_dns(monkeypatch)
+    calls = {"browser": 0}
+
+    class MisconfiguredStatic:
+        async def fetch(self, url):
+            raise FetchConfigurationError("missing worker configuration")
+
+        async def close(self):
+            pass
+
+    class Browser:
+        async def fetch(self, url):
+            calls["browser"] += 1
+            raise AssertionError("browser must not bypass a configuration failure")
+
+        async def close(self):
+            pass
+
+    service = RetrievalService(
+        settings(PLAYWRIGHT_ENABLED=True),
+        static_fetcher=MisconfiguredStatic(),
+        renderer=Browser(),
+    )
+
+    with pytest.raises(FetchConfigurationError, match="missing worker configuration"):
+        await service.retrieve("https://example.com/profile", job_id="job-1")
+    assert calls["browser"] == 0
+
+
+@pytest.mark.asyncio
 async def test_retrieval_service_preserves_original_requested_url_after_browser_fallback(
     monkeypatch,
 ):
@@ -659,7 +906,7 @@ async def test_retrieval_service_preserves_original_requested_url_after_browser_
                 final_url="https://example.com/b",
                 status=200,
                 content_type="text/html",
-                html="<main>Rendered</main>",
+                html="<main><p>" + ("Rendered profile content. " * 20) + "</p></main>",
                 retrieval_method="browser",
             )
 

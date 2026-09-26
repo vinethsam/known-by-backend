@@ -69,6 +69,7 @@ def validate_claims(
             if claim.field == ProfileField.degree_type
             else [normalise_value(claim.field, claim.value)]
         )
+        compound_degree = claim.field == ProfileField.degree_type and len(normalisations) > 1
         for normalisation in normalisations:
             if not normalisation.value:
                 reasons.append("EMPTY_NORMALISED_VALUE")
@@ -96,6 +97,35 @@ def validate_claims(
                     prompt_version=EXTRACTION_PROMPT_VERSION,
                 )
             )
+            if claim.field == ProfileField.degree_type and normalisation.subject:
+                subject = normalise_value(ProfileField.subject, normalisation.subject)
+                claims.append(
+                    EvidenceClaim(
+                        person_id=source.person_id,
+                        source_id=source.source_id,
+                        field=ProfileField.subject,
+                        raw_value=claim.value,
+                        normalised_value=subject.value,
+                        normalisation_certainty=min(normalisation.certainty, subject.certainty),
+                        evidence_text=claim.evidence,
+                        evidence_location=claim.evidence_location,
+                        temporal_context=claim.temporal_context,
+                        as_of_date=claim.as_of_date,
+                        end_date=claim.end_date,
+                        is_current=claim.is_current,
+                        directness=claim.directness,
+                        source_claim_type=(
+                            f"derived_degree_subject:{comparison_key(normalisation.value)}"
+                            if compound_degree
+                            else "derived_degree_subject"
+                        ),
+                        fact_group=claim.fact_group,
+                        subject_name=claim.subject_name,
+                        identity_relevance=source.identity.score,
+                        extraction_model=model,
+                        prompt_version=EXTRACTION_PROMPT_VERSION,
+                    )
+                )
     return deduplicate_claims(claims), sorted(set(reasons))
 
 

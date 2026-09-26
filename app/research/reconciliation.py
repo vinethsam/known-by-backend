@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -16,18 +17,25 @@ from app.research.confidence import (
     confidence_for_group,
     profile_scores,
 )
-from app.research.identity import effective_identity_scores
+from app.research.identity import effective_identity_scores, eligible_identity_source_ids
 from app.research.normalisation import (
     BACHELORS_DEGREE,
+    DIPLOMA,
     DOCTORAL_DEGREE,
+    LAW_DEGREE,
     MASTERS_DEGREE,
+    MEDICAL_DEGREE,
+    POSTGRADUATE_DEGREE,
+    POSTGRADUATE_DIPLOMA,
     RELATIONSHIP_PRIORITY,
     EducationKind,
     RelationshipType,
     classify_education,
+    classify_public_office,
     classify_relationship,
     comparison_key,
     is_non_organisation_place,
+    is_probable_country_context,
     name_key,
     normalise_degree_candidates,
     normalise_display,
@@ -42,6 +50,7 @@ from app.schemas import (
     ProfileRecord,
     SourceRecord,
     SourceType,
+    utcnow,
 )
 
 
@@ -124,8 +133,17 @@ def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBund
         if len(degree_values) <= 1 or len(raw_values) != 1:
             result.append(bundle)
             continue
-        common = [claim for claim in bundle.claims if claim.field != ProfileField.degree_type]
         for degree_value in sorted(degree_values):
+            derived_marker = f"derived_degree_subject:{degree_value}"
+            common = [
+                claim
+                for claim in bundle.claims
+                if claim.field != ProfileField.degree_type
+                and (
+                    not claim.source_claim_type.startswith("derived_degree_subject:")
+                    or claim.source_claim_type == derived_marker
+                )
+            ]
             matching = [
                 claim
                 for claim in degree_claims
@@ -229,6 +247,7 @@ def _education_clusters(
     excluded: list[EvidenceClaim] = []
     regular = []
     non_degree_kinds = {
+        EducationKind.ambiguous,
         EducationKind.certification,
         EducationKind.executive_education,
         EducationKind.honorary_degree,
@@ -354,8 +373,20 @@ def _quality_for_claim(
     related = relation_fields.get(claim.claim_id, {claim.field})
     if claim.field == ProfileField.full_name:
         return (1, None) if name_key(claim.raw_value) == name_key(seed.full_name) else (0.65, "NAME_VARIANT")
-    if claim.field == ProfileField.job_title and ProfileField.organisation not in related:
-        return 0.65, "UNPAIRED_FACT"
+    if claim.field == ProfileField.job_title:
+        words = claim.raw_value.split()
+        sentence_like = len(words) >= 6 and bool(
+            re.search(
+                r"\b(?:who|whose|with experience|known for|in the .{1,50} space)\b",
+                comparison_key(claim.raw_value),
+            )
+        )
+        if sentence_like:
+            return 0.1, "DESCRIPTIVE_JOB_TITLE"
+        if len(words) > 10 or len(claim.raw_value) > 100:
+            return 0.55, "DESCRIPTIVE_JOB_TITLE"
+        if ProfileField.organisation not in related:
+            return 0.65, "UNPAIRED_FACT"
     if claim.field == ProfileField.subject and not related.intersection(
         {ProfileField.university_name, ProfileField.degree_type}
     ):
@@ -364,6 +395,11 @@ def _quality_for_claim(
         BACHELORS_DEGREE,
         MASTERS_DEGREE,
         DOCTORAL_DEGREE,
+        MEDICAL_DEGREE,
+        LAW_DEGREE,
+        DIPLOMA,
+        POSTGRADUATE_DIPLOMA,
+        POSTGRADUATE_DEGREE,
     }:
         return 0.7, "AMBIGUOUS_EDUCATION"
     if claim.field == ProfileField.university_name and len(related & EDUCATION_FIELDS) == 1:
@@ -396,11 +432,17 @@ def _decision(
     reason_codes = list(reason_codes or [])
     if not relevant:
         reasons = ["MISSING_FIELD", *reason_codes]
+        review_reasons = {
+            "AMBIGUOUS_EDUCATION",
+            "BELOW_SELECTION_FLOOR",
+            "CURRENT_ROLE_CONFLICT",
+            "EDUCATION_GROUPING_AMBIGUITY",
+        }
         return FieldDecision(
             conflicting_claim_ids=[claim.claim_id for claim in _unique_claims(conflicts)],
             alternative_claim_ids=[claim.claim_id for claim in alternatives],
             review_reason_codes=list(dict.fromkeys(reasons)),
-            review_required=False,
+            review_required=bool(review_reasons.intersection(reasons)),
         )
 
     groups: dict[str, list[EvidenceClaim]] = defaultdict(list)
@@ -474,6 +516,8 @@ def _decision(
         "NAME_VARIANT",
         "UNPAIRED_FACT",
         "AMBIGUOUS_EDUCATION",
+        "DESCRIPTIVE_JOB_TITLE",
+        "BELOW_SELECTION_FLOOR",
     }
     if field_name == ProfileField.degree_type:
         degree_details = next(
@@ -492,6 +536,24 @@ def _decision(
         )
         if degree_details.reason_code:
             reasons = list(dict.fromkeys([*reasons, degree_details.reason_code]))
+    if confidence < policy.selection_threshold:
+        reasons = list(dict.fromkeys([*reasons, "BELOW_SELECTION_FLOOR"]))
+        return FieldDecision(
+            confidence=confidence,
+            conflicting_claim_ids=[claim.claim_id for claim in all_conflicts],
+            alternative_claim_ids=list(
+                dict.fromkeys(
+                    [
+                        *(claim.claim_id for claim in support),
+                        *(claim.claim_id for claim in all_conflicts),
+                        *(claim.claim_id for claim in alternatives),
+                    ]
+                )
+            ),
+            review_required=True,
+            review_reason_codes=reasons,
+            scoring_components=components,
+        )
     return FieldDecision(
         value=display,
         confidence=confidence,
@@ -529,8 +591,6 @@ def _employment_decisions(
             return False
         if comparison_key(claim.raw_value) in geography_keys:
             return True
-        if not is_non_organisation_place(claim.raw_value):
-            return False
         paired_titles = [
             item.raw_value
             for item in claims
@@ -538,11 +598,21 @@ def _employment_decisions(
             and item.source_id == claim.source_id
             and item.fact_group == claim.fact_group
         ]
+        paired_title = " ".join(paired_titles) or None
+        source_types = {sources[claim.source_id].source_type}
+        if is_probable_country_context(
+            claim.raw_value,
+            paired_title,
+            source_types=source_types,
+        ):
+            return True
+        if not is_non_organisation_place(claim.raw_value):
+            return False
         return (
             classify_relationship(
                 claim.raw_value,
-                " ".join(paired_titles) or None,
-                source_types={sources[claim.source_id].source_type},
+                paired_title,
+                source_types=source_types,
             )
             == RelationshipType.current_government_office
         )
@@ -587,7 +657,20 @@ def _employment_decisions(
             source_types={sources[claim.source_id].source_type for claim in cluster.claims},
         )
 
-    def rank(cluster: _EvidenceCluster) -> tuple[int, int, int, int, float]:
+    def public_office_type(cluster: _EvidenceCluster):
+        organisations = " ".join(
+            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation
+        )
+        titles = " ".join(
+            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.job_title
+        )
+        return classify_public_office(
+            organisations or None,
+            titles or None,
+            source_types={sources[claim.source_id].source_type for claim in cluster.claims},
+        )
+
+    def rank(cluster: _EvidenceCluster) -> tuple[int, int, int, int, int, float]:
         cluster_claims = cluster.claims
         explicitly_current = int(any(claim.is_current is True for claim in cluster_claims))
         observed = max(
@@ -597,6 +680,19 @@ def _employment_decisions(
             ),
             default=date.min,
         )
+        reference_date = today or utcnow().date()
+        if observed == date.min:
+            freshness = 4 if explicitly_current else 0
+        else:
+            age = max(0, (reference_date - observed).days)
+            if age <= policy.current_half_life_days:
+                freshness = 4
+            elif age <= 2 * policy.current_half_life_days:
+                freshness = 3
+            elif age <= 4 * policy.current_half_life_days:
+                freshness = 2
+            else:
+                freshness = 1
         completeness = len({claim.field for claim in cluster_claims} & VOLATILE_FIELDS)
         relationship_priority = RELATIONSHIP_PRIORITY[relationship_type(cluster)]
         strength = max(
@@ -610,7 +706,14 @@ def _employment_decisions(
             )[0]
             for claim in cluster_claims
         )
-        return explicitly_current, observed.toordinal(), relationship_priority, completeness, strength
+        return (
+            freshness,
+            relationship_priority,
+            explicitly_current,
+            observed.toordinal(),
+            completeness,
+            strength,
+        )
 
     clusters.sort(
         key=lambda cluster: tuple(-value for value in rank(cluster)) + (_cluster_signature(cluster),)
@@ -621,12 +724,11 @@ def _employment_decisions(
     alternatives = list(clusters[1:])
     for cluster in clusters[1:]:
         candidate_rank = rank(cluster)
-        same_current_state = candidate_rank[0] == selected_rank[0]
+        same_current_state = candidate_rank[:3] == selected_rank[:3]
         same_observation = (
-            candidate_rank[1] == selected_rank[1]
-            and candidate_rank[2] == selected_rank[2]
-            and abs(candidate_rank[4] - selected_rank[4]) <= 0.1
-        )
+            candidate_rank[3] == selected_rank[3] == date.min.toordinal()
+            or abs(candidate_rank[3] - selected_rank[3]) <= 30
+        ) and abs(candidate_rank[5] - selected_rank[5]) <= 0.1
         if same_current_state and same_observation:
             unresolved.append(cluster)
 
@@ -664,6 +766,9 @@ def _employment_decisions(
             reason_codes=reasons,
         )
         decisions[field_name].scoring_components["relationship_type"] = relationship_type(selected).value
+        office_type = public_office_type(selected)
+        if office_type is not None:
+            decisions[field_name].scoring_components["public_office_type"] = office_type.value
     return decisions
 
 
@@ -770,6 +875,23 @@ def _representative_link(
         reasons.append("LOW_CONFIDENCE")
     if weak_fallback:
         reasons.append("LOW_SOURCE_AUTHORITY")
+    if confidence < policy.selection_threshold:
+        reasons = list(dict.fromkeys([*reasons, "BELOW_SELECTION_FLOOR"]))
+        return FieldDecision(
+            confidence=confidence,
+            alternative_claim_ids=[claim.claim_id for claim in supporting],
+            review_required=True,
+            review_reason_codes=reasons,
+            scoring_components={
+                "selected_field_contributions": count,
+                "contribution_strength": total,
+                "authority": authority,
+                "directness": directness,
+                "identity": identity,
+                "recency_ordinal": recency,
+                "formula_version": "representative-source-v1",
+            },
+        )
     return FieldDecision(
         value=url,
         confidence=confidence,
@@ -818,6 +940,10 @@ def _record_review(
         reasons.append("CURRENT_ROLE_CONFLICT")
     if "EDUCATION_GROUPING_AMBIGUITY" in all_reasons:
         reasons.append("EDUCATION_GROUPING_AMBIGUITY")
+    if "DESCRIPTIVE_JOB_TITLE" in all_reasons:
+        reasons.append("DESCRIPTIVE_JOB_TITLE")
+    if "BELOW_SELECTION_FLOOR" in all_reasons:
+        reasons.append("BELOW_SELECTION_FLOOR")
     if any(
         "SOURCE_CONFLICT" in reasons_by_field.get(field_name, set())
         and fields[field_name].scoring_components.get("conflict_strength", 0) >= 0.5
@@ -884,14 +1010,16 @@ def reconcile(
     """Return a person profile whose legacy fields mirror its primary output record."""
 
     sources = {source.source_id: source for source in source_records}
+    eligible_source_ids = eligible_identity_source_ids(seed, claims, sources, policy)
     accepted = [
         claim
         for claim in claims
         if claim.source_id in sources
+        and claim.source_id in eligible_source_ids
         and not sources[claim.source_id].identity.rejected
         and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
     ]
-    identities = effective_identity_scores(accepted, sources, policy)
+    identities = effective_identity_scores(accepted, sources, policy, seed=seed)
     relation_fields = _relation_fields_by_claim(accepted)
     quality_pairs = {claim.claim_id: _quality_for_claim(claim, seed, relation_fields) for claim in accepted}
     qualities = {claim_id: quality for claim_id, (quality, _) in quality_pairs.items()}
@@ -939,7 +1067,14 @@ def reconcile(
             reasons = list(cluster_reasons)
             if alternatives:
                 if any(claim in non_degree_claims for claim in alternatives):
-                    reasons.append("NON_DEGREE_EDUCATION")
+                    if any(
+                        classify_education(claim.raw_value) == EducationKind.ambiguous
+                        for claim in alternatives
+                        if claim in non_degree_claims
+                    ):
+                        reasons.append("AMBIGUOUS_EDUCATION")
+                    else:
+                        reasons.append("NON_DEGREE_EDUCATION")
                 if any(claim in cluster_alternatives for claim in alternatives):
                     reasons.append("UNPAIRED_FACT")
             fields[field_name] = _decision(

@@ -65,6 +65,14 @@ the exact person name and supplied clues. Candidate decisions are reused within 
 person attempt, and pending candidates are processed before paying for another
 search. Follow-up planning runs only when unresolved fields justify it.
 
+Seed organisation, university, title, geography, subject, year, and known attributes
+guide discovery and identity resolution only. They never enter the claim ledger or
+final fields without retrieved, grounded evidence. When the seed supplies an identity
+anchor, same-name sources that do not connect to an anchor may be extracted
+provisionally, but their claims cannot populate the final profile. Institutional clues
+and specific known attributes can provide anchors; job title is the fallback when no
+stronger anchor is present.
+
 Every source selected in the current bounded discovery round is consumed before a
 target-confidence stop. This allows corroboration and additional credentials without
 changing the concurrent fetch window, extraction semaphore, budgets or source caps.
@@ -85,7 +93,10 @@ available, or filtering or advisor selection leaves no source, orchestration rec
 a completed zero-coverage profile with `research_status=insufficient_evidence` and
 explicit missing fields. These expected empty states are neither human-review items nor
 infrastructure-level failed jobs. An empty first query may use deterministic clue-relaxing
-fallbacks, always within the existing hard budgets.
+fallbacks, always within the existing hard budgets. If selected sources all fail or
+produce no identity-eligible grounded claims, one deterministic recovery queue uses
+the same clue-based queries. Seen URLs remain excluded, and the existing query,
+result, tool, source, token, and person-time limits remain authoritative.
 
 Per-query and aggregate result, query, tool-attempt, model-attempt, token, source,
 and time budgets bound each person attempt. Aggregate results reserve requested
@@ -126,13 +137,15 @@ retrieved evidence for extracted profile claims.
 
 Source-local `fact_group` values link education and employment components but are not
 global identifiers. Before grouping, centralized deterministic normalization maps common
-English and multilingual degree terms to broad English levels, classifies non-degree
-education, and safely expands recognizable compound qualifications. Literal claims remain
-unchanged in the evidence ledger. Reconciliation merges compatible bundles across sources
-by normalized values. It ranks current organisation/title as one relationship, computes
-confidence and coverage per record, and derives a representative URL from selected
-field contributions. The representative choice is deterministic and requires no
-additional model request.
+English and multilingual degree terms to a controlled eight-type vocabulary, classifies
+non-degree education, safely expands recognizable compound qualifications, and derives
+an explicit subject embedded in a degree title. Literal claims remain unchanged in the
+evidence ledger. Reconciliation merges compatible bundles across sources by normalized
+values. It ranks current organisation/title as one relationship using freshness,
+currentness, primary-role type, and evidence strength; public roles receive a compact
+office subtype. It computes confidence and coverage per record, applies the selected-value
+floor, and derives a representative URL from selected field contributions. All steps are
+deterministic and require no additional model request.
 
 Source/advisor prompts treat seed fields, candidate snippets, and known clues as
 untrusted data. Extraction also treats source text and metadata as untrusted. JSON
@@ -148,11 +161,18 @@ The static Worker receives a POST to its configured full endpoint, body
 `final_url`, integer `status`, optional `content_type`, and string `html`.
 The same body field can carry structured JSON with the appropriate content type.
 
-Playwright is a fallback for successful thin application shells, never access-denied
-pages. All research targets, redirects, and browser requests require public-address
+Static retrieval remains first. One Playwright attempt may follow a timeout or other
+recoverable static error, status 403/408/425/429, redirect/transient server response,
+challenge page, empty or thin body, chrome-only page, or JavaScript shell. Permanent
+client errors, unsupported types, size-limit failures, configuration errors, and URL
+policy failures do not use browser fallback. Rendered output must itself be successful
+and usable. `STATIC_MIN_READABLE_CHARS` (default `250`) controls the readable-text
+threshold used to identify thin static content. Login/CAPTCHA controls are not
+bypassed. All research targets, redirects, and browser requests require public-address
 validation. The separately deployed Worker must enforce its own upstream protections.
-Development may use a local HTTP Worker endpoint; private research targets stay blocked.
-Static and rendered content share downstream cleaning, Markdown, and chunk selection.
+Development may use a local HTTP Worker
+endpoint; private research targets stay blocked. Static and rendered content share
+downstream cleaning, Markdown, and chunk selection.
 
 A bounded window overlaps selected-source fetches with processing/extraction of
 earlier sources. Results are consumed in candidate rank order, retaining deterministic
@@ -161,6 +181,8 @@ already-selected discovery round; hard source/no-new-evidence limits can still c
 the window. `MAX_CONCURRENT_FETCHES` and `PER_DOMAIN_CONCURRENCY` remain authoritative,
 and every unused task is cancelled and awaited. A source failure is handled at its
 normal position without cancelling unrelated successful fetches.
+Retrieval, duplicate, and identity-rejected sources do not consume the no-new-claims
+streak; only a completed extraction with no new grounded claim does so.
 
 Within-job cache stores bounded retrieved content independent of person identity.
 Extracted person claims are never reused for another person. Structured acquisition
@@ -172,6 +194,9 @@ people requesting the same URL share retrieval, never extracted claims. Identica
 page bodies retain distinct source records and skip repeated extraction without
 becoming independent corroboration. Structured bulk/paginated acquisition uses the
 same retrieval cache; it does not introduce a person-claim cache.
+An older cached static page that is now classified as unusable can take the same one
+browser fallback and replace its cache entry; all cached URLs and byte/type limits are
+still revalidated first.
 
 OpenRouter and static retrieval keep lifecycle-managed HTTP connection pools. The
 browser renderer reuses one Chromium process with a fresh isolated context per

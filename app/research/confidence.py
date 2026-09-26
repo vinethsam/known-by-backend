@@ -87,7 +87,19 @@ def claim_strength(
     )
     preferred = policy.preferred_bonus if source.preferred_source else 0
     quality = max(0, min(1, field_quality))
-    strength = identity * claim.normalisation_certainty * quality * min(1, base + preferred)
+    # Recency is a weak additive signal in the evidence mix, but dated current roles
+    # also need a meaningful age discount. Unknown dates retain a modest 0.90 factor:
+    # absence is uncertainty, not proof that a role is stale. Timeless fields stay at one.
+    observed = claim.as_of_date or source.published_at
+    if claim.field not in VOLATILE_FIELDS:
+        time_sensitivity = 1.0
+    elif observed is None and claim.is_current is not False and claim.end_date is None:
+        time_sensitivity = 0.9
+    else:
+        time_sensitivity = 0.35 + 0.65 * recency
+    strength = (
+        identity * claim.normalisation_certainty * quality * min(1, base + preferred) * time_sensitivity
+    )
     return strength, {
         "authority": source.authority_score,
         "baseline_identity": baseline_identity,
@@ -96,6 +108,7 @@ def claim_strength(
         "recency": recency,
         "normalisation": claim.normalisation_certainty,
         "field_quality": quality,
+        "time_sensitivity": time_sensitivity,
         "preferred_bonus": preferred,
         "base": base,
         "claim_strength": strength,

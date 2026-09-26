@@ -41,6 +41,7 @@ class ScoringPolicy(Contract):
             SourceType.university: 0.90,
             SourceType.professional_body: 0.85,
             SourceType.publication: 0.80,
+            SourceType.encyclopedia: 0.60,
             SourceType.conference: 0.72,
             SourceType.directory: 0.65,
             SourceType.aggregator: 0.45,
@@ -69,6 +70,7 @@ class ScoringPolicy(Contract):
     identity_minimum: float = Field(default=0.45, ge=0, le=1)
     identity_review_threshold: float = Field(default=0.80, ge=0, le=1)
     review_threshold: float = Field(default=DEFAULT_REVIEW_THRESHOLD, ge=0, le=100)
+    selection_threshold: float = Field(default=10, ge=0, le=100)
     current_half_life_days: int = Field(default=730, ge=1)
     unknown_recency: float = Field(default=0.65, ge=0, le=1)
     historical_current_factor: float = Field(default=0.25, ge=0, le=1)
@@ -127,6 +129,8 @@ class ScoringPolicy(Contract):
             for x in [*self.candidate_relevance_weights.values(), *self.candidate_identity_weights.values()]
         ):
             raise ValueError("Candidate signals must be in [0, 1]")
+        if self.selection_threshold > self.review_threshold:
+            raise ValueError("Selection threshold must not exceed the review threshold")
         return self
 
 

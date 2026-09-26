@@ -64,6 +64,14 @@ cancelled and awaited.
 An empty fully constrained search can enqueue deterministic single-clue fallbacks.
 These queries do not add a new budget or unbounded retry path: the existing query,
 server-tool, aggregate-result, token, source, and person-time limits still apply.
+The same queue is admitted once after an initial selected source set yields no
+identity-eligible grounded claims. Failed canonical URLs remain seen and cannot loop
+back into retrieval. Recovery stays inside the existing query, result, tool, source,
+token, and person-time budgets. Retrieval and identity failures do not advance the
+no-new-claims stop; only a completed extraction with no new grounded claims does.
+
+Each eligible static result receives at most one browser attempt. A browser failure is
+the final retrieval outcome for that source; it does not create an unbounded retry path.
 
 `MAX_SOURCES_PER_PERSON` continues to cap processed source records. Redirect aliases
 already known before a fetch starts are skipped. An alias already in flight can add
@@ -72,12 +80,13 @@ is bounded by `2 * MAX_SOURCES_PER_PERSON - 1` distinct requests per attempt in 
 case. Operator-configured structured preloads keep their existing separate page
 bounds. This preserves later evidence that a serial run would have processed.
 
-`MAX_CONCURRENT_EXTRACTIONS` is the only new tuning setting: default `2`, allowed
-range `1`–`20`, shared across one worker's orchestrator. Parallel chunks require enough
-person budget for all remaining chunks and configured retries; otherwise extraction
-falls back to serial order. Each actual attempt still obtains an atomic reservation
-before transport. Usage and checkpoints are serialized safely when responses finish
-out of order. Raising concurrency does not raise a person's token or attempt budget.
+`MAX_CONCURRENT_EXTRACTIONS` remains the extraction-concurrency limiter: default `2`,
+allowed range `1`–`20`, shared across one worker's orchestrator. Parallel chunks require
+enough person budget for all remaining chunks and configured retries; otherwise
+extraction falls back to serial order. Each actual attempt still obtains an atomic
+reservation before transport. Usage and checkpoints are serialized safely when
+responses finish out of order. Raising concurrency does not raise a person's token or
+attempt budget.
 
 ## Reuse and durability
 
@@ -95,11 +104,12 @@ transactions, skipping updates to unchanged ledger rows. Lease renewal and fenci
 remain intact; renewal failures also cancel and drain owned research work. There is no new infrastructure,
 database migration, or telemetry persistence service.
 
-The 2026-09-25 normalization-version-4 offline run preserved the two-fetch cache
-pattern, configured concurrency peaks, and six-query result reads. It used
-173/749/3,629/25,028 SQL statements and 4/20/100/800 model attempts for
-1/5/25/100-person fixtures. Those work counts are lower than the prior recorded run;
-wall-clock timings remain non-gating and varied with local machine load.
+The 2026-09-26 normalization-version-5 run is recorded in the
+[accuracy and retrieval-recovery benchmark table](../benchmarks/README.md#accuracy-and-retrieval-recovery-pass-measurement).
+It preserved the two-fetch cache pattern, configured concurrency peaks, version-4
+work counts, and six-query completed-result reads. Recovery is covered by separate
+failure fixtures and stays inactive for healthy benchmark batches. Wall-clock timings
+remain non-gating and vary with local machine load.
 
 Redeploy the web and worker from the same revision. The extraction setting may be
 omitted to use its conservative default. After deployment, one ordinary person run

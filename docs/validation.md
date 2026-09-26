@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the deterministic data-quality pass on **2026-09-25**, Windows,
+Validated locally after the accuracy and retrieval-recovery pass on **2026-09-27**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,11 +9,13 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Full test suite | **367 passed, 5 skipped**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
-| Focused data-quality, export, discovery, API, and benchmark tests | **191 passed** |
+| Final full test suite | **428 passed, 5 skipped, 2 warnings** in **23.22 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Focused pre-edit accuracy baseline | **219 passed** |
 | Offline production-pipeline benchmark | Completed for 1, 5, 25, and 100 people with mocked HTTP and no paid calls |
 | Ruff lint | `ruff check .` passed |
-| Ruff formatting | All 75 Python files formatted |
+| Ruff formatting | All 77 files already formatted |
+| Python compile/import | Application and compatibility entry points passed |
+| Alembic | Single head `202609150001`; fresh SQLite upgrade/check/downgrade passed with no schema drift |
 | Git diff whitespace check | Passed |
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
@@ -37,16 +39,27 @@ Additional checks cover legacy/new profile JSON, multi-row rich exports, source-
 isolation, weak-source link gating, mirrored evidence, and nested benchmark
 normalization.
 
-Data-quality fixtures cover English and multilingual degree aliases, generic-degree
-metadata, unknown qualifications, compound-level splitting, non-degree filtering,
-equivalent and distinct same-level credentials, subject formatting, Unicode/mojibake,
-field-versus-record review, executive/board and government/party role priority,
-country and public-residence rejection, collision-safe XLSX highlighting, and bounded
-empty-search fallbacks.
+Accuracy fixtures cover seed-aware identity anchors, local name/clue association,
+explicit affiliation denials, and bounded cross-source bridges, including provisional
+unanchored namesakes and specific known-attribute anchors. They also verify that
+Wikipedia is forced to `encyclopedia` authority regardless of labels or domain
+overrides. Retrieval checks cover one browser attempt for each eligible
+static result and one bounded search-recovery queue when initial retrieval fails or
+produces no identity-eligible grounded claims.
+
+Data-quality fixtures cover the eight controlled degree types, English and multilingual
+aliases, derived subjects from grounded degree titles, qualification-label suffixes,
+generic-degree metadata,
+compound-level splitting, non-degree filtering, and ambiguous education retained as
+alternatives without manufacturing credentials. They also cover compatible and
+distinct same-type credentials, Unicode/mojibake, the 10% selected-value floor,
+field-versus-record review, current-role freshness, executive/board and
+government/party priority, the public-office taxonomy, country and public-residence
+rejection, collision-safe XLSX highlighting, and bounded empty-search fallbacks.
 
 ## Hardening regression coverage
 
-The pre-edit baseline was **180 passed, 5 skipped**. Added checks cover bounded
+The focused pre-edit baseline was **219 passed**. Added checks cover bounded
 retrieval and extraction, domain fairness, out-of-order responses, atomic retry/token
 budgets, cancellation, lease-renewal failures, frozen checkpoints, redirect aliases,
 JSON-only content fingerprints, cache/job isolation, browser context cleanup/restart,
@@ -86,6 +99,9 @@ verify the safe diagnostic fields used to explain zero-token records. These chec
 offline and make no paid OpenRouter calls.
 
 ## Migration coverage
+
+The accuracy pass uses existing profile/source JSON and configuration. It adds no
+Alembic migration and no CSV/XLSX export columns.
 
 - Real OpenRouter request/response adapters under HTTP fixtures: server-tool syntax,
   citation-only discovery, canonical deduplication, missing or malformed results,

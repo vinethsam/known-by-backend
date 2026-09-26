@@ -42,22 +42,34 @@ remain separate retry/research failures with their specific error codes.
   Batch headers are inferred deterministically across common space, snake-case,
   kebab-case, camelCase, and punctuation variants; only a usable person-name column
   is required.
-- Iterative public-source discovery, identity checks, canonical URL deduplication,
-  bounded retrieval, and within-job content caching.
+- Iterative public-source discovery, seed-aware identity gating, canonical URL
+  deduplication, bounded static-to-browser recovery, and within-job content caching.
 - Multi-source selection of seven profile fields: name, current organisation, current
   job title, university, degree, subject, and a representative profile link.
+- Spreadsheet organisation, title, country/location, university, subject, year, and
+  known attributes constrain identity resolution but never become final evidence.
+  When the seed supplies an identity anchor, same-name sources that do not connect to
+  a locally associated anchor remain provisional and cannot populate final facts.
+- Organisation and title stay paired. Freshness bands and a compact public-office
+  taxonomy prioritize current primary, executive, academic, and government roles over
+  stale employment, board/advisory work, parties, countries, and official buildings.
 - Field-level supporting URLs, claim IDs, conflicts, confidence, and review reasons.
   Distinct supported education credentials produce separate records while shared
   identity and current-employment decisions repeat safely.
 - Central deterministic normalization keeps literal claims for provenance while
-  exporting controlled English degree levels, repaired Unicode, and conservatively
-  formatted subject, institution, organisation, and title values. Certifications,
-  honorary awards, ongoing study, postdoctoral work, and training stay in the evidence
-  ledger without becoming earned-degree rows.
+  exporting `Bachelor's Degree`, `Master's Degree`, `Doctoral Degree`, `Medical Degree`,
+  `Law Degree`, `Diploma`, `Postgraduate Diploma`, or `Postgraduate Degree`. Subjects
+  explicitly encoded in degree titles are split into the existing Subject field.
+  Vague qualifications, certifications, honorary awards, ongoing study, postdoctoral
+  work, and training stay in the evidence ledger without becoming earned-degree rows.
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
   coverage remains distinct from confidence. The default field-review threshold is
-  50%; record review is reserved for serious identity, relationship, grouping,
-  contradiction, or representative-source issues. See [scoring rules](docs/confidence.md).
+  50%. Selected values below the separate 10% floor become null while their evidence,
+  alternatives, provenance, and reason codes remain available. Record review is
+  reserved for serious identity, relationship, grouping, contradiction, or
+  representative-source issues. See [scoring rules](docs/confidence.md).
+- Wikipedia remains eligible as deterministic `encyclopedia` evidence at authority
+  `0.60`, below first-party, government, employer, university, and publication sources.
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
 - Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. The
@@ -107,9 +119,9 @@ installation. It does not make paid provider calls or prove Chromium can launch.
 Verify the existing Cloudflare Worker's upstream URL/redirect protections and
 Chromium sandbox support on the target runtime.
 
-The multi-source/education-record contract is stored in the existing profile JSON;
-it adds no Alembic migration. Keep the normal `alembic upgrade head` pre-deploy step
-and redeploy the web and worker from the same revision.
+The accuracy and recovery changes use existing profile/source JSON and configuration;
+they add no Alembic migration or export column. Keep the normal `alembic upgrade head`
+pre-deploy step and redeploy the web and worker from the same revision.
 
 ## Configuration
 
@@ -119,7 +131,8 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
 - **Runtime and access:** `APP_ENV`, `PORT`, `LOG_LEVEL`, `API_ACCESS_TOKEN`, `DATABASE_URL`.
 - **OpenRouter:** `OPENROUTER_API_KEY`, `OPENROUTER_SOURCE_MODEL`,
   `OPENROUTER_EXTRACTION_MODEL`, `OPENROUTER_RESPONSE_FORMAT`.
-- **Static retrieval:** `STATIC_FETCH_WORKER_URL`, `STATIC_FETCH_WORKER_SECRET`.
+- **Static retrieval:** `STATIC_FETCH_WORKER_URL`, `STATIC_FETCH_WORKER_SECRET`,
+  `STATIC_MIN_READABLE_CHARS` (default `250`).
 - **Optional acquisition:** `PLAYWRIGHT_ENABLED`, `BROWSER_SANDBOX`, `STRUCTURED_SOURCES`.
 - **Research bounds:** `MAX_SEARCH_QUERIES_PER_PERSON`, `MAX_SEARCH_RESULTS_PER_QUERY`,
   `MAX_TOTAL_SEARCH_RESULTS_PER_PERSON`, `MAX_SOURCE_MODEL_TOOL_CALLS`,
@@ -127,8 +140,9 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
   `PERSON_TIMEOUT_SECONDS`, `WORKER_MAX_ATTEMPTS`.
 - **Concurrency:** `MAX_CONCURRENT_PEOPLE`, `MAX_CONCURRENT_FETCHES`,
   `PER_DOMAIN_CONCURRENCY`, `MAX_CONCURRENT_EXTRACTIONS` (default `2` per worker).
-- **Review policy:** `SCORING__REVIEW_THRESHOLD` (default `50`). Remove or update an
-  older Railway value such as `75` if the deployment should use the new default.
+- **Selection and review policy:** `SCORING__SELECTION_THRESHOLD` (default `10`) omits
+  extremely weak selected values; `SCORING__REVIEW_THRESHOLD` (default `50`) keeps
+  questionable populated values visible and reviewable.
 
 Search attempts cap server-tool execution to one call per request. The aggregate
 result budget reserves requested slots, including retries with unknown usage.
@@ -171,7 +185,9 @@ browser contexts.
 If the fully constrained first search returns no citations, deterministic fallback
 queries relax supplied organisation, education, geography, role, subject, year, and
 known-attribute clues one at a time. They remain inside the existing per-person query,
-tool, result, token, source, and time budgets.
+tool, result, token, source, and time budgets. The same bounded recovery queue is used
+once when selected sources all fail retrieval or yield no identity-eligible grounded
+claims; already failed URLs remain deduplicated.
 
 Each person attempt emits one structured `person_performance` log containing stage
 durations, cache/fetch counts, model attempts, tokens, and reported cost. See
@@ -215,8 +231,10 @@ ambiguity error; a missing-name error lists the observed headers. The optional l
 Confidence is an evidence heuristic, not a calibrated probability; ambiguous identity
 and conflicting facts require review. Public source availability and coverage vary.
 Retrieval enforces public-network/redirect checks, byte limits, and timeouts.
-Playwright handles eligible JavaScript shells only; no login, CAPTCHA bypass, or
-browser account state is supported. The Cloudflare Worker remains separately managed.
+Playwright handles eligible transient HTTP failures, challenges, empty/thin pages,
+chrome-only pages, and JavaScript shells after static retrieval. It does not bypass
+login or CAPTCHA controls and has no browser account state. The Cloudflare Worker
+remains separately managed.
 
 Default tests spend no API credits. CI validates tests, PostgreSQL behavior, and the
 Docker build; live provider compatibility and deployment still require runtime checks.

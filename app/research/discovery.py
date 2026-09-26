@@ -25,12 +25,18 @@ def source_authority(source_type: SourceType, url: str, policy: ScoringPolicy) -
     override = _matching_override(domain, policy)
     if override is not None:
         effective_type = override
+    # An encyclopedia cannot become a first-party biography through model labels
+    # or domain overrides. Match hostname boundaries, including language/mobile sites.
+    encyclopedia = domain == "wikipedia.org" or domain.endswith(".wikipedia.org")
+    if encyclopedia:
+        effective_type = SourceType.encyclopedia
     score = float(policy.authority.get(effective_type, policy.authority[SourceType.unknown]))
     return score, {
         "source_type": effective_type.value,
         "declared_source_type": source_type.value,
         "domain": domain,
         "domain_override": override.value if override else None,
+        "deterministic_classification": "encyclopedia" if encyclopedia else None,
         "base_score": score,
     }
 

@@ -48,9 +48,10 @@ choose a different internal representative UUID; only that representative is
 compared by its complete fact content, while the full source-linked
 evidence/support sets are still compared. Full normalized results are available
 in each generated report for investigating differences. Reports produced before
-normalization version 4 intentionally cannot be compared: version 3 added nested
-education-record normalization, while version 4 records the controlled degree
-vocabulary and revised review/status decisions from the data-quality pass.
+normalization version 5 intentionally cannot be compared: version 3 added nested
+education-record normalization, version 4 recorded the earlier controlled-degree
+and review pass, and version 5 records seed-aware identity, expanded degree types
+and subjects, current-role recency, source authority, and selected-value-floor decisions.
 
 The checked-in measurement summary records one before/after run. It contains
 counts and hashes, not multi-megabyte duplicated result bodies. To compare another
@@ -119,3 +120,24 @@ Compared with the prior checked-in after-run, SQL statements fell by 6.7%–11.0
 and model attempts fell from 5/25/125/900 to 4/20/100/800 because completed fixture
 profiles no longer enter unnecessary review-driven follow-up planning. Wall-clock
 results were slower on this individual run and remain non-gating machine measurements.
+
+## Accuracy and retrieval-recovery pass measurement
+
+Normalization version 5 was run on 2026-09-26 with the same 2 ms mocked latency and
+production pipeline. Its intentional evidence/decision changes produce new hashes, so
+hashes are not compared with version 4. The ordinary successful fixtures do not invoke
+the new recovery path: searches remain one per person, physical fetches remain two per
+batch, and model attempts, SQL statements, cache reuse, concurrency bounds, and the
+six-query completed-result read match the version-4 work counts.
+
+| People | Elapsed (s) | SQL statements | Model attempts | Searches | Extractions | Cache hit rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.434 | 173 | 4 | 1 | 2 | 0% |
+| 5 | 1.457 | 749 | 20 | 5 | 10 | 80% |
+| 25 | 6.921 | 3,629 | 100 | 25 | 50 | 96% |
+| 100 | 56.892 | 25,028 | 800 | 100 | 600 | 99% |
+
+The recovery branch is covered separately with deterministic failure fixtures: it
+uses existing query/source budgets, does not retry a failed canonical URL, and remains
+inactive for healthy batches. Timings are single-machine observations and stay
+non-gating.

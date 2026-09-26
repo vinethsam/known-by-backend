@@ -28,7 +28,11 @@ from app.research.discovery import (
     source_authority,
 )
 from app.research.extraction import extract_chunks
-from app.research.identity import assess_identity, effective_identity_scores
+from app.research.identity import (
+    assess_identity,
+    effective_identity_scores,
+    eligible_identity_source_ids,
+)
 from app.research.reconciliation import reconcile
 from app.research.telemetry import count, person_performance, stage
 from app.retrieval.service import FetchError, RetrievedPage
@@ -193,6 +197,7 @@ class ResearchOrchestrator:
             sources.append(source)
             evidence_changed = True
             before = len(claims)
+            completed_extraction = False
             timer = monotonic()
             try:
                 if isinstance(page, Outcome):
@@ -249,6 +254,7 @@ class ResearchOrchestrator:
                         await save()
                 claims = deduplicate_claims(claims)
                 source.processing_status = "extracted"
+                completed_extraction = True
             except (FetchError, ValueError) as exc:
                 source.processing_status = "failed"
                 source.error_code = "RETRIEVAL_FAILED" if isinstance(exc, FetchError) else "CONTENT_INVALID"
@@ -276,7 +282,13 @@ class ResearchOrchestrator:
                 )
             finally:
                 evidence_changed = True
-                no_new_claims = no_new_claims + 1 if len(claims) == before else 0
+                # Retrieval, duplicate and identity failures are not evidence that
+                # later ranked sources have low marginal value. Count only a source
+                # whose extraction completed and produced no new grounded claims.
+                if len(claims) > before:
+                    no_new_claims = 0
+                elif completed_extraction:
+                    no_new_claims += 1
                 await save()
                 logger.info(
                     "source_processed",
@@ -448,6 +460,24 @@ class ResearchOrchestrator:
                 queue = deque([build_query(seed)])
                 fallback_queued = False
                 last_planned_clues = None
+
+                def queue_recovery_queries() -> bool:
+                    nonlocal fallback_queued
+                    if fallback_queued:
+                        return False
+                    fallback_queued = True
+                    remaining_queries = settings.MAX_SEARCH_QUERIES_PER_PERSON - metrics.queries_performed
+                    remaining_result_budget = (
+                        settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
+                    )
+                    fresh_queries = [
+                        query
+                        for query in build_fallback_queries(seed)
+                        if query_key(query) not in queries_done
+                    ]
+                    queue.extend(fresh_queries[: remaining_queries if remaining_result_budget > 0 else 0])
+                    return bool(queue)
+
                 while not stopped(include_target=not bool(pending_candidates)):
                     if pending_candidates:
                         await validate_and_process(
@@ -467,8 +497,32 @@ class ResearchOrchestrator:
                         metrics.stop_reason = "MAX_SEARCH_RESULTS"
                         break
                     if not queue:
+                        source_map = {source.source_id: source for source in sources}
+                        eligible_sources = eligible_identity_source_ids(
+                            seed, claims, source_map, settings.SCORING
+                        )
+                        usable_claims = [claim for claim in claims if claim.source_id in eligible_sources]
+                        unusable_initial_set = (
+                            bool(sources)
+                            and not usable_claims
+                            and any(
+                                source.processing_status
+                                in {
+                                    "failed",
+                                    "extraction_failed",
+                                    "identity_rejected",
+                                    "extracted",
+                                }
+                                for source in sources
+                            )
+                        )
+                        if unusable_initial_set and queue_recovery_queries():
+                            continue
                         identity_scores = effective_identity_scores(
-                            claims, {source.source_id: source for source in sources}, settings.SCORING
+                            claims,
+                            source_map,
+                            settings.SCORING,
+                            seed=seed,
                         )
                         clues = tuple(
                             dict.fromkeys(
@@ -480,6 +534,7 @@ class ResearchOrchestrator:
                                     ProfileField.university_name,
                                     ProfileField.subject,
                                 }
+                                and c.source_id in eligible_sources
                                 and identity_scores.get(c.source_id, c.identity_relevance)
                                 >= settings.SCORING.identity_review_threshold
                             )
@@ -582,27 +637,15 @@ class ResearchOrchestrator:
                         ),
                     )
                     if not candidates:
-                        if not fallback_queued:
-                            fallback_queued = True
-                            remaining_queries = (
-                                settings.MAX_SEARCH_QUERIES_PER_PERSON - metrics.queries_performed
-                            )
-                            remaining_result_budget = (
-                                settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
-                            )
-                            queue.extend(
-                                query
-                                for query in build_fallback_queries(seed)[
-                                    : remaining_queries if remaining_result_budget > 0 else 0
-                                ]
-                                if query_key(query) not in queries_done
-                            )
+                        queue_recovery_queries()
                         if queue:
                             continue
                         metrics.stop_reason = "NO_SEARCH_CITATIONS"
                         break
                     selected_count = await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
                     if selected_count == 0:
+                        if queue or queue_recovery_queries():
+                            continue
                         metrics.stop_reason = (
                             "NO_ELIGIBLE_CANDIDATES"
                             if candidates_filtered_empty and metrics.sources_discovered == 0

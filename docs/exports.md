@@ -34,3 +34,9 @@ confidence cell with pale yellow (`#FFF2CC`) when confidence is strictly below t
 configured `SCORING.review_threshold` (50 by default). Blank fields, confidence equal
 to 50, higher-confidence fields, unrelated cells, and whole rows are not highlighted.
 CSV retains the deterministic confidence and review columns but has no styling.
+
+The accuracy/recovery pass adds no export columns. Enriched values below
+`SCORING.selection_threshold` (10 by default) are blank in CSV/XLSX because the field
+decision is null; their raw claims, alternative IDs, provenance, confidence, and reason
+codes remain available in the JSON result/evidence ledger. Seed metadata and original
+input columns remain unchanged.

@@ -19,7 +19,7 @@ from app.db import Store
 from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
-from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
+from app.retrieval.service import FetchError, RetrievalService, RetrievedPage, StaticFetcher
 from app.schemas import PersonSeed, ProfileField, SourceCandidate
 from app.worker import process_lease, run_worker
 
@@ -67,6 +67,7 @@ def fake_services(
     advisor_status=200,
     advisor_response=None,
     advisor_relevance="likely",
+    failed_fetch_urls=None,
 ):
     calls = {
         "models": [],
@@ -86,6 +87,7 @@ def fake_services(
         if search_urls is not None
         else ["https://employer.example.org/jane", "https://university.example.edu/jane"]
     )
+    failed_fetch_urls = set(failed_fetch_urls or [])
 
     async def safe(url, settings=None):
         return url
@@ -96,6 +98,8 @@ def fake_services(
         target = json.loads(request.content)["url"]
         calls["fetched"].append(target)
         assert request.headers["X-Worker-Secret"] == "fake-worker-key"
+        if target in failed_fetch_urls:
+            return httpx.Response(500, json={"error": "fixture retrieval failure"})
         return httpx.Response(
             200,
             json={
@@ -117,12 +121,13 @@ def fake_services(
                 return httpx.Response(200, content=b"{invalid")
             if search_status != 200:
                 return httpx.Response(search_status, json={"error": {"message": "fixture failure"}})
+            result_urls = urls(calls["queries"][-1], len(calls["queries"])) if callable(urls) else urls
             annotations = [
                 {
                     "type": "url_citation",
                     "url_citation": {"url": url, "title": "Jane Doe", "content": text},
                 }
-                for url in urls
+                for url in result_urls
             ]
             if malformed_citation:
                 annotations = [
@@ -518,6 +523,111 @@ async def test_zero_citation_search_uses_bounded_fallback_without_advisor_and_pe
     assert result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
     assert sum(u.web_search_requests or 0 for u in result.usage) == 2
     assert result.profile.metrics.web_search_requests == 2
+
+
+@pytest.mark.asyncio
+async def test_all_initial_retrievals_fail_then_one_bounded_seed_recovery_succeeds(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=2,
+        MAX_SOURCE_MODEL_TOOL_CALLS=2,
+        MAX_SOURCES_PER_PERSON=2,
+        SOURCES_PER_ROUND=1,
+    )
+    store = migrated_store(settings)
+    initial = "https://unavailable.example.org/jane"
+    recovered = "https://official.example.org/jane"
+
+    def results_for_round(_query, round_number):
+        # A failed URL may be rediscovered, but it must remain seen while the new
+        # candidate consumes the single bounded recovery slot.
+        return [initial] if round_number == 1 else [initial, recovered]
+
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=results_for_round,
+        failed_fetch_urls={initial},
+    )
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe", organisation="Example Foundation"),
+    )
+
+    assert calls["queries"] and len(calls["queries"]) == 2
+    assert calls["fetched"] == [initial, recovered]
+    assert result.profile.fields[ProfileField.organisation].value == "Example Foundation"
+    assert [source.processing_status for source in result.sources] == ["failed", "extracted"]
+    assert result.profile.metrics.queries_performed == 2
+    assert "RETRIEVAL_FAILED" in result.profile.metrics.error_codes
+
+
+@pytest.mark.asyncio
+async def test_recovery_filters_completed_queries_before_applying_remaining_cap(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=4,
+        MAX_SOURCE_MODEL_TOOL_CALLS=6,
+        MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=40,
+        TARGET_FIELD_CONFIDENCE=100,
+        MAX_SOURCES_PER_PERSON=2,
+        SOURCES_PER_ROUND=1,
+    )
+    store = migrated_store(settings)
+    initial = "https://official.example.org/jane"
+
+    def results_for_round(_query, round_number):
+        return [initial] if round_number <= 2 else []
+
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=results_for_round,
+    )
+    await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe", organisation="Example Foundation"),
+    )
+
+    assert len(calls["queries"]) == 4
+    assert "biography education career" in calls["queries"][-1]
+
+
+@pytest.mark.asyncio
+async def test_failed_static_and_browser_source_does_not_block_next_ranked_source(tmp_path, monkeypatch):
+    settings = configured(tmp_path, SOURCES_PER_ROUND=2, MAX_SOURCES_PER_PERSON=2)
+    store = migrated_store(settings)
+    failed = "https://blocked.example.org/jane"
+    viable = "https://official.example.org/jane"
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=[failed, viable],
+    )
+    retrieve = pipeline.retrieval.retrieve
+
+    async def retrieve_with_failed_fallback(url, *, job_id=None):
+        if url == failed:
+            raise FetchError("static and browser retrieval failed")
+        return await retrieve(url, job_id=job_id)
+
+    monkeypatch.setattr(pipeline.retrieval, "retrieve", retrieve_with_failed_fallback)
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe", organisation="Example Foundation"),
+    )
+
+    assert result.profile.fields[ProfileField.organisation].value == "Example Foundation"
+    assert [source.processing_status for source in result.sources] == ["failed", "extracted"]
+    assert result.profile.metrics.sources_fetched == 2
+    assert "RETRIEVAL_FAILED" in result.profile.metrics.error_codes
+    assert calls["fetched"] == [viable]
 
 
 @pytest.mark.asyncio

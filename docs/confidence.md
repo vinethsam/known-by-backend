@@ -16,6 +16,7 @@ deterministic evidence-strength heuristics, not calibrated probabilities.
 | Established publication | 0.80 |
 | Conference/event biography | 0.72 |
 | Structured professional directory | 0.65 |
+| Encyclopedia/Wikipedia | 0.60 |
 | Aggregator | 0.45 |
 | Social/user-generated | 0.35 |
 | Unknown | 0.25 |
@@ -28,19 +29,41 @@ building, location or news page is not treated as the person's organisation mere
 because it is mentioned. Operator hostname overrides still use suffix-boundary
 matching; there are no country-specific office mappings.
 
+Wikipedia hostnames, including language and mobile subdomains, are classified as
+`encyclopedia` before authority is scored, regardless of advisor/model labels or
+operator domain overrides. Wikipedia can support or corroborate a value, but it cannot
+acquire first-party or government authority through either mechanism.
+
 ## Identity
 
 The complete normalized seed name must occur as a bounded phrase in source text and
 the extracted `subject_name` must match it. Exact name alone starts at **0.55**.
-Distinct supplied clues found in the page add **0.18** each. A model assessment may
-reject or constrain a match, but cannot promote it to certainty.
+Each distinct supplied organisation or university clue locally associated with the
+seeded name adds **0.27**; each other distinct local clue adds **0.18**. Sentence and
+short profile-header boundaries prevent an unrelated page-wide mention from becoming
+an identity anchor. A model assessment may reject or constrain a match, but cannot
+promote it to certainty.
+
+Seed organisation and university are identity anchors. Specific known attributes can
+also be anchors when their labels are not name, full name, country, location, subject,
+year, or program year and their values are neither purely numeric nor the person's
+name. If none of those stronger anchors is supplied, job title is the fallback. When a
+seed has an anchor, at least one source must match it before that source's claims may
+populate final fields. Missing anchor text is provisional rather than contradictory:
+the page may still be extracted and retained, but it cannot win a field by agreeing
+with other unanchored namesakes. Explicit denial of an affiliation rejects the source;
+ordinary negated actions such as “did not leave” are not misread as denials.
+Country, location, subject, and year remain supporting clues and cannot replace an
+unmatched anchor.
 
 Name-only research can strengthen identity after extraction. An explicit normalized
 organisation, title, university, degree or subject must agree on another independent
 domain with different content. The source cannot validate itself, same-domain pages
 do not help, exact mirrors do not help, and sources below directory-level authority
-do not create new identity anchors. Context bonuses are capped and leave the stored
-page-level identity assessment unchanged.
+do not create new identity anchors. An independent source may join a directly anchored
+cluster through one explicit shared institution, or two other explicit context fields;
+bridges are one hop and cannot chain an unrelated cluster into eligibility. Context
+bonuses are capped and leave the stored page-level identity assessment unchanged.
 
 The full-name field has one additional narrow rule. Two independent, non-mirrored,
 explicit exact-name claims from publication-or-better sources receive a field-only
@@ -54,17 +77,23 @@ Every model claim must be literal in the supplied source chunk, contain its raw 
 name the seeded person, and use grounded dates. Raw values and excerpts remain in the
 claim ledger. Deterministic normalization handles Unicode, punctuation, conservative
 organisation suffixes, subject aliases and common degree forms. Selected degree output
-uses `Bachelor's Degree`, `Master's Degree`, or `Doctoral Degree`; common terms such as
-`maestría`, `licence`, `laurea`, and `promovierte` use explicit accent-insensitive
-mappings. A generic `degree` defaults to `Bachelor's Degree` with
+uses `Bachelor's Degree`, `Master's Degree`, `Doctoral Degree`, `Medical Degree`,
+`Law Degree`, `Diploma`, `Postgraduate Diploma`, or `Postgraduate Degree`; common
+terms such as `maestría`, `licence`, `laurea`, and `promovierte` use explicit
+accent-insensitive mappings. A generic `degree` defaults to `Bachelor's Degree` with
 `GENERIC_DEGREE_DEFAULT` metadata and reduced normalization certainty. Unknown terms
-remain readable and receive `AMBIGUOUS_EDUCATION`; no translation API is used.
+remain in raw evidence with `AMBIGUOUS_EDUCATION` but do not become selected degree
+records. Explicit subjects inside qualification titles create a grounded derived
+Subject claim with the same source, excerpt, raw degree title, and fact group; no model
+call is added. No translation API is used.
 
 Field quality is relationship-aware:
 
 - a selected name should normalize to the seed name;
 - a job title without an organisation in its source-local employment group is
   penalized and reviewed;
+- sentence-like biographical prose and unusually long title fragments receive a
+  deterministic quality penalty; clear descriptive prose can fall below selection;
 - a subject without a university or degree relationship is penalized and reviewed;
 - an unrecognized degree phrase retains its raw evidence, receives both normalization
   and field-quality reductions, and is reviewed;
@@ -85,15 +114,19 @@ N = normalization certainty, 0..1
 Q = deterministic field quality, 0..1
 P = 0.02 for a preferred source; otherwise 0
 R = recency factor
+T = field-aware time multiplier
 
 base(c) = 0.55*A + 0.30*D + 0.15*R
-strength(c) = I * N * Q * min(1, base(c) + P)
+strength(c) = I * N * Q * min(1, base(c) + P) * T
 ```
 
 For organisation and job title, dated evidence decays with a 730-day half-life.
-Unknown recency is **0.65**. Explicitly ended/former roles are historical alternatives
-and do not populate current fields. Education and name claims do not decay; the
-representative-link score is derived from the selected claims it summarizes.
+Unknown recency is **0.65** and receives `T=0.90`; absence of a date is uncertainty,
+not proof that a role is old. Dated volatile evidence uses `T=0.35 + 0.65*R`, making
+stale high-authority evidence materially weaker. Explicitly ended/former roles are
+historical alternatives and do not populate current fields. Education and name claims
+use `T=1` and do not decay; the representative-link score is derived from the selected
+claims it summarizes.
 
 Equivalent normalized values form a support group. Independent support is computed
 with a maximum distinct domain/content-hash pairing. The strongest claim is the base;
@@ -114,11 +147,18 @@ is weak, identity is unresolved, or a relationship/grouping is uncertain. Missin
 fields and `LOW_SOURCE_COUNT` are diagnostic and do not themselves require field or
 record review; one strong direct authoritative source can still be usable.
 
+A separate centrally configured selected-value floor defaults to **10**. A field or
+representative link below that floor is returned as null, with no selected claim, while
+its raw claims remain in the evidence ledger and their IDs move to alternatives with
+`BELOW_SELECTION_FLOOR`. This does not alter seed/job tracking metadata or add export
+columns.
+
 Record review is separate. A record is escalated only for identity ambiguity, an
 unresolved current-role conflict or incomplete role relationship, education-grouping
-ambiguity, a critical-field conflict whose strength is at least `0.50` and at least
-75% of the selected claim's strength, no reliable representative source, or at least
-two populated critical fields below the threshold.
+ambiguity, a descriptive job title, a field or link suppressed below the selection
+floor, a critical-field conflict whose strength is at least `0.50` and at least 75% of
+the selected claim's strength, no reliable representative source, or at least two
+populated critical fields below the review threshold.
 One weak optional subject, one fetch failure, or incomplete coverage does not escalate
 the record. Zero-coverage discovery outcomes use `research_status=insufficient_evidence`;
 provider/retrieval errors remain retry/research failures, while clean and reviewable
@@ -131,19 +171,22 @@ reconciled. `fact_group` is local to one source. Reconciliation then merges bund
 from other sources only when at least one normalized component agrees and no populated
 component conflicts.
 
-- Different normalized degree levels establish separate credentials.
+- Different controlled degree types establish separate credentials.
 - The same degree and compatible institution/subject merge into one record and retain
   all supporting sources.
-- Explicit source-local groups can establish distinct same-level credentials when
+- Explicit source-local groups can establish distinct same-type credentials when
   their populated details conflict.
-- Cross-source same-level evidence with two incompatible contextual components
+- Cross-source same-type evidence with two incompatible contextual components
   (institution and subject) establishes distinct credentials; one contextual
   disagreement remains an ambiguous review record.
 - Ungrouped components are never spliced together merely to fill missing fields.
-- A safe compound claim containing distinct levels, such as `maestría y un doctorado`,
+- A safe compound claim containing distinct controlled types, such as `maestría y un doctorado`,
   expands before grouping while every expanded claim retains the same literal raw value.
 - Certifications, executive programmes, honorary awards, postdoctoral work, ongoing
   study, and training remain alternative evidence and do not create earned-degree rows.
+- Vague values such as `two degrees`, `several degrees`, `specialization course`, and
+  `graduate studies` remain alternatives; ambiguous values make the degree field
+  reviewable without manufacturing a credential.
 
 Each confirmed credential becomes a `ProfileRecord`. Name and selected current-role
 decisions are copied into every record; university, degree and subject decisions are
@@ -153,9 +196,12 @@ clients, while `PersonProfile.records` is the complete additive result.
 
 ## Current employment
 
-Organisation and job title are ranked as relationship clusters. Explicit current
-status wins first, then the newest supported observation, relationship type,
-relationship completeness, evidence strength and a stable signature. The compact
+Organisation and job title are ranked as relationship clusters. A deterministic
+freshness band wins first, then relationship-type priority, explicit current status,
+exact observation date, relationship completeness, evidence strength and a stable
+signature.
+This lets a recent primary role beat a stale `is_current` label while preventing a
+board page updated a few days later from displacing a current CEO. The compact
 taxonomy covers government office, executive/primary employment, academic, board,
 advisory, political-party, historical and other affiliations. Current government
 office outranks an equally current party/private affiliation; executive employment
@@ -167,6 +213,15 @@ alternative evidence; the reconciler never invents an office name.
 Public residences and similarly named government buildings are excluded under the
 same rule when the paired title and government source identify them as places rather
 than employing organisations.
+
+The public-office classifier records a compact subtype for head of state, head of
+government, ministerial, legislature, government department, government agency,
+executive office, judiciary, local government, diplomatic mission, or public
+institution. Generic `agency` and `department` terms require government context, so a
+talent agency or university department does not become a government employer. A short
+country-like value paired with a national leadership title is retained as an
+alternative even when the seed did not supply the country. Exact institution names
+must still come from evidence; reconciliation does not invent an office label.
 
 ## Representative profile link
 
@@ -202,5 +257,7 @@ profile exposes the primary record's confidence and coverage; every `ProfileReco
 has its own values.
 
 All tunable numeric weights remain in `ScoringPolicy`. Partial nested environment
-overrides merge with defaults, for example `SCORING__REVIEW_THRESHOLD=50`. Tests use
-the production reconciliation and scoring modules with deterministic source fixtures.
+overrides merge with defaults, for example `SCORING__SELECTION_THRESHOLD=10` and
+`SCORING__REVIEW_THRESHOLD=50`. The selection floor must not exceed the review
+threshold. Tests use the production reconciliation and scoring modules with
+deterministic source fixtures.

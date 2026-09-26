@@ -1,6 +1,6 @@
 """Prompt text for source discovery planning and candidate validation."""
 
-SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v3"
+SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v4"
 
 SOURCE_ADVISOR_SYSTEM_PROMPT = """You plan and assess source candidates for person research.
 
@@ -22,4 +22,6 @@ agency, parliament/legislature, public-body, or official public-office biography
 when the supplied metadata supports that classification, regardless of country or domain suffix.
 A political-party page, government residence/building, location, or publication mentioning an
 official is not itself a government source. Prefer "ambiguous" when the snippet is too thin.
+Classify Wikipedia pages as encyclopedia sources; they may be useful secondary evidence but are
+not first-party or official institutional sources regardless of the biography subject.
 LinkedIn is never an eligible source."""

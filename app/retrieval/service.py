@@ -42,10 +42,34 @@ from app.retrieval.urls import (
     validate_public_url,
 )
 
-_BLOCKED_PAGE_RE = re.compile(
-    r"\b(access denied|are you a robot|captcha|cf-challenge|login required|sign in to continue|verify you are human)\b",
+_CHALLENGE_PAGE_RE = re.compile(
+    r"\b(access denied|are you a robot|captcha|cf-challenge|verify you are human|"
+    r"checking your browser|just a moment|enable javascript and cookies|cloudflare ray id)\b",
     re.IGNORECASE,
 )
+_TECHNICAL_PAGE_ELEMENTS = ("script", "style", "noscript", "template")
+_CHROME_SELECTORS = (
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "form",
+    '[role="banner"]',
+    '[role="contentinfo"]',
+    '[role="dialog"]',
+    '[role="menu"]',
+    '[role="navigation"]',
+    '[role="search"]',
+)
+_RECOVERABLE_STATIC_STATUSES = frozenset({403, 408, 425, 429})
+
+
+class _TargetValidationError(FetchError):
+    """A URL-policy failure that browser fallback must never bypass."""
+
+
+class _StaticPolicyError(FetchError):
+    """A static-result limit/type failure that rendering cannot safely repair."""
 
 
 def _secret_value(secret: Any) -> str | None:
@@ -82,7 +106,7 @@ async def _validate_target(url: str, settings: object) -> str:
     try:
         return await validate_public_url(url, settings)
     except URLValidationError as exc:
-        raise FetchError(str(exc) or "URL is not eligible for retrieval") from exc
+        raise _TargetValidationError(str(exc) or "URL is not eligible for retrieval") from exc
 
 
 class StaticFetcher:
@@ -130,11 +154,16 @@ class StaticFetcher:
                 "POST", worker_url, json={"url": target_url}, headers=headers
             ) as response:
                 if response.status_code >= 400:
-                    raise FetchError(f"The static-fetch Worker returned HTTP {response.status_code}")
+                    error_type = (
+                        FetchConfigurationError
+                        if 400 <= response.status_code < 500 and response.status_code not in {408, 429}
+                        else FetchError
+                    )
+                    raise error_type(f"The static-fetch Worker returned HTTP {response.status_code}")
                 async for chunk in response.aiter_bytes():
                     raw.extend(chunk)
                     if len(raw) > _worker_response_limit(self.settings):
-                        raise FetchError("The static-fetch Worker response exceeded the size limit")
+                        raise _StaticPolicyError("The static-fetch Worker response exceeded the size limit")
         except httpx.TimeoutException as exc:
             raise FetchTimeoutError("The static-fetch Worker request timed out") from exc
         except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
@@ -158,34 +187,110 @@ class StaticFetcher:
         page.final_url = await _validate_target(page.final_url, self.settings)
         page.retrieval_method = "static"
         if not content_type_allowed(page.content_type):
-            raise FetchError("The retrieved content type is not supported")
+            raise _StaticPolicyError("The retrieved content type is not supported")
         if len(page.html.encode("utf-8")) > _response_byte_limit(self.settings):
-            raise FetchError("The retrieved content exceeded the size limit")
+            raise _StaticPolicyError("The retrieved content exceeded the size limit")
         return page
 
 
-def needs_browser(page: RetrievedPage, settings: object) -> bool:
-    """Return true only for successful, thin JavaScript application shells."""
+def _media_type(page: RetrievedPage) -> str:
+    return (page.content_type or "").split(";", 1)[0].strip().lower()
 
-    if not getattr(settings, "PLAYWRIGHT_ENABLED", True):
-        return False
-    if page.status < 200 or page.status >= 300:
-        return False
-    if page.content_type and "html" not in page.content_type.lower():
-        return False
-    if _BLOCKED_PAGE_RE.search(page.html or ""):
-        return False
 
-    soup = BeautifulSoup(page.html or "", "html.parser")
-    visible_text = soup.get_text(" ", strip=True)
-    readable_chars = len(visible_text)
-    min_chars = int(getattr(settings, "STATIC_MIN_READABLE_CHARS", 250))
+def _browser_eligible_content(page: RetrievedPage) -> bool:
+    media_type = _media_type(page)
+    return not media_type or media_type in {
+        "application/xhtml+xml",
+        "text/html",
+        "text/plain",
+    }
+
+
+def _readable_characters(value: str) -> int:
+    return sum(character.isalnum() for character in value)
+
+
+def _content_fallback_reason(page: RetrievedPage, settings: object) -> str | None:
+    """Classify HTML/text that cannot yet support useful downstream extraction."""
+
+    if page.captured_json is not None or not _browser_eligible_content(page):
+        return None
+    html = page.html or ""
+    if not html.strip():
+        return "empty_body"
+
+    soup = BeautifulSoup(html, "html.parser")
     script_count = len(soup.find_all("script"))
     has_shell_root = bool(soup.find(id=re.compile(r"^(app|root|__next|___gatsby)$", re.IGNORECASE)))
     has_noscript_app_hint = (
-        "javascript" in " ".join(node.get_text(" ", strip=True) for node in soup.find_all("noscript")).lower()
+        "javascript"
+        in " ".join(node.get_text(" ", strip=True) for node in soup.find_all("noscript")).casefold()
     )
-    return readable_chars < min_chars and (script_count >= 2 or has_shell_root or has_noscript_app_hint)
+    for element in reversed(soup.find_all(_TECHNICAL_PAGE_ELEMENTS)):
+        element.decompose()
+
+    body = soup.body or soup
+    if soup.body is None:
+        for title in reversed(body.find_all("title")):
+            title.decompose()
+    visible_text = body.get_text(" ", strip=True)
+    if _CHALLENGE_PAGE_RE.search(visible_text):
+        return "challenge_page"
+    visible_chars = _readable_characters(visible_text)
+    if visible_chars == 0:
+        return "empty_body"
+
+    link_chars = sum(
+        _readable_characters(node.get_text(" ", strip=True)) for node in body.find_all(["a", "button"])
+    )
+    substantive_nodes = body.find_all(["main", "article", "p", "table", "dl"])
+    minimum_chars = int(getattr(settings, "STATIC_MIN_READABLE_CHARS", 250))
+    short_content_floor = min(minimum_chars, max(20, minimum_chars // 10))
+    has_substantive_content = any(
+        _readable_characters(node.get_text(" ", strip=True)) >= short_content_floor
+        for node in substantive_nodes
+    )
+
+    for selector in _CHROME_SELECTORS:
+        for element in reversed(body.select(selector)):
+            element.decompose()
+    content_text = body.get_text(" ", strip=True)
+    content_chars = _readable_characters(content_text)
+    link_density = link_chars / max(1, visible_chars)
+
+    if content_chars >= minimum_chars and not (link_density >= 0.75 and not has_substantive_content):
+        return None
+    if content_chars >= short_content_floor and has_substantive_content:
+        return None
+    if script_count >= 2 or has_shell_root or has_noscript_app_hint:
+        return "javascript_shell"
+    if visible_chars >= minimum_chars and content_chars < minimum_chars:
+        return "chrome_only"
+    return "thin_content"
+
+
+def _static_fallback_reason(page: RetrievedPage, settings: object) -> str | None:
+    if not _browser_eligible_content(page):
+        return None
+    if page.status in _RECOVERABLE_STATIC_STATUSES or 300 <= page.status < 400 or page.status >= 500:
+        return f"http_{page.status}"
+    if 400 <= page.status < 500:
+        # Rendering cannot repair a permanent missing/invalid target. Reserve the
+        # browser for access controls, throttling and transient failures.
+        return None
+    return _content_fallback_reason(page, settings)
+
+
+def _browser_result_error(page: RetrievedPage, settings: object) -> str | None:
+    if not 200 <= page.status < 300:
+        return f"http_{page.status}"
+    return _content_fallback_reason(page, settings)
+
+
+def needs_browser(page: RetrievedPage, settings: object) -> bool:
+    """Return whether one bounded browser attempt can repair a static result."""
+
+    return bool(getattr(settings, "PLAYWRIGHT_ENABLED", True) and _static_fallback_reason(page, settings))
 
 
 class RetrievalService:
@@ -305,6 +410,25 @@ class RetrievalService:
         except (OSError, RuntimeError, TypeError, ValueError, SQLAlchemyError):
             return
 
+    async def _render_fallback(self, url: str, requested_url: str) -> RetrievedPage:
+        if self.renderer is None:
+            raise FetchError("Browser fallback is not available")
+        target_url = await _validate_target(url, self.settings)
+        count("playwright_fallbacks")
+        page = await self.renderer.fetch(target_url)
+        page = page.model_copy(update={"requested_url": requested_url})
+        error = _browser_result_error(page, self.settings)
+        if error is not None:
+            raise FetchError(f"The browser returned unusable content ({error})")
+        return page
+
+    @staticmethod
+    def _static_error_allows_browser(exc: FetchError) -> bool:
+        return not isinstance(
+            exc,
+            (FetchConfigurationError, _StaticPolicyError, _TargetValidationError),
+        )
+
     async def retrieve(self, url: str, job_id: str | None = None) -> RetrievedPage:
         count("sources_requested")
         key_url = await _validate_target(url, self.settings)
@@ -314,18 +438,38 @@ class RetrievalService:
             async with lock:
                 cached = await self._cache_get(job_id, cache_key)
                 if cached is not None:
-                    count("retrieval_cache_hits")
-                    count("sources_retrieved")
-                    return cached
+                    cached_error = (
+                        _static_fallback_reason(cached, self.settings)
+                        if cached.retrieval_method == "static"
+                        else _browser_result_error(cached, self.settings)
+                    )
+                    if cached_error is None or self.renderer is None:
+                        count("retrieval_cache_hits")
+                        count("sources_retrieved")
+                        return cached
+                    if cached.retrieval_method == "static":
+                        count("retrieval_cache_misses")
+                        async with self._fetch_slot(domain_key(cache_key)):
+                            page = await self._render_fallback(cached.final_url, key_url)
+                        await self._cache_put(job_id, cache_key, page)
+                        count("sources_retrieved")
+                        return page
                 count("retrieval_cache_misses")
 
                 async with self._fetch_slot(domain_key(cache_key)):
                     count("static_fetches")
-                    page = await self.static_fetcher.fetch(key_url)
-                    if needs_browser(page, self.settings) and self.renderer is not None:
-                        count("playwright_fallbacks")
-                        browser_page = await self.renderer.fetch(page.final_url)
-                        page = browser_page.model_copy(update={"requested_url": key_url})
+                    try:
+                        page = await self.static_fetcher.fetch(key_url)
+                    except FetchError as exc:
+                        if self.renderer is None or not self._static_error_allows_browser(exc):
+                            raise
+                        page = await self._render_fallback(key_url, key_url)
+                    else:
+                        if (
+                            _static_fallback_reason(page, self.settings) is not None
+                            and self.renderer is not None
+                        ):
+                            page = await self._render_fallback(page.final_url, key_url)
                 await self._cache_put(job_id, cache_key, page)
                 count("sources_retrieved")
                 return page

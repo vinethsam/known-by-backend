@@ -231,7 +231,9 @@ def test_generic_and_unknown_degrees_keep_normalisation_meaning():
         ScoringPolicy(),
     )
     unknown_decision = unknown_profile.records[0].fields[ProfileField.degree_type]
-    assert unknown_decision.value == "Diplôme supérieur inconnu"
+    assert unknown_decision.value is None
+    assert unknown_decision.alternative_claim_ids == ["unknown"]
+    assert "AMBIGUOUS_EDUCATION" in unknown_decision.review_reason_codes
     assert unknown_decision.review_required
     assert not unknown_profile.records[0].review_required
 
