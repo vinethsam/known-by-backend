@@ -22,6 +22,8 @@ from app.research.discovery import (
     build_fallback_queries,
     build_queries,
     build_query,
+    build_role_institution_query,
+    build_wikipedia_fallback_query,
     deduplicate_candidates,
     query_key,
     rank_candidates,
@@ -459,23 +461,71 @@ class ResearchOrchestrator:
                 # only after useful already-discovered candidates have been processed.
                 queue = deque([build_query(seed)])
                 fallback_queued = False
+                role_completion_queued = False
+                wikipedia_completion_queued = False
                 last_planned_clues = None
+                important_completion_fields = {
+                    ProfileField.organisation,
+                    ProfileField.job_title,
+                    ProfileField.university_name,
+                    ProfileField.degree_type,
+                    ProfileField.subject,
+                }
+
+                def remaining_search_call_capacity() -> int:
+                    remaining_queries = settings.MAX_SEARCH_QUERIES_PER_PERSON - metrics.queries_performed
+                    remaining_tools = settings.MAX_SOURCE_MODEL_TOOL_CALLS - metrics.web_search_calls_reserved
+                    remaining_results = (
+                        settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
+                    )
+                    if remaining_results <= 0:
+                        return 0
+                    result_calls = 1 + max(
+                        0,
+                        (remaining_results - 1) // settings.MAX_SEARCH_RESULTS_PER_QUERY,
+                    )
+                    return max(0, min(remaining_queries, remaining_tools, result_calls))
+
+                def queue_wikipedia_query(unresolved_fields) -> bool:
+                    nonlocal wikipedia_completion_queued
+                    if (
+                        wikipedia_completion_queued
+                        or not unresolved_fields
+                        or remaining_search_call_capacity() <= 0
+                        or any(
+                            source.domain == "wikipedia.org" or source.domain.endswith(".wikipedia.org")
+                            for source in sources
+                        )
+                    ):
+                        return False
+                    query = build_wikipedia_fallback_query(seed, unresolved_fields)
+                    key = query_key(query)
+                    if key in queries_done or any(query_key(item) == key for item in queue):
+                        return False
+                    wikipedia_completion_queued = True
+                    queue.append(query)
+                    return True
 
                 def queue_recovery_queries() -> bool:
                     nonlocal fallback_queued
                     if fallback_queued:
                         return False
                     fallback_queued = True
-                    remaining_queries = settings.MAX_SEARCH_QUERIES_PER_PERSON - metrics.queries_performed
-                    remaining_result_budget = (
-                        settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
+                    capacity = remaining_search_call_capacity()
+                    reserve_wikipedia = int(
+                        capacity >= 2
+                        and not wikipedia_completion_queued
+                        and not any(
+                            source.domain == "wikipedia.org" or source.domain.endswith(".wikipedia.org")
+                            for source in sources
+                        )
                     )
                     fresh_queries = [
                         query
                         for query in build_fallback_queries(seed)
                         if query_key(query) not in queries_done
                     ]
-                    queue.extend(fresh_queries[: remaining_queries if remaining_result_budget > 0 else 0])
+                    queue.extend(fresh_queries[: max(0, capacity - reserve_wikipedia)])
                     return bool(queue)
 
                 while not stopped(include_target=not bool(pending_candidates)):
@@ -531,6 +581,7 @@ class ResearchOrchestrator:
                                 if c.field
                                 in {
                                     ProfileField.organisation,
+                                    ProfileField.job_title,
                                     ProfileField.university_name,
                                     ProfileField.subject,
                                 }
@@ -539,9 +590,6 @@ class ResearchOrchestrator:
                                 >= settings.SCORING.identity_review_threshold
                             )
                         )[:12]
-                        if clues == last_planned_clues:
-                            break
-                        last_planned_clues = clues
                         profile = result().profile
                         record_fields = [record.fields for record in profile.records] or [profile.fields]
                         unresolved = [
@@ -554,6 +602,59 @@ class ResearchOrchestrator:
                                 for fields in record_fields
                             )
                         ]
+                        primary_fields = record_fields[0]
+                        role = primary_fields[ProfileField.job_title]
+                        organisation = primary_fields[ProfileField.organisation]
+                        relationship_type = role.scoring_components.get("relationship_type")
+                        role_claim = next(
+                            (claim for claim in claims if claim.claim_id == role.selected_claim_id),
+                            None,
+                        )
+                        role_source = source_map.get(role_claim.source_id) if role_claim else None
+                        strong_unpaired_role = bool(
+                            role_claim
+                            and role_source
+                            and role_claim.source_id in eligible_sources
+                            and role_claim.directness == "explicit"
+                            and role_claim.is_current is True
+                            and role_claim.end_date is None
+                            and role_claim.normalisation_certainty >= 0.9
+                            and role_source.authority_score
+                            >= settings.SCORING.authority[SourceType.publication]
+                            and identity_scores.get(
+                                role_claim.source_id,
+                                role_claim.identity_relevance,
+                            )
+                            >= settings.SCORING.identity_minimum
+                        )
+                        if (
+                            not role_completion_queued
+                            and organisation.value is None
+                            and role.value is not None
+                            and strong_unpaired_role
+                            and relationship_type
+                            in {
+                                "current_government_office",
+                                "current_executive_role",
+                                "current_primary_employment",
+                            }
+                        ):
+                            role_completion_queued = True
+                            role_query = build_role_institution_query(seed, role.value)
+                            if query_key(role_query) not in queries_done:
+                                queue.append(role_query)
+                                continue
+                        if clues == last_planned_clues:
+                            break
+                        last_planned_clues = clues
+                        important_unresolved = [
+                            field_name.value
+                            for field_name in sorted(
+                                important_completion_fields,
+                                key=lambda item: item.value,
+                            )
+                            if any(fields[field_name].value is None for fields in record_fields)
+                        ]
                         try:
                             with stage("discovery_ms"):
                                 planned, _ = await advisor.plan(
@@ -562,7 +663,6 @@ class ResearchOrchestrator:
                         except OpenRouterError as exc:
                             error_code = _source_advisor_error_code(exc)
                             metrics.error_codes.append(error_code)
-                            metrics.stop_reason = "PROVIDER_FAILED"
                             logger.error(
                                 "source_advisor_failed",
                                 extra=dict(
@@ -582,12 +682,39 @@ class ResearchOrchestrator:
                                     selected_source_count=0,
                                 ),
                             )
+                            # Deterministic completion must not depend on the optional
+                            # query-planning model being available. The fallback still
+                            # consumes the same bounded search/tool/result budgets.
+                            if queue_wikipedia_query(important_unresolved):
+                                continue
+                            metrics.stop_reason = "PROVIDER_FAILED"
                             break
-                        queue.extend(
+                        planned_queries = [
                             q
                             for q in build_queries(seed, settings, extra_queries=planned)
-                            if query_key(q) not in queries_done
+                            if query_key(q) not in queries_done and "wikipedia" not in q.casefold()
+                        ]
+                        should_queue_wikipedia = (
+                            bool(important_unresolved)
+                            and not wikipedia_completion_queued
+                            and not any(
+                                source.domain == "wikipedia.org" or source.domain.endswith(".wikipedia.org")
+                                for source in sources
+                            )
                         )
+                        search_capacity = remaining_search_call_capacity()
+                        reserve_wikipedia = int(
+                            should_queue_wikipedia
+                            and search_capacity > 0
+                            and (search_capacity >= 2 or not planned_queries)
+                        )
+                        planned_limit = max(
+                            0,
+                            search_capacity - reserve_wikipedia,
+                        )
+                        queue.extend(planned_queries[:planned_limit])
+                        if reserve_wikipedia:
+                            queue_wikipedia_query(important_unresolved)
                         if not queue:
                             break
                     query = queue.popleft()
@@ -637,14 +764,19 @@ class ResearchOrchestrator:
                         ),
                     )
                     if not candidates:
-                        queue_recovery_queries()
-                        if queue:
+                        if queue_recovery_queries() or queue_wikipedia_query(
+                            [field.value for field in important_completion_fields]
+                        ):
                             continue
                         metrics.stop_reason = "NO_SEARCH_CITATIONS"
                         break
                     selected_count = await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
                     if selected_count == 0:
-                        if queue or queue_recovery_queries():
+                        if (
+                            queue
+                            or queue_recovery_queries()
+                            or queue_wikipedia_query([field.value for field in important_completion_fields])
+                        ):
                             continue
                         metrics.stop_reason = (
                             "NO_ELIGIBLE_CANDIDATES"

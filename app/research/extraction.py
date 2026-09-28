@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
 from app.research.concurrency import ordered_window
+from app.research.identity import research_seed_payload
 from app.research.telemetry import count, stage
 from app.schemas import ExtractionResponse, PersonSeed
 
@@ -22,7 +23,7 @@ async def extract_chunks(
 ) -> AsyncIterator[tuple[str, ExtractionResponse]]:
     payloads = [
         {
-            "person": seed.model_dump(mode="json"),
+            "person": research_seed_payload(seed),
             "source_url": source_url,
             "chunk_index": index,
             "content": chunk,

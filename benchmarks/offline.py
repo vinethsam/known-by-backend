@@ -38,7 +38,7 @@ from app.worker import process_lease
 
 URLS = ("https://employer.example.org/directory", "https://university.example.edu/directory")
 FIXTURE_VERSION = 1
-NORMALIZATION_VERSION = 5
+NORMALIZATION_VERSION = 6
 
 
 def evidence(name: str) -> str:

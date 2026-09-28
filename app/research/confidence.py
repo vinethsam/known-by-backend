@@ -61,6 +61,10 @@ def recency_signal(claim: EvidenceClaim, source: SourceRecord, policy: ScoringPo
     if claim.is_current is False or claim.end_date is not None:
         return policy.historical_current_factor
     observed = claim.as_of_date or source.published_at
+    if claim.is_current is True and observed is None:
+        # Explicit present-tense evidence is stronger than an undated role whose
+        # currentness is merely unknown. Identity and source authority still apply.
+        return 1
     if observed is None:
         return policy.unknown_recency
     age = max(0, (today - observed).days)
@@ -92,6 +96,8 @@ def claim_strength(
     # absence is uncertainty, not proof that a role is stale. Timeless fields stay at one.
     observed = claim.as_of_date or source.published_at
     if claim.field not in VOLATILE_FIELDS:
+        time_sensitivity = 1.0
+    elif claim.is_current is True and observed is None:
         time_sensitivity = 1.0
     elif observed is None and claim.is_current is not False and claim.end_date is None:
         time_sensitivity = 0.9
@@ -248,8 +254,9 @@ def confidence_for_group(
 
 
 def profile_scores(fields: dict[ProfileField, FieldDecision], policy: ScoringPolicy) -> tuple[float, float]:
-    present = {f: d for f, d in fields.items() if d.value is not None}
-    coverage = 100 * len(present) / len(ProfileField)
+    research_fields = {field for field in ProfileField if field != ProfileField.full_name}
+    present = {f: d for f, d in fields.items() if f in research_fields and d.value is not None}
+    coverage = 100 * len(present) / len(research_fields)
     denominator = sum(policy.field_weights[f] for f in present)
     confidence = (
         sum(policy.field_weights[f] * d.confidence for f, d in present.items()) / denominator

@@ -1,6 +1,6 @@
 """Prompt text for source discovery planning and candidate validation."""
 
-SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v4"
+SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v6"
 
 SOURCE_ADVISOR_SYSTEM_PROMPT = """You plan and assess source candidates for person research.
 
@@ -14,6 +14,14 @@ For search planning, return concise web search queries likely to find authoritat
 for the supplied person seed and known clues. Do not plan LinkedIn-specific searches. People
 may work for governments, ministries, departments, agencies, legislatures, universities,
 public bodies, NGOs, or international institutions; do not assume an organisation is a company.
+Except for the exact seed name, seed fields are unverified identity hypotheses. A matching
+affiliation strengthens a candidate, but an absent or different current affiliation may reflect
+a historical or incorrect seed. Treat that difference alone as ambiguous, not unrelated; use
+"unrelated" only when the supplied candidate metadata clearly identifies another person.
+Use unresolved_fields to target missing evidence. When a strong current public or executive
+title is known but its institution is unresolved, first seek an official office, employer, or
+institutional page that explicitly pairs the title and institution. Wikipedia may be suggested
+as a lower-authority completion source after suitable first-party sources remain incomplete.
 
 For candidate validation, decide only for the candidate_id values supplied by the caller.
 Use source_type, relevance, duplicate_of, and short identity_clues. duplicate_of must be null

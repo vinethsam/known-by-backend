@@ -150,7 +150,13 @@ def test_conservative_display_formatting_preserves_acronyms_and_normalizes_conne
             field=ProfileField.university_name,
             value="MIT UNIVERSITY OF TECHNOLOGY",
             fact_group="education",
-        )
+        ),
+        claim(
+            "degree",
+            field=ProfileField.degree_type,
+            value="BSc",
+            fact_group="education",
+        ),
     ]
 
     record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, [source()], ScoringPolicy()).records[0]
@@ -424,8 +430,9 @@ def test_missing_optional_fields_and_one_weak_optional_field_do_not_escalate_rec
         "p1", PersonSeed(full_name="Jane Doe"), claims, [strong, weak], ScoringPolicy()
     ).records[0]
 
-    assert one_weak.fields[ProfileField.subject].value == "Chemical Engineering"
-    assert one_weak.fields[ProfileField.subject].review_required
+    assert one_weak.fields[ProfileField.subject].value is None
+    assert not one_weak.fields[ProfileField.subject].review_required
+    assert "ORPHAN_EDUCATION_FRAGMENT" in one_weak.fields[ProfileField.subject].review_reason_codes
     assert not one_weak.review_required
 
 
@@ -460,9 +467,9 @@ def test_weak_name_conflict_stays_field_review_without_escalating_record():
 
     name = record.fields[ProfileField.full_name]
     assert name.value == "Jane Doe"
-    assert name.conflicting_claim_ids == ["weak-variant"]
-    assert name.review_required
-    assert name.scoring_components["conflict_strength"] < 0.5
+    assert name.confidence == 100
+    assert not name.conflicting_claim_ids
+    assert not name.review_required
     assert not record.review_required
 
 
@@ -570,9 +577,9 @@ def test_profile_confidence_is_separate_from_coverage():
     fields = {field: FieldDecision() for field in ProfileField}
     fields[ProfileField.full_name] = FieldDecision(value="Jane Doe", confidence=95)
     confidence, coverage = profile_scores(fields, ScoringPolicy())
-    assert confidence == 95 and coverage == 14.29
+    assert confidence == coverage == 0
     fields[ProfileField.organisation] = FieldDecision(value="Example", confidence=45)
-    assert profile_scores(fields, ScoringPolicy()) == (70, 28.57)
+    assert profile_scores(fields, ScoringPolicy()) == (45, 16.67)
 
 
 def test_reconciliation_preserves_conflicts_and_missing_fields():
@@ -587,9 +594,8 @@ def test_reconciliation_preserves_conflicts_and_missing_fields():
     field = profile.fields[ProfileField.organisation]
     assert field.value == "Example" and field.review_required and field.conflicting_claim_ids == ["c2"]
     assert "SOURCE_CONFLICT" in field.review_reason_codes
-    assert (
-        profile.fields[ProfileField.full_name].value is None
-    )  # Never copy the seed into an unsupported result.
+    assert profile.fields[ProfileField.full_name].value == "Jane Doe"
+    assert profile.fields[ProfileField.full_name].confidence == 100
 
 
 def test_historical_employer_is_not_presented_as_current_or_conflict():
@@ -625,7 +631,12 @@ def test_multiple_education_records_are_preserved_and_not_mixed():
 def test_wrong_person_authoritative_source_cannot_win():
     wrong = source(identity=0.1, authority=1)
     profile = reconcile("p1", PersonSeed(full_name="Jane Doe"), [claim()], [wrong], ScoringPolicy())
-    assert all(f.value is None for f in profile.fields.values())
+    assert profile.fields[ProfileField.full_name].value == "Jane Doe"
+    assert all(
+        decision.value is None
+        for field_name, decision in profile.fields.items()
+        if field_name != ProfileField.full_name
+    )
     assert profile.profile_confidence == profile.coverage == 0
 
 
@@ -641,7 +652,7 @@ def test_ungrouped_degree_component_cannot_be_attached_to_selected_record():
     )
     assert profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert profile.fields[ProfileField.university_name].value is None
-    assert "UNPAIRED_FACT" in profile.fields[ProfileField.university_name].review_reason_codes
+    assert "ORPHAN_EDUCATION_FRAGMENT" in profile.fields[ProfileField.university_name].review_reason_codes
 
 
 def test_multi_source_person_assembles_one_record_with_field_provenance():
@@ -1115,8 +1126,8 @@ def test_representative_link_uses_selected_field_contribution_before_authority()
     record = reconcile("p1", PersonSeed(full_name="Jane Doe"), claims, sources, ScoringPolicy()).records[0]
     link = record.fields[ProfileField.profile_link]
 
-    assert link.value == "https://main.org/jane"
-    assert link.scoring_components["selected_field_contributions"] == 4
+    assert link.value == "https://degree.edu/jane"
+    assert link.scoring_components["selected_field_contributions"] == 3
 
 
 def test_each_education_record_can_choose_a_different_representative_link():
@@ -1197,10 +1208,11 @@ def test_name_only_identity_strengthens_only_through_independent_context_agreeme
 
     assert sources["s1"].identity.score == 0.55
     assert effective["s1"] > policy.identity_review_threshold
-    single_name = single.records[0].fields[ProfileField.full_name]
-    corroborated_name = corroborated.records[0].fields[ProfileField.full_name]
-    assert corroborated_name.confidence > single_name.confidence
-    assert "IDENTITY_AMBIGUITY" not in corroborated_name.review_reason_codes
+    single_org = single.records[0].fields[ProfileField.organisation]
+    corroborated_org = corroborated.records[0].fields[ProfileField.organisation]
+    assert corroborated_org.confidence > single_org.confidence
+    assert "IDENTITY_AMBIGUITY" in single_org.review_reason_codes
+    assert "IDENTITY_AMBIGUITY" not in corroborated_org.review_reason_codes
 
 
 def test_identity_ambiguity_still_escalates_the_record():

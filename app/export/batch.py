@@ -84,6 +84,16 @@ _NON_PERSON_NAME_TOKENS = frozenset(
         "website",
     }
 )
+_PASSIVE_SOURCE_METADATA_HEADERS = frozenset(
+    {
+        "cohort",
+        "dataset name",
+        "list name",
+        "source cohort",
+        "source dataset",
+        "source list",
+    }
+)
 
 # Central, deliberately small schema vocabulary. Strong aliases are preferred over
 # constrained token patterns, which are preferred over generic one-word aliases.
@@ -112,10 +122,7 @@ COLUMN_ALIASES: dict[str, dict[str, frozenset[str]]] = {
         "strong": frozenset(
             {
                 "company name",
-                "current employer",
                 "employer name",
-                "government body",
-                "government office",
                 "institution name",
                 "organisation name",
                 "organization name",
@@ -129,13 +136,93 @@ COLUMN_ALIASES: dict[str, dict[str, frozenset[str]]] = {
                 "department",
                 "employer",
                 "institution",
-                "ministry",
                 "office",
                 "org",
                 "organisation",
                 "organization",
             }
         ),
+    },
+    "current_employer": {
+        "strong": frozenset(
+            {
+                "current company",
+                "current company name",
+                "current employer",
+                "current employer name",
+                "current organisation",
+                "current organisation name",
+                "current organization",
+                "current organization name",
+            }
+        ),
+        "generic": frozenset(),
+    },
+    "alumni_organisation": {
+        "strong": frozenset(
+            {
+                "alumni company",
+                "alumni company name",
+                "alumni employer",
+                "alumni employer name",
+                "alumni organisation",
+                "alumni organisation name",
+                "alumni organization",
+                "alumni organization name",
+            }
+        ),
+        "generic": frozenset(),
+    },
+    "historical_employer": {
+        "strong": frozenset(
+            {
+                "former company",
+                "former company name",
+                "former employer",
+                "former employer name",
+                "former organisation",
+                "former organisation name",
+                "former organization",
+                "former organization name",
+                "historical employer",
+                "historical organisation",
+                "historical organisation name",
+                "historical organization",
+                "historical organization name",
+                "past employer",
+                "past organisation",
+                "past organisation name",
+                "past organization",
+                "past organization name",
+                "previous company",
+                "previous company name",
+                "previous employer",
+                "previous employer name",
+                "previous organisation",
+                "previous organisation name",
+                "previous organization",
+                "previous organization name",
+            }
+        ),
+        "generic": frozenset(),
+    },
+    "government_office": {
+        "strong": frozenset(
+            {
+                "government agency",
+                "government agency name",
+                "government body",
+                "government body name",
+                "government department",
+                "government department name",
+                "government ministry",
+                "government ministry name",
+                "government office",
+                "government office name",
+                "ministry name",
+            }
+        ),
+        "generic": frozenset({"ministry"}),
     },
     "job_title": {
         "strong": frozenset({"current job title", "current role", "job title"}),
@@ -217,9 +304,41 @@ COLUMN_PATTERNS: dict[str, tuple[_TokenPattern, ...]] = {
             ),
             excluded=frozenset({"college", "education", "school", "university"}),
         ),
+    ),
+    "current_employer": (
         _TokenPattern(
             required=frozenset({"current"}),
             any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+        ),
+    ),
+    "alumni_organisation": (
+        _TokenPattern(
+            required=frozenset({"alumni"}),
+            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+        ),
+    ),
+    "historical_employer": (
+        _TokenPattern(
+            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+            required=frozenset({"former"}),
+        ),
+        _TokenPattern(
+            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+            required=frozenset({"previous"}),
+        ),
+        _TokenPattern(
+            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+            required=frozenset({"historical"}),
+        ),
+        _TokenPattern(
+            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
+            required=frozenset({"past"}),
+        ),
+    ),
+    "government_office": (
+        _TokenPattern(
+            required=frozenset({"government"}),
+            any_of=frozenset({"agency", "body", "department", "ministry", "office"}),
         ),
     ),
     "job_title": (
@@ -489,6 +608,10 @@ def _validate_headers(header: list[str], settings: Settings) -> None:
 
 def _classify_header(column: str) -> _HeaderMatch | None:
     normalized = normalize_header(column)
+    # These labels identify the originating dataset. They stay on original_row and
+    # must never be inferred into PersonSeed, even if aliases expand in the future.
+    if normalized in _PASSIVE_SOURCE_METADATA_HEADERS:
+        return None
     tokens = frozenset(normalized.split())
     scores: list[tuple[int, str]] = []
     for field_name, aliases in COLUMN_ALIASES.items():
@@ -591,9 +714,47 @@ def _obviously_not_person_name(value: str) -> bool:
 
 
 def _seed_from_row(row: dict[str, str], full_name: str, seed_columns: dict[str, str]) -> PersonSeed:
-    payload: dict[str, Any] = {"full_name": full_name}
-    for field_name, column in seed_columns.items():
-        payload[field_name] = row[column].strip() or None
+    values = {
+        field_name: row[column].strip() for field_name, column in seed_columns.items() if row[column].strip()
+    }
+    semantic_fields = {
+        "current_employer",
+        "alumni_organisation",
+        "historical_employer",
+        "government_office",
+    }
+    payload: dict[str, Any] = {
+        "full_name": full_name,
+        **{field_name: value for field_name, value in values.items() if field_name not in semantic_fields},
+    }
+
+    # Header semantics are retained inside the existing PersonSeed context. These
+    # values guide research only; they never create evidence claims or provenance.
+    known_attributes = {
+        field_name: values[field_name]
+        for field_name in (
+            "current_employer",
+            "government_office",
+            "alumni_organisation",
+            "historical_employer",
+        )
+        if field_name in values
+    }
+
+    # An explicit current-employer header is the strongest current affiliation
+    # hypothesis. A government-office header is an institutional identity anchor
+    # when no ordinary/current organisation was supplied. Alumni and former
+    # employers deliberately remain supporting context only.
+    generic_organisation = values.get("organisation")
+    selected_organisation = (
+        values.get("current_employer") or generic_organisation or values.get("government_office")
+    )
+    if selected_organisation:
+        payload["organisation"] = selected_organisation
+    if generic_organisation and generic_organisation != selected_organisation:
+        known_attributes["organisation_affiliation"] = generic_organisation
+    if known_attributes:
+        payload["known_attributes"] = known_attributes
     try:
         return PersonSeed.model_validate(payload)
     except ValidationError as exc:

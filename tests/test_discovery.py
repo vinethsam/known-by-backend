@@ -5,13 +5,15 @@ from app.research.discovery import (
     build_fallback_queries,
     build_queries,
     build_query,
+    build_role_institution_query,
+    build_wikipedia_fallback_query,
     candidate_score,
     deduplicate_candidates,
     query_key,
     rank_candidates,
     source_authority,
 )
-from app.schemas import PersonSeed, SourceCandidate, SourceType
+from app.schemas import PersonSeed, ProfileField, SourceCandidate, SourceType
 
 
 def settings(**overrides) -> Settings:
@@ -184,3 +186,23 @@ def test_fallback_queries_relax_seed_clues_deterministically():
     assert '"Jane Doe" Example University' in queries
     assert queries[-1] == '"Jane Doe" biography education career'
     assert build_query(person) not in queries
+
+
+def test_role_institution_query_uses_grounded_title_and_seed_context():
+    person = PersonSeed(full_name="Jane Doe", country="Ghana", location="Accra")
+
+    query = build_role_institution_query(person, "Prime Minister")
+
+    assert query == '"Jane Doe" "Prime Minister" Ghana Accra official'
+
+
+def test_wikipedia_query_is_a_separate_missing_field_fallback():
+    person = PersonSeed(full_name="Jane Doe")
+
+    query = build_wikipedia_fallback_query(
+        person,
+        [ProfileField.organisation.value, ProfileField.degree_type.value],
+    )
+
+    assert query == '"Jane Doe" site:wikipedia.org career education'
+    assert all("site:wikipedia.org" not in ordinary for ordinary in build_queries(person, settings()))

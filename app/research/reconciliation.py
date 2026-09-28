@@ -86,6 +86,51 @@ def _value_key(field_name: ProfileField, value: str) -> str:
     return " ".join(tokens)
 
 
+def _claim_value_key(claim: EvidenceClaim) -> str:
+    value = claim.raw_value if claim.field == ProfileField.university_name else claim.normalised_value
+    return _value_key(claim.field, value)
+
+
+def _university_base_key(value: str) -> str | None:
+    """Return a base only for an explicitly qualified institution value."""
+
+    parts = re.split(r"\s*[,;]\s*", value, maxsplit=1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return _value_key(ProfileField.university_name, parts[0])
+
+
+def _claims_equivalent(left: EvidenceClaim, right: EvidenceClaim) -> bool:
+    if left.field != right.field:
+        return False
+    if _claim_value_key(left) == _claim_value_key(right):
+        return True
+    if left.field != ProfileField.university_name:
+        return False
+    left_base = _university_base_key(left.raw_value)
+    right_base = _university_base_key(right.raw_value)
+    # A qualified form can match its exact unqualified form. Two different
+    # qualified campuses (for example Berkeley and Los Angeles) never match merely
+    # because the text before their commas is shared.
+    return (left_base is not None and left_base == _claim_value_key(right) and right_base is None) or (
+        right_base is not None and right_base == _claim_value_key(left) and left_base is None
+    )
+
+
+def _field_overlaps(left: list[EvidenceClaim], right: list[EvidenceClaim], field_name: ProfileField) -> bool:
+    left_claims = [claim for claim in left if claim.field == field_name]
+    right_claims = [claim for claim in right if claim.field == field_name]
+    return any(_claims_equivalent(a, b) for a in left_claims for b in right_claims)
+
+
+def _field_conflicts(left: list[EvidenceClaim], right: list[EvidenceClaim], field_name: ProfileField) -> bool:
+    return (
+        any(claim.field == field_name for claim in left)
+        and any(claim.field == field_name for claim in right)
+        and not _field_overlaps(left, right, field_name)
+    )
+
+
 def _build_bundles(claims: list[EvidenceClaim], fields: set[ProfileField]) -> list[_FactBundle]:
     bundles: dict[tuple[str, str], _FactBundle] = {}
     for claim in claims:
@@ -163,17 +208,15 @@ def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBund
 def _values(claims: list[EvidenceClaim]) -> dict[ProfileField, set[str]]:
     values: dict[ProfileField, set[str]] = defaultdict(set)
     for claim in claims:
-        values[claim.field].add(_value_key(claim.field, claim.normalised_value))
+        values[claim.field].add(_claim_value_key(claim))
     return values
 
 
 def _overlap_and_conflict(left: list[EvidenceClaim], right: list[EvidenceClaim]) -> tuple[int, int]:
     left_values, right_values = _values(left), _values(right)
     shared_fields = left_values.keys() & right_values.keys()
-    overlap = sum(bool(left_values[field_name] & right_values[field_name]) for field_name in shared_fields)
-    conflict = sum(
-        bool(left_values[field_name].isdisjoint(right_values[field_name])) for field_name in shared_fields
-    )
+    overlap = sum(_field_overlaps(left, right, field_name) for field_name in shared_fields)
+    conflict = sum(_field_conflicts(left, right, field_name) for field_name in shared_fields)
     return overlap, conflict
 
 
@@ -200,9 +243,7 @@ def _bundle_strength(
 
 
 def _cluster_signature(cluster: _EvidenceCluster) -> str:
-    parts = sorted(
-        f"{claim.field.value}:{_value_key(claim.field, claim.normalised_value)}" for claim in cluster.claims
-    )
+    parts = sorted(f"{claim.field.value}:{_claim_value_key(claim)}" for claim in cluster.claims)
     return "|".join(parts)
 
 
@@ -214,23 +255,54 @@ def _definitely_distinct_education(bundle: _FactBundle, cluster: _EvidenceCluste
         return True
     if bundle_degrees and bundle_degrees == cluster_degrees:
         contextual_conflicts = sum(
-            bool(bundle_values.get(field_name) and cluster_values.get(field_name))
-            and bundle_values[field_name].isdisjoint(cluster_values[field_name])
+            _field_conflicts(bundle.claims, cluster.claims, field_name)
             for field_name in {ProfileField.university_name, ProfileField.subject}
         )
         # Two independent contextual disagreements distinguish same-level degrees;
         # one disagreement alone remains a reviewable source conflict.
         if contextual_conflicts >= 2:
             return True
-    # A single source explicitly separating two fact groups is direct evidence of
-    # distinct credentials, even when both happen to have the same degree level.
+
+        def qualification_labels(claims: list[EvidenceClaim]) -> set[str]:
+            labels = set()
+            for claim in claims:
+                if claim.field != ProfileField.degree_type:
+                    continue
+                for candidate in normalise_degree_candidates(claim.raw_value):
+                    if candidate.value == claim.normalised_value and candidate.qualification_label:
+                        labels.add(comparison_key(candidate.qualification_label))
+            return labels
+
+        bundle_labels = qualification_labels(bundle.claims)
+        cluster_labels = qualification_labels(cluster.claims)
+        if bundle_labels and cluster_labels and bundle_labels.isdisjoint(cluster_labels):
+            return True
+
+        def credential_dates(claims: list[EvidenceClaim]) -> set[str]:
+            markers = {claim.end_date.isoformat() for claim in claims if claim.end_date}
+            for claim in claims:
+                temporal = comparison_key(claim.temporal_context or "")
+                if re.search(r"\b(?:18|19|20)\d{2}\b", temporal):
+                    markers.add(temporal)
+            return markers
+
+        bundle_dates = credential_dates(bundle.claims)
+        cluster_dates = credential_dates(cluster.claims)
+        if bundle_dates and cluster_dates and bundle_dates.isdisjoint(cluster_dates):
+            return True
+
+    # Separate fact groups are provenance, not proof by themselves. Within one
+    # source they establish distinct same-level credentials only when the source
+    # also gives materially different institutions.
     for existing in cluster.bundles:
         if (
             bundle.source_id == existing.source_id
             and bundle.explicitly_grouped
             and existing.explicitly_grouped
             and bundle.fact_group != existing.fact_group
-            and _overlap_and_conflict(bundle.claims, existing.claims)[1]
+            and bundle_values.get(ProfileField.university_name)
+            and _values(existing.claims).get(ProfileField.university_name)
+            and _field_conflicts(bundle.claims, existing.claims, ProfileField.university_name)
         ):
             return True
     return False
@@ -242,9 +314,10 @@ def _education_clusters(
     policy: ScoringPolicy,
     today: date | None,
     identities: dict[str, float],
-) -> tuple[list[_EvidenceCluster], list[EvidenceClaim]]:
+) -> tuple[list[_EvidenceCluster], list[EvidenceClaim], list[EvidenceClaim]]:
     bundles = _split_compound_degree_bundles(_build_bundles(claims, EDUCATION_FIELDS))
     excluded: list[EvidenceClaim] = []
+    orphan_bundles: list[_FactBundle] = []
     regular = []
     non_degree_kinds = {
         EducationKind.ambiguous,
@@ -257,6 +330,9 @@ def _education_clusters(
     }
     for bundle in bundles:
         degree_claims = [claim for claim in bundle.claims if claim.field == ProfileField.degree_type]
+        if not degree_claims:
+            orphan_bundles.append(bundle)
+            continue
         excluded_degrees = [
             claim for claim in degree_claims if classify_education(claim.raw_value) in non_degree_kinds
         ]
@@ -294,12 +370,25 @@ def _education_clusters(
     for bundle in bundles:
         compatible: list[tuple[int, _EvidenceCluster]] = []
         for cluster in clusters:
+            if _definitely_distinct_education(bundle, cluster):
+                continue
             overlap, conflict = _overlap_and_conflict(bundle.claims, cluster.claims)
             if overlap and not conflict:
                 compatible.append((overlap, cluster))
         if compatible:
             compatible.sort(key=lambda item: (-item[0], _cluster_signature(item[1])))
-            compatible[0][1].bundles.append(bundle)
+            best_overlap = compatible[0][0]
+            best_matches = [cluster for overlap, cluster in compatible if overlap == best_overlap]
+            if len(best_matches) == 1:
+                best_matches[0].bundles.append(bundle)
+            else:
+                # A generic institution/degree bundle that fits several proven
+                # credentials cannot be assigned to one campus or qualification by
+                # sort order. Retain it as ambiguous evidence on every plausible
+                # record without letting it inflate selected support.
+                for cluster in best_matches:
+                    cluster.ambiguous = True
+                    cluster.alternatives.extend(bundle.claims)
             continue
         if not clusters or all(_definitely_distinct_education(bundle, cluster) for cluster in clusters):
             clusters.append(_EvidenceCluster(bundles=[bundle]))
@@ -315,13 +404,23 @@ def _education_clusters(
         )
         target = candidates[0]
         overlap, _ = _overlap_and_conflict(bundle.claims, target.claims)
-        target.ambiguous = True
         if overlap:
             # Same degree with incompatible details is one ambiguous record until
             # relationship evidence proves two separate qualifications.
+            bundle_values, target_values = _values(bundle.claims), _values(target.claims)
+            conflicting_fields = {
+                field_name
+                for field_name in bundle_values.keys() & target_values.keys()
+                if _field_conflicts(bundle.claims, target.claims, field_name)
+            }
             target.bundles.append(bundle)
+            # Alternate subject wording does not make credential separation
+            # uncertain when institution and degree already identify one record.
+            if conflicting_fields - {ProfileField.subject}:
+                target.ambiguous = True
         else:
             # Never splice unrelated, ungrouped education components together.
+            target.ambiguous = True
             target.alternatives.extend(bundle.claims)
 
     def cluster_order(cluster: _EvidenceCluster) -> tuple[float, str]:
@@ -331,7 +430,22 @@ def _education_clusters(
         )
         return -strength, _cluster_signature(cluster)
 
-    return sorted(clusters, key=cluster_order), _unique_claims(excluded)
+    orphans: list[EvidenceClaim] = []
+    for bundle in orphan_bundles:
+        compatible = [
+            cluster
+            for cluster in clusters
+            if (overlap_conflict := _overlap_and_conflict(bundle.claims, cluster.claims))[0]
+            and not overlap_conflict[1]
+        ]
+        if len(compatible) == 1:
+            # A fragment may corroborate one already-proven credential, but it may
+            # never seed a credential or be guessed onto several possible records.
+            compatible[0].bundles.append(bundle)
+        else:
+            orphans.extend(bundle.claims)
+
+    return sorted(clusters, key=cluster_order), _unique_claims(excluded), _unique_claims(orphans)
 
 
 def _employment_clusters(claims: list[EvidenceClaim]) -> list[_EvidenceCluster]:
@@ -447,7 +561,7 @@ def _decision(
 
     groups: dict[str, list[EvidenceClaim]] = defaultdict(list)
     for claim in relevant:
-        groups[_value_key(field_name, claim.normalised_value)].append(claim)
+        groups[_claim_value_key(claim)].append(claim)
     group_scores = {
         value: confidence_for_group(
             support,
@@ -467,9 +581,7 @@ def _decision(
     ]
     # A concurrent role may disagree about the title while corroborating its organisation.
     # Preserve that agreement without using the other role's mismatched components.
-    matching_external = [
-        claim for claim in conflicts if _value_key(field_name, claim.normalised_value) == chosen_value
-    ]
+    matching_external = [claim for claim in conflicts if _claim_value_key(claim) == chosen_value]
     support = sorted(
         _unique_claims([*support, *matching_external]),
         key=lambda claim: claim_tie_key(claim, sources),
@@ -478,11 +590,7 @@ def _decision(
         _unique_claims(
             [
                 *internal_conflicts,
-                *(
-                    claim
-                    for claim in conflicts
-                    if _value_key(field_name, claim.normalised_value) != chosen_value
-                ),
+                *(claim for claim in conflicts if _claim_value_key(claim) != chosen_value),
             ]
         ),
         key=lambda claim: claim_tie_key(claim, sources),
@@ -554,6 +662,11 @@ def _decision(
             review_reason_codes=reasons,
             scoring_components=components,
         )
+    material_conflict = (
+        bool(all_conflicts)
+        and components.get("conflict_strength", 0) >= 0.5
+        and (components.get("conflict_strength", 0) >= 0.75 * components.get("claim_strength", 0))
+    )
     return FieldDecision(
         value=display,
         confidence=confidence,
@@ -563,7 +676,7 @@ def _decision(
         sources=list(dict.fromkeys(sources[source_id].final_url for source_id in source_ids)),
         conflicting_claim_ids=[claim.claim_id for claim in all_conflicts],
         alternative_claim_ids=[claim.claim_id for claim in alternatives],
-        review_required=bool(all_conflicts)
+        review_required=material_conflict
         or confidence < policy.review_threshold
         or bool(mandatory_review.intersection(reasons))
         or "IDENTITY_AMBIGUITY" in reasons,
@@ -670,7 +783,7 @@ def _employment_decisions(
             source_types={sources[claim.source_id].source_type for claim in cluster.claims},
         )
 
-    def rank(cluster: _EvidenceCluster) -> tuple[int, int, int, int, int, float]:
+    def rank(cluster: _EvidenceCluster) -> tuple[int, int, int, float, int, int, float]:
         cluster_claims = cluster.claims
         explicitly_current = int(any(claim.is_current is True for claim in cluster_claims))
         observed = max(
@@ -695,6 +808,7 @@ def _employment_decisions(
                 freshness = 1
         completeness = len({claim.field for claim in cluster_claims} & VOLATILE_FIELDS)
         relationship_priority = RELATIONSHIP_PRIORITY[relationship_type(cluster)]
+        authority = max(sources[claim.source_id].authority_score for claim in cluster_claims)
         strength = max(
             claim_strength(
                 claim,
@@ -710,6 +824,7 @@ def _employment_decisions(
             freshness,
             relationship_priority,
             explicitly_current,
+            authority,
             observed.toordinal(),
             completeness,
             strength,
@@ -726,9 +841,9 @@ def _employment_decisions(
         candidate_rank = rank(cluster)
         same_current_state = candidate_rank[:3] == selected_rank[:3]
         same_observation = (
-            candidate_rank[3] == selected_rank[3] == date.min.toordinal()
-            or abs(candidate_rank[3] - selected_rank[3]) <= 30
-        ) and abs(candidate_rank[5] - selected_rank[5]) <= 0.1
+            candidate_rank[4] == selected_rank[4] == date.min.toordinal()
+            or abs(candidate_rank[4] - selected_rank[4]) <= 30
+        ) and abs(candidate_rank[6] - selected_rank[6]) <= 0.1
         if same_current_state and same_observation:
             unresolved.append(cluster)
 
@@ -927,13 +1042,20 @@ def _representative_link(
 
 
 def _record_review(
-    fields: dict[ProfileField, FieldDecision], policy: ScoringPolicy
+    fields: dict[ProfileField, FieldDecision],
+    policy: ScoringPolicy,
+    web_identity: FieldDecision | None = None,
 ) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     reasons_by_field = {
         field_name: set(decision.review_reason_codes) for field_name, decision in fields.items()
     }
-    all_reasons = set().union(*reasons_by_field.values()) if reasons_by_field else set()
+    web_identity_reasons = set(web_identity.review_reason_codes) if web_identity else set()
+    all_reasons = (
+        set().union(*reasons_by_field.values(), web_identity_reasons)
+        if reasons_by_field
+        else web_identity_reasons
+    )
     if "IDENTITY_AMBIGUITY" in all_reasons:
         reasons.append("IDENTITY_AMBIGUITY")
     if "CURRENT_ROLE_CONFLICT" in all_reasons:
@@ -942,20 +1064,35 @@ def _record_review(
         reasons.append("EDUCATION_GROUPING_AMBIGUITY")
     if "DESCRIPTIVE_JOB_TITLE" in all_reasons:
         reasons.append("DESCRIPTIVE_JOB_TITLE")
-    if "BELOW_SELECTION_FLOOR" in all_reasons:
-        reasons.append("BELOW_SELECTION_FLOOR")
+    selection_floor_fields = {
+        ProfileField.organisation,
+        ProfileField.job_title,
+        ProfileField.university_name,
+        ProfileField.degree_type,
+        ProfileField.profile_link,
+    }
     if any(
-        "SOURCE_CONFLICT" in reasons_by_field.get(field_name, set())
-        and fields[field_name].scoring_components.get("conflict_strength", 0) >= 0.5
-        and fields[field_name].scoring_components.get("conflict_strength", 0)
-        >= 0.75 * fields[field_name].scoring_components.get("claim_strength", 0)
+        "BELOW_SELECTION_FLOOR" in reasons_by_field.get(field_name, set())
+        for field_name in selection_floor_fields
+    ):
+        reasons.append("BELOW_SELECTION_FLOOR")
+    critical_decisions = [
+        fields[field_name]
         for field_name in {
-            ProfileField.full_name,
             ProfileField.organisation,
             ProfileField.job_title,
             ProfileField.university_name,
             ProfileField.degree_type,
         }
+    ]
+    if web_identity is not None:
+        critical_decisions.append(web_identity)
+    if any(
+        "SOURCE_CONFLICT" in decision.review_reason_codes
+        and decision.scoring_components.get("conflict_strength", 0) >= 0.5
+        and decision.scoring_components.get("conflict_strength", 0)
+        >= 0.75 * decision.scoring_components.get("claim_strength", 0)
+        for decision in critical_decisions
     ):
         reasons.append("MAJOR_CONTRADICTORY_EVIDENCE")
     if any("UNPAIRED_FACT" in reasons_by_field.get(field_name, set()) for field_name in VOLATILE_FIELDS):
@@ -964,14 +1101,13 @@ def _record_review(
     substantive_values = any(
         decision.value is not None
         for field_name, decision in fields.items()
-        if field_name != ProfileField.profile_link
+        if field_name not in {ProfileField.full_name, ProfileField.profile_link}
     )
     if "LOW_SOURCE_AUTHORITY" in reasons_by_field[ProfileField.profile_link] or (
         substantive_values and link.value is None
     ):
         reasons.append("NO_RELIABLE_REPRESENTATIVE_SOURCE")
     critical_fields = {
-        ProfileField.full_name,
         ProfileField.organisation,
         ProfileField.job_title,
         ProfileField.university_name,
@@ -1027,7 +1163,7 @@ def reconcile(
         claim_id: reason for claim_id, (_, reason) in quality_pairs.items() if reason is not None
     }
 
-    full_name = _decision(
+    web_identity = _decision(
         ProfileField.full_name,
         [claim for claim in accepted if claim.field == ProfileField.full_name],
         sources,
@@ -1036,6 +1172,15 @@ def reconcile(
         identities,
         qualities,
         quality_reasons,
+    )
+    full_name = FieldDecision(
+        value=seed.full_name,
+        confidence=100,
+        review_required=False,
+        scoring_components={
+            "confidence_kind": "seed_input_certainty",
+            "formula_version": "seed-input-v1",
+        },
     )
     employment = _employment_decisions(
         accepted,
@@ -1047,7 +1192,9 @@ def reconcile(
         qualities,
         quality_reasons,
     )
-    clusters, non_degree_claims = _education_clusters(accepted, sources, policy, today, identities)
+    clusters, non_degree_claims, orphan_claims = _education_clusters(
+        accepted, sources, policy, today, identities
+    )
     education_scopes: list[_EvidenceCluster | None] = clusters or [None]
     records: list[ProfileRecord] = []
     for scope_index, cluster in enumerate(education_scopes):
@@ -1064,6 +1211,7 @@ def reconcile(
             alternatives = [claim for claim in cluster_alternatives if claim.field == field_name]
             if scope_index == 0:
                 alternatives.extend(claim for claim in non_degree_claims if claim.field == field_name)
+                alternatives.extend(claim for claim in orphan_claims if claim.field == field_name)
             reasons = list(cluster_reasons)
             if alternatives:
                 if any(claim in non_degree_claims for claim in alternatives):
@@ -1077,6 +1225,8 @@ def reconcile(
                         reasons.append("NON_DEGREE_EDUCATION")
                 if any(claim in cluster_alternatives for claim in alternatives):
                     reasons.append("UNPAIRED_FACT")
+                if any(claim in orphan_claims for claim in alternatives):
+                    reasons.append("ORPHAN_EDUCATION_FRAGMENT")
             fields[field_name] = _decision(
                 field_name,
                 relevant,
@@ -1093,7 +1243,7 @@ def reconcile(
             fields, accepted, sources, policy, today, identities, qualities
         )
         profile_confidence, coverage = profile_scores(fields, policy)
-        review, record_reasons = _record_review(fields, policy)
+        review, record_reasons = _record_review(fields, policy, web_identity)
         records.append(
             ProfileRecord(
                 record_id=_record_id(fields),

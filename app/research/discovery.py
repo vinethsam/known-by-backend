@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy, Settings, get_settings
+from app.research.identity import seed_known_attributes
 from app.retrieval.urls import canonicalise_url, domain_key, is_blocked_source_host
 from app.schemas import PersonSeed, SourceCandidate, SourceType
 
@@ -112,38 +113,64 @@ def rank_candidates(
 
 
 def build_query(seed: PersonSeed) -> str:
-    terms = [f'"{seed.full_name}"']
-    for value in (
+    terms = [f'"{seed.full_name}"', *_seed_context_values(seed)]
+    return " ".join(terms)[:600]
+
+
+def _seed_context_values(seed: PersonSeed) -> list[str]:
+    values = [
         seed.organisation,
         seed.university_name,
         seed.job_title,
         seed.subject,
+        seed.program_year,
         seed.country,
         seed.location,
-    ):
-        if value:
-            terms.append(str(value))
-    return " ".join(terms)[:600]
+        *seed_known_attributes(seed).values(),
+    ]
+    context: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        text = " ".join(str(value).split())
+        key = text.casefold()
+        if key and key not in seen:
+            context.append(text)
+            seen.add(key)
+    return context
 
 
 def build_fallback_queries(seed: PersonSeed) -> list[str]:
     """Relax an over-constrained seed query without widening the configured budget."""
 
     name = f'"{seed.full_name}"'
-    clues = [
-        seed.organisation,
-        seed.university_name,
-        seed.country,
-        seed.location,
-        seed.job_title,
-        seed.subject,
-        seed.program_year,
-        *seed.known_attributes.values(),
-    ]
+    clues = _seed_context_values(seed)
     queries = [f"{name} {value}"[:600] for value in clues if value]
     queries.append(f"{name} biography education career")
     base_key = query_key(build_query(seed))
     return [query for query in _unique(queries) if query_key(query) != base_key]
+
+
+def build_role_institution_query(seed: PersonSeed, job_title: str) -> str:
+    """Build one bounded completion query for a strongly evidenced unpaired role."""
+
+    terms = [f'"{seed.full_name}"', f'"{job_title}"']
+    terms.extend(str(value) for value in (seed.country, seed.location) if value)
+    terms.append("official")
+    return " ".join(terms)[:600]
+
+
+def build_wikipedia_fallback_query(seed: PersonSeed, unresolved_fields: Iterable[str] = ()) -> str:
+    """Build an explicit secondary-source query only for unresolved enrichment."""
+
+    unresolved = set(unresolved_fields)
+    terms = [f'"{seed.full_name}"', "site:wikipedia.org"]
+    if unresolved & {"organisation", "job_title"}:
+        terms.append("career")
+    if unresolved & {"university_name", "degree_type", "subject"}:
+        terms.append("education")
+    return " ".join(terms)[:600]
 
 
 def build_queries(
@@ -167,11 +194,20 @@ def _identity_signal(candidate: SourceCandidate, seed: PersonSeed, weights: dict
         (seed.location, weights["location"]),
     ]
     score = 0.0
+    matched_values: set[str] = set()
     for value, weight in checks:
-        if value and str(value).casefold() in haystack:
+        key = " ".join(str(value).casefold().split()) if value else ""
+        if key and key not in matched_values and key in haystack:
             score += weight
-    if seed.known_attributes:
-        matched = sum(1 for value in seed.known_attributes.values() if value.casefold() in haystack)
+            matched_values.add(key)
+    known_attributes = seed_known_attributes(seed)
+    if known_attributes:
+        matched = 0
+        for value in known_attributes.values():
+            key = " ".join(value.casefold().split())
+            if key and key not in matched_values and key in haystack:
+                matched += 1
+                matched_values.add(key)
         score += min(weights["known_attributes_cap"], matched * weights["known_attribute"])
     return max(0.0, min(1.0, score))
 

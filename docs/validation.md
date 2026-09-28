@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the accuracy and retrieval-recovery pass on **2026-09-27**, Windows,
+Validated locally after the seed-context and reconciliation pass on **2026-09-28**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,11 +9,11 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Final full test suite | **428 passed, 5 skipped, 2 warnings** in **23.22 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Final full test suite | **479 passed, 5 skipped, 2 warnings** in **16.52 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
 | Focused pre-edit accuracy baseline | **219 passed** |
 | Offline production-pipeline benchmark | Completed for 1, 5, 25, and 100 people with mocked HTTP and no paid calls |
 | Ruff lint | `ruff check .` passed |
-| Ruff formatting | All 77 files already formatted |
+| Ruff formatting | All 81 files already formatted |
 | Python compile/import | Application and compatibility entry points passed |
 | Alembic | Single head `202609150001`; fresh SQLite upgrade/check/downgrade passed with no schema drift |
 | Git diff whitespace check | Passed |
@@ -40,12 +40,12 @@ isolation, weak-source link gating, mirrored evidence, and nested benchmark
 normalization.
 
 Accuracy fixtures cover seed-aware identity anchors, local name/clue association,
-explicit affiliation denials, and bounded cross-source bridges, including provisional
-unanchored namesakes and specific known-attribute anchors. They also verify that
-Wikipedia is forced to `encyclopedia` authority regardless of labels or domain
-overrides. Retrieval checks cover one browser attempt for each eligible
-static result and one bounded search-recovery queue when initial retrieval fails or
-produces no identity-eligible grounded claims.
+explicit affiliation contradictions retained for corrective corroboration, and bounded
+cross-source bridges, including provisional unanchored namesakes and specific
+known-attribute anchors. They also verify that Wikipedia is forced to `encyclopedia`
+authority regardless of labels or domain overrides. Retrieval checks cover one browser
+attempt for each eligible static result and one bounded search-recovery queue when
+initial retrieval fails or produces no identity-eligible grounded claims.
 
 Data-quality fixtures cover the eight controlled degree types, English and multilingual
 aliases, derived subjects from grounded degree titles, qualification-label suffixes,

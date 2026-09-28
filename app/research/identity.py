@@ -21,6 +21,9 @@ _TYPED_CLUE_LABELS = {
     "organization": "organisation",
     "company": "organisation",
     "employer": "organisation",
+    "current employer": "organisation",
+    "current organisation": "organisation",
+    "current organization": "organisation",
     "job title": "job_title",
     "title": "job_title",
     "role": "job_title",
@@ -31,6 +34,36 @@ _TYPED_CLUE_LABELS = {
     "subject": "subject",
     "program year": "program_year",
     "year": "program_year",
+}
+_PASSIVE_METADATA_LABELS = {
+    "cohort",
+    "dataset name",
+    "list name",
+    "source cohort",
+    "source dataset",
+    "source list",
+}
+_SUPPORTING_AFFILIATION_LABELS = {
+    "alumni company",
+    "alumni employer",
+    "alumni organisation",
+    "alumni organization",
+    "former company",
+    "former employer",
+    "former organisation",
+    "former organization",
+    "historical employer",
+    "historical organisation",
+    "historical organization",
+    "organisation affiliation",
+    "organization affiliation",
+    "past employer",
+    "past organisation",
+    "past organization",
+    "previous company",
+    "previous employer",
+    "previous organisation",
+    "previous organization",
 }
 _CONTEXT_FIELDS = {
     ProfileField.organisation,
@@ -51,6 +84,34 @@ def _clue_key(label: str, value: str) -> str:
     return key
 
 
+def _label_key(label: str) -> str:
+    return comparison_key(label).replace("_", " ")
+
+
+def is_passive_seed_attribute(label: str) -> bool:
+    """Return whether an attribute describes the input dataset, not the person."""
+
+    return _label_key(label) in _PASSIVE_METADATA_LABELS
+
+
+def seed_known_attributes(seed: PersonSeed) -> dict[str, str]:
+    """Return person context only, excluding passive source-list metadata."""
+
+    return {
+        label: value
+        for label, value in seed.known_attributes.items()
+        if value and not is_passive_seed_attribute(label)
+    }
+
+
+def research_seed_payload(seed: PersonSeed) -> dict:
+    """Serialize a seed for research providers without passive dataset metadata."""
+
+    payload = seed.model_dump(mode="json")
+    payload["known_attributes"] = seed_known_attributes(seed)
+    return payload
+
+
 def _seed_clues(seed: PersonSeed) -> dict[str, str]:
     clues = {
         label: value
@@ -67,9 +128,10 @@ def _seed_clues(seed: PersonSeed) -> dict[str, str]:
     }
     # An arbitrary attribute must not replace a populated typed seed clue with the
     # same meaning, including common spelling/header variants.
-    for label, value in seed.known_attributes.items():
-        typed_label = _TYPED_CLUE_LABELS.get(comparison_key(label).replace("_", " "))
-        if value and not (typed_label and getattr(seed, typed_label)):
+    typed_value_keys = {comparison_key(value) for value in clues.values()}
+    for label, value in seed_known_attributes(seed).items():
+        typed_label = _TYPED_CLUE_LABELS.get(_label_key(label))
+        if comparison_key(value) not in typed_value_keys and not (typed_label and getattr(seed, typed_label)):
             clues[f"known:{label}"] = value
     return clues
 
@@ -83,12 +145,21 @@ def seed_identity_anchors(seed: PersonSeed) -> dict[str, str]:
     """
     clues = _seed_clues(seed)
     anchors = {label: value for label, value in clues.items() if label in _INSTITUTION_FIELDS}
-    weak_labels = {"country", "location", "subject", "year", "program year", "full name", "name"}
+    weak_labels = {
+        "country",
+        "location",
+        "subject",
+        "year",
+        "program year",
+        "full name",
+        "name",
+        *_SUPPORTING_AFFILIATION_LABELS,
+    }
     anchors.update(
         (label, value)
         for label, value in clues.items()
         if label.startswith("known:")
-        and comparison_key(label[6:]).replace("_", " ") not in weak_labels
+        and _label_key(label[6:]) not in weak_labels
         and not value.isdecimal()
         and name_key(value) != name_key(seed.full_name)
     )
@@ -206,8 +277,6 @@ def assess_identity(
             if label in anchors:
                 signals["matched_seed_anchors"].append(label)
                 signals["unmatched_seed_anchors"].remove(label)
-    if signals["contradicted_clues"]:
-        return IdentityMatch(rejected=True, signals=signals, reason_codes=["SEED_IDENTITY_CONTRADICTION"])
     score = min(1, policy.identity_name_only + sum(matched_values.values()) * policy.identity_clue_bonus)
     unanchored = bool(anchors) and not signals["matched_seed_anchors"]
     if unanchored:
@@ -219,8 +288,21 @@ def assess_identity(
         return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
     if model_relevance == "ambiguous":
         score = min(score, policy.identity_review_threshold)
-    ambiguous = unanchored or model_relevance == "ambiguous" or score < policy.identity_review_threshold
+    seed_contradiction = bool(signals["contradicted_clues"])
+    if seed_contradiction:
+        # A spreadsheet clue is a hypothesis. Preserve an explicit contradiction
+        # for downstream corroboration instead of discarding potentially corrective
+        # current evidence at page-ingestion time.
+        score = min(score, policy.identity_name_only)
+    ambiguous = (
+        seed_contradiction
+        or unanchored
+        or model_relevance == "ambiguous"
+        or score < policy.identity_review_threshold
+    )
     reasons = ["IDENTITY_AMBIGUITY"] if ambiguous else []
+    if seed_contradiction:
+        reasons.append("SEED_IDENTITY_CONTRADICTION")
     if unanchored:
         reasons.append("SEED_IDENTITY_UNCONFIRMED")
     return IdentityMatch(
@@ -256,6 +338,41 @@ def eligible_identity_source_ids(
         for source_id in eligible
         if set(sources[source_id].identity.signals.get("matched_seed_anchors", [])) & set(anchors)
     }
+    corrective_groups: dict[tuple[str, str], set[ProfileField]] = defaultdict(set)
+    current_organisations: set[str] = set()
+    for claim in claims:
+        source = sources.get(claim.source_id)
+        if (
+            source is None
+            or claim.source_id not in eligible
+            or not source.identity.signals.get("contradicted_clues")
+            or not source.identity.signals.get("exact_name")
+            or not source.identity.signals.get("subject_matches")
+            or source.authority_score < policy.authority[SourceType.publication]
+            or claim.identity_relevance < policy.identity_minimum
+            or claim.directness != "explicit"
+            or claim.is_current is not True
+            or claim.end_date is not None
+            or claim.field not in {ProfileField.organisation, ProfileField.job_title}
+        ):
+            continue
+        group = claim.fact_group or f"claim:{claim.claim_id}"
+        corrective_groups[(claim.source_id, group)].add(claim.field)
+        if claim.field == ProfileField.organisation:
+            current_organisations.add(claim.source_id)
+    primary_types = {
+        SourceType.first_party,
+        SourceType.government,
+        SourceType.employer,
+        SourceType.university,
+        SourceType.professional_body,
+    }
+    direct.update(
+        source_id
+        for (source_id, _), fields in corrective_groups.items()
+        if fields == {ProfileField.organisation, ProfileField.job_title}
+        or (source_id in current_organisations and sources[source_id].source_type in primary_types)
+    )
     keys: dict[str, set[tuple[ProfileField, str]]] = defaultdict(set)
     for claim in claims:
         if (

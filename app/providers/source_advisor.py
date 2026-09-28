@@ -11,6 +11,7 @@ from app.prompts.source_advisor import (
     SOURCE_ADVISOR_SYSTEM_PROMPT,
 )
 from app.providers.openrouter import AttemptCallback, OpenRouterClient, UsageCallback
+from app.research.identity import research_seed_payload
 from app.schemas import Contract, PersonSeed, SourceCandidate, SourceType, UsageRecord
 
 MAX_USAGE_RECORDS = 100
@@ -83,8 +84,9 @@ class SourceAdvisor:
             self.prompt,
             {
                 "task": "plan_search_queries",
-                "seed": seed.model_dump(mode="json"),
+                "seed": research_seed_payload(seed),
                 "known_clues": known_clues[:12],
+                "unresolved_fields": [str(field)[:80] for field in context.get("unresolved_fields", [])[:7]],
             },
             context,
             self.prompt_version,
@@ -114,7 +116,7 @@ class SourceAdvisor:
             self.prompt,
             {
                 "task": "validate_candidates",
-                "seed": seed.model_dump(mode="json"),
+                "seed": research_seed_payload(seed),
                 "candidates": [
                     {
                         "candidate_id": candidate.candidate_id,

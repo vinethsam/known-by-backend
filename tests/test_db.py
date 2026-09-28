@@ -129,6 +129,28 @@ def test_create_claim_finish_and_results_round_trip(tmp_path):
     assert store.get_columns(created.job_id) == ["name", "note"]
 
 
+def test_source_list_metadata_round_trips_without_merging_duplicate_people(tmp_path):
+    store = _store(tmp_path)
+    original_rows = [
+        {"name": "Jane Doe", "LIST_NAME": "Forbes 2000"},
+        {"name": "Jane Doe", "LIST_NAME": "YALI"},
+    ]
+    created = store.create_job(
+        [PersonSeed(full_name="Jane Doe"), PersonSeed(full_name="Jane Doe")],
+        original_rows=original_rows,
+        columns=["name", "LIST_NAME"],
+    )
+
+    results = store.get_results(created.job_id)
+
+    assert results is not None
+    assert len(results.people) == 2
+    assert [person.row_index for person in results.people] == [2, 3]
+    assert [person.original_row for person in results.people] == original_rows
+    assert [person.original_row["LIST_NAME"] for person in results.people] == ["Forbes 2000", "YALI"]
+    assert store.get_columns(created.job_id) == ["name", "LIST_NAME"]
+
+
 def test_profile_records_survive_checkpoint_and_final_result_without_migration(tmp_path):
     store = _store(tmp_path)
     created = store.create_job([PersonSeed(full_name="Ada Lovelace")])

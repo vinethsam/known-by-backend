@@ -53,15 +53,17 @@ def test_institution_and_normalized_title_strongly_prefer_the_seeded_person():
     assert "SEED_IDENTITY_UNCONFIRMED" in namesake.reason_codes
 
 
-def test_absence_is_provisional_but_explicit_seed_denial_is_rejected():
+def test_absence_and_explicit_seed_denial_remain_distinguishable_provisional_evidence():
     seed = PersonSeed(full_name="Jane Doe", organisation="Example Foundation")
     absent = assess_identity(seed, "Jane Doe studied mathematics.", ScoringPolicy())
     contradicted = assess_identity(seed, "Jane Doe never worked for Example Foundation.", ScoringPolicy())
 
     assert not absent.rejected
     assert absent.signals["contradicted_clues"] == []
-    assert contradicted.rejected
-    assert contradicted.reason_codes == ["SEED_IDENTITY_CONTRADICTION"]
+    assert not contradicted.rejected
+    assert contradicted.ambiguous
+    assert "SEED_IDENTITY_CONTRADICTION" in contradicted.reason_codes
+    assert "SEED_IDENTITY_UNCONFIRMED" in contradicted.reason_codes
     assert contradicted.signals["contradicted_clues"] == ["organisation"]
 
 
@@ -80,21 +82,23 @@ def test_seed_anchor_must_be_locally_associated_with_the_exact_namesake():
 
 
 @pytest.mark.parametrize(
-    ("text", "rejected"),
+    ("text", "contradicted"),
     [
         ("Jane Doe did not leave Example Foundation.", False),
         ("Jane Doe has no affiliation with Example Foundation.", True),
         ("Jane Doe is not employed by Example Foundation.", True),
     ],
 )
-def test_only_explicit_affiliation_denials_reject_seed_clues(text, rejected):
+def test_only_explicit_affiliation_denials_mark_seed_contradictions(text, contradicted):
     identity = assess_identity(
         PersonSeed(full_name="Jane Doe", organisation="Example Foundation"),
         text,
         ScoringPolicy(),
     )
 
-    assert identity.rejected is rejected
+    assert not identity.rejected
+    assert bool(identity.signals["contradicted_clues"]) is contradicted
+    assert ("SEED_IDENTITY_CONTRADICTION" in identity.reason_codes) is contradicted
 
 
 def test_not_only_and_historical_context_are_not_denials():
@@ -157,7 +161,12 @@ def test_corroborating_namesakes_cannot_manufacture_a_seed_anchor():
     assert before == {key: source.model_dump() for key, source in sources.items()}
     assert len(claims) == 4  # Provisional evidence is retained, never replaced with seed facts.
     record = reconcile("person", seed, claims, list(sources.values()), policy).records[0]
-    assert all(decision.value is None for decision in record.fields.values())
+    assert record.fields[ProfileField.full_name].value == seed.full_name
+    assert all(
+        decision.value is None
+        for field_name, decision in record.fields.items()
+        if field_name != ProfileField.full_name
+    )
 
 
 def test_seed_linked_source_can_establish_an_independent_education_source():

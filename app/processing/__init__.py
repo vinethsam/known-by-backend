@@ -13,6 +13,8 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
+from app.research.identity import is_passive_seed_attribute
+
 _TECHNICAL_ELEMENTS = ("script", "style", "noscript", "template")
 _EXCESS_BLANK_LINES = re.compile(r"\n(?:[ \t]*\n){2,}")
 _BOILERPLATE_LINE_RE = re.compile(
@@ -65,7 +67,9 @@ def _identity_terms(seed: object) -> list[str]:
     ]
     attributes = _seed_value(seed, "known_attributes")
     if isinstance(attributes, Mapping):
-        values.extend(attributes.values())
+        values.extend(
+            value for label, value in attributes.items() if not is_passive_seed_attribute(str(label))
+        )
     return [" ".join(str(value).casefold().split()) for value in values if value]
 
 

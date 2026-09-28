@@ -41,6 +41,13 @@ def settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_research_prompts_treat_non_name_seed_context_as_an_unverified_hypothesis():
+    assert "unverified identity hypotheses" in SOURCE_ADVISOR_SYSTEM_PROMPT
+    assert "difference alone as ambiguous, not unrelated" in SOURCE_ADVISOR_SYSTEM_PROMPT
+    assert "Every other seed field is an unverified clue" in EXTRACTION_SYSTEM_PROMPT
+    assert "do not suppress literal historical" in EXTRACTION_SYSTEM_PROMPT
+
+
 def test_source_prompts_exclude_linkedin_and_cover_public_sector_sources() -> None:
     advisor_prompt = SOURCE_ADVISOR_SYSTEM_PROMPT.casefold()
     search_prompt = WEB_SEARCH_SYSTEM_PROMPT.casefold()
@@ -183,6 +190,37 @@ async def test_source_advisor_returns_bounded_queries_decisions_and_usage() -> N
     assert len(query_usage) == 1
     assert len(decision_usage) == 1
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_source_advisor_plan_receives_unresolved_fields() -> None:
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.update(json.loads(body["messages"][1]["content"])["payload"])
+        return openrouter_response('{"queries":[]}')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        advisor = SourceAdvisor(OpenRouterClient(settings(), client=client, sleep=no_sleep))
+        await advisor.plan(
+            PersonSeed(
+                full_name="Jane Doe",
+                known_attributes={
+                    "LIST_NAME": "Prime Ministers",
+                    "alumni_organisation": "Example Alumni Network",
+                },
+            ),
+            ["Prime Minister"],
+            {
+                "job_id": "job-1",
+                "person_id": "person-1",
+                "unresolved_fields": ["organisation", "university_name"],
+            },
+        )
+
+    assert captured["unresolved_fields"] == ["organisation", "university_name"]
+    assert captured["seed"]["known_attributes"] == {"alumni_organisation": "Example Alumni Network"}
 
 
 @pytest.mark.asyncio

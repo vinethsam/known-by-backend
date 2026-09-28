@@ -85,12 +85,14 @@ async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
     metrics, usage = ResearchMetrics(), []
     active = peak = 0
     finished = []
+    people = []
     second = asyncio.Event()
 
     async def handler(request):
         nonlocal active, peak
-        index = json.loads(request.content)["messages"][1]["content"]
-        index = json.loads(index)["payload"]["chunk_index"]
+        envelope = json.loads(json.loads(request.content)["messages"][1]["content"])["payload"]
+        index = envelope["chunk_index"]
+        people.append(envelope["person"])
         active += 1
         peak = max(peak, active)
         try:
@@ -116,7 +118,13 @@ async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
             async with aclosing(
                 extract_chunks(
                     client,
-                    PersonSeed(full_name="Jane Doe"),
+                    PersonSeed(
+                        full_name="Jane Doe",
+                        known_attributes={
+                            "source_dataset": "September import",
+                            "alumni_organisation": "Example Alumni Network",
+                        },
+                    ),
                     ["first", "second", "third"],
                     "https://example.org/jane",
                     CONTEXT,
@@ -127,6 +135,9 @@ async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
                 output = [chunk async for chunk, _ in chunks]
     assert output == ["first", "second", "third"]
     assert finished == [1, 0, 2]
+    assert all(
+        person["known_attributes"] == {"alumni_organisation": "Example Alumni Network"} for person in people
+    )
     assert peak == 2 and active == 0
     assert len(usage) == metrics.llm_calls == 3
     assert metrics.tokens_used == metrics.tokens_budgeted == 90

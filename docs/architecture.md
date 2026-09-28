@@ -8,24 +8,37 @@ CSV/TSV/XLSX uploads are flexible seed schemas. After existing file, archive, ro
 column, cell, Unicode, and control-character validation, the importer normalizes each
 header once and applies a centralized deterministic alias/pattern table. A usable
 person-name mapping is required; organisation, role, country/location, university,
-subject, and program-year mappings populate existing `PersonSeed` clues. Unknown or
-ambiguous optional columns are not guessed. Original rows and row indexes remain the
-traceability mechanism. Spreadsheet values are seed clues only and never become web
-evidence, provenance, or confidence inputs by themselves.
+subject, and program-year mappings populate existing `PersonSeed` clues. Semantic
+headers retain useful intent: a current employer or government office is a stronger
+current-role hypothesis, while an alumni organisation or former employer is an
+identity/history clue rather than an assumed current role. Name-only rows remain valid.
+Unknown or ambiguous optional columns are not guessed. Source-list fields such as
+`LIST_NAME`, `source_list`, `source_dataset`, `dataset_name`, `cohort`, and
+`source_cohort` are recognized as passive row metadata and are never converted into
+person clues. Original rows and row indexes remain the traceability mechanism. The
+validated person name is the immutable output identity: every output record repeats it
+with 100% input certainty and no web provenance or name-field review. Other spreadsheet
+person values are hypotheses only and never become web evidence, provenance, confidence,
+or final enriched facts by themselves.
 
 ## Data and persistence
 
 Shared contracts live in `app/schemas/__init__.py`. IDs are UUID strings, timestamps
 are UTC, and JSON payloads use `model_dump(mode="json")`. Every profile has seven
-field decisions, including explicit missing values. Raw claims and source provenance
-survive flat field selection. Identity is assessed separately from source authority;
-final field/profile confidence is deterministic, with coverage reported separately.
+field decisions, including explicit missing values: one immutable input-name decision
+and six evidence-derived decisions. Raw claims and source provenance survive flat
+field selection. Web identity is assessed separately from both the name's input
+certainty and source authority. Final enriched-field/profile confidence is
+deterministic, with evidence-derived coverage reported separately.
 
 Reconciliation is multi-source. A field decision can cite supporting claims and URLs
 from several independent sources. Distinct supported education credentials become
-separate `ProfileRecord` objects; shared name and selected current-employment decisions
-repeat on each record, while education claims stay scoped to their credential. The
-existing flat `PersonProfile.fields` is the deterministic primary-record projection.
+separate `ProfileRecord` objects; the exact seed name and selected current-employment
+decisions repeat on each record, while education claims stay scoped to their
+credential. Export projection starts from the complete original row, so passive
+source-list metadata repeats unchanged on every derived record. Identical people from
+different input rows or source lists remain separate tasks and results. The existing
+flat `PersonProfile.fields` is the deterministic primary-record projection.
 This additive record list is stored in the existing profile JSON, so old profile rows
 remain readable and no database migration is required.
 
@@ -61,17 +74,39 @@ Only valid `url_citation` annotations from search responses become discovered
 candidates. Model-prose URLs never enter the candidate pool. Preferred seed URLs and
 operator-reviewed structured endpoints are separate eligible inputs. Canonical URLs
 and equivalent queries are deduplicated before repeated work. The first query uses
-the exact person name and supplied clues. Candidate decisions are reused within a
-person attempt, and pending candidates are processed before paying for another
-search. Follow-up planning runs only when unresolved fields justify it.
+the exact person name and available person-context clues; a name-only seed uses the
+same path without context terms. Supplied affiliation, role, education, and geography
+also inform deterministic candidate ranking, namesake rejection, and clue-preserving
+follow-up queries. Passive source-list metadata is absent from the research seed and
+therefore absent from queries, source/advisor payloads, identity decisions, and field
+selection. Candidate decisions are reused within a person attempt, and pending
+candidates are processed before paying for another search. Follow-up planning runs
+only when unresolved fields justify it.
+
+When a supported current government, executive, or primary role has no paired
+institution, orchestration may queue one deterministic completion query containing
+the exact name, title, available geography, and `official`. If important role or
+education fields remain unresolved after normal planning, one `site:wikipedia.org`
+query is reserved within the existing per-person search budget, unless Wikipedia was
+already considered. This is a completion path, not a required source for every job.
 
 Seed organisation, university, title, geography, subject, year, and known attributes
 guide discovery and identity resolution only. They never enter the claim ledger or
-final fields without retrieved, grounded evidence. When the seed supplies an identity
-anchor, same-name sources that do not connect to an anchor may be extracted
-provisionally, but their claims cannot populate the final profile. Institutional clues
-and specific known attributes can provide anchors; job title is the fallback when no
-stronger anchor is present.
+final fields without retrieved, grounded evidence. Corroborating web evidence can turn
+a seeded affiliation into a strong identity signal through the normal authority,
+grounding, freshness, and confidence rules. If reliable newer evidence establishes a
+different current organisation, that evidence wins; the seed remains search/history
+context and does not become a selected or historical fact unless evidence supports it.
+When the seed supplies an identity anchor, same-name sources that do not connect to an
+anchor may be extracted provisionally, but their claims cannot populate the final
+profile without corroboration. A source that explicitly contradicts the seed is also
+retained as provisional evidence instead of being discarded: reliable exact-name,
+explicitly current evidence can establish a corrective organisation when it provides
+a paired role or comes from a primary institutional source; weaker or unpaired
+contradictions remain ineligible. Current-employer,
+government-office, and other strong institutional clues can provide anchors.
+Alumni/former affiliations remain supporting historical identity clues, and job title
+is the fallback when no stronger anchor is present.
 
 Every source selected in the current bounded discovery round is consumed before a
 target-confidence stop. This allows corroboration and additional credentials without
@@ -141,18 +176,26 @@ English and multilingual degree terms to a controlled eight-type vocabulary, cla
 non-degree education, safely expands recognizable compound qualifications, and derives
 an explicit subject embedded in a degree title. Literal claims remain unchanged in the
 evidence ledger. Reconciliation merges compatible bundles across sources by normalized
-values. It ranks current organisation/title as one relationship using freshness,
-currentness, primary-role type, and evidence strength; public roles receive a compact
-office subtype. It computes confidence and coverage per record, applies the selected-value
-floor, and derives a representative URL from selected field contributions. All steps are
-deterministic and require no additional model request.
+values. Education credentials split only when positive evidence establishes distinct
+qualifications. A comma- or semicolon-appended institution location is ignored for
+grouping while the raw value is retained, and same-institution/same-level subject
+variants remain one credential unless dates, qualification wording, or other
+relationship evidence proves otherwise. Bundles without a degree cannot create a
+credential; a fragment may corroborate one unambiguous existing credential or remain
+alternative evidence. Reconciliation ranks current organisation/title as one
+relationship using freshness, currentness, primary-role type, and evidence strength;
+public roles receive a compact office subtype. It computes confidence and coverage per
+record, applies the selected-value floor, and derives a representative URL from selected
+field contributions. All steps are deterministic and require no additional model request.
 
-Source/advisor prompts treat seed fields, candidate snippets, and known clues as
-untrusted data. Extraction also treats source text and metadata as untrusted. JSON
-serialization separates these values from the system message; embedded role claims
-or delimiter text do not create messages or tools. Extraction and advisor requests
-have no tools. Only discovery receives the bounded web-search tool. Prompt guidance
-complements schema validation and grounding; it does not replace those checks.
+Source/advisor prompts treat non-name seed fields as unverified hypotheses and allow
+newer retrieved evidence to disagree with them. Passive source-list metadata is
+removed before research payloads are built. Candidate snippets, known clues, source
+text, and source metadata are otherwise treated as untrusted data. JSON serialization
+separates these values from the system message; embedded role claims or delimiter text
+do not create messages or tools. Extraction and advisor requests have no tools. Only
+discovery receives the bounded web-search tool. Prompt guidance complements schema
+validation and grounding; it does not replace those checks.
 
 ## Retrieval and compatibility
 

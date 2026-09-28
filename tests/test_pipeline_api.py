@@ -68,6 +68,11 @@ def fake_services(
     advisor_response=None,
     advisor_relevance="likely",
     failed_fetch_urls=None,
+    page_text=None,
+    extraction_mapping=None,
+    current_claim_fields=None,
+    planned_queries=None,
+    plan_status=200,
 ):
     calls = {
         "models": [],
@@ -78,10 +83,11 @@ def fake_services(
         "search_limits": [],
         "advisor_requests": 0,
     }
-    text = (
+    text = page_text or (
         "Jane Doe works for Example Foundation in Ghana as Programme Director. "
         "Jane Doe earned BSc in Economics at Example University."
     )
+    current_claim_fields = set(current_claim_fields or ())
     urls = (
         search_urls
         if search_urls is not None
@@ -158,10 +164,23 @@ def fake_services(
         calls["advisor_requests"] += int(data.get("task") in {"plan_search_queries", "validate_candidates"})
         if data.get("task") == "plan_search_queries":
             calls["plans"] += 1
+            if plan_status != 200:
+                return httpx.Response(
+                    plan_status,
+                    json={"error": {"message": "planning unavailable fixture"}},
+                )
             answer = {
-                "queries": [f'"Jane Doe" research {calls["plans"]}']
-                if always_new_query
-                else ['"Jane Doe" education', "education jane DOE", '"Jane Doe" Example Foundation']
+                "queries": list(planned_queries)
+                if planned_queries is not None
+                else (
+                    [f'"Jane Doe" research {calls["plans"]}']
+                    if always_new_query
+                    else [
+                        '"Jane Doe" education',
+                        "education jane DOE",
+                        '"Jane Doe" Example Foundation',
+                    ]
+                )
             }
         elif data.get("task") == "validate_candidates":
             calls["validated"].extend(c["url"] for c in data["candidates"])
@@ -190,7 +209,7 @@ def fake_services(
                 ]
             }
         else:
-            mapping = {
+            mapping = extraction_mapping or {
                 "full_name": "Jane Doe",
                 "organisation": "Example Foundation",
                 "job_title": "Programme Director",
@@ -208,6 +227,7 @@ def fake_services(
                         "fact_group": "education"
                         if f in {"university_name", "degree_type", "subject"}
                         else "employment",
+                        "is_current": True if f in current_claim_fields else None,
                     }
                     for f, v in mapping.items()
                 ]
@@ -319,8 +339,152 @@ async def test_no_usable_search_citations_finish_as_insufficient_evidence(
     assert person.result.profile.metrics.stop_reason == "NO_SEARCH_CITATIONS"
     assert not calls["validated"] and not calls["fetched"]
     assert calls["plans"] == calls["advisor_requests"] == 0
-    assert len(person.result.usage) == person.result.profile.metrics.queries_performed == 2
+    queries = [json.loads(item)["query"] for item in calls["queries"]]
+    assert len(person.result.usage) == person.result.profile.metrics.queries_performed == 3
+    assert len(queries) == 3
+    assert "site:wikipedia.org" in queries[-1]
     assert all(item.success for item in person.result.usage)
+
+
+@pytest.mark.asyncio
+async def test_strong_unpaired_current_role_queues_deterministic_completion_before_planning(
+    tmp_path, monkeypatch
+):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=2,
+        MAX_SOURCE_MODEL_TOOL_CALLS=2,
+        MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=16,
+        MAX_SOURCES_PER_PERSON=2,
+    )
+    store = migrated_store(settings)
+    official = "https://official.example.org/jane"
+
+    def results_for_round(_query, round_number):
+        return [official] if round_number == 1 else []
+
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=results_for_round,
+        page_text="Jane Doe is Chief Executive Officer.",
+        extraction_mapping={
+            "full_name": "Jane Doe",
+            "job_title": "Chief Executive Officer",
+        },
+        current_claim_fields={"job_title"},
+    )
+
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe"),
+    )
+
+    queries = [json.loads(item)["query"] for item in calls["queries"]]
+    role = result.profile.fields[ProfileField.job_title]
+    assert queries == [
+        '"Jane Doe"',
+        '"Jane Doe" "Chief Executive Officer" official',
+    ]
+    assert role.value == "Chief Executive Officer"
+    assert role.confidence < 50
+    assert calls["plans"] == 0
+
+
+@pytest.mark.asyncio
+async def test_search_budgets_reserve_final_slot_for_deterministic_wikipedia(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_SEARCH_QUERIES_PER_PERSON=3,
+        MAX_SOURCE_MODEL_TOOL_CALLS=3,
+        MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=24,
+        MAX_SOURCES_PER_PERSON=3,
+    )
+    store = migrated_store(settings)
+    official = "https://official.example.org/jane"
+
+    def results_for_round(_query, round_number):
+        return [official] if round_number == 1 else []
+
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=results_for_round,
+        page_text="Jane Doe has a public biography.",
+        extraction_mapping={"full_name": "Jane Doe"},
+        planned_queries=[
+            '"Jane Doe" site:wikipedia.org biography',
+            '"Jane Doe" official profile',
+            '"Jane Doe" official biography',
+        ],
+    )
+
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe"),
+    )
+
+    queries = [json.loads(item)["query"] for item in calls["queries"]]
+    assert queries == [
+        '"Jane Doe"',
+        '"Jane Doe" official profile',
+        '"Jane Doe" site:wikipedia.org career education',
+    ]
+    assert calls["plans"] == 1
+    assert calls["search_limits"] == [8, 8, 8]
+    assert result.profile.metrics.queries_performed == 3
+    assert result.profile.metrics.web_search_calls_reserved == 3
+    assert result.profile.metrics.search_results_reserved == 24
+
+
+@pytest.mark.asyncio
+async def test_wikipedia_fallback_survives_source_planner_failure(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        OPENROUTER_MAX_RETRIES=0,
+        MAX_SEARCH_QUERIES_PER_PERSON=2,
+        MAX_SOURCE_MODEL_TOOL_CALLS=2,
+        MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=16,
+        MAX_SOURCES_PER_PERSON=2,
+    )
+    store = migrated_store(settings)
+
+    def results_for_round(query_payload, round_number):
+        query = json.loads(query_payload)["query"]
+        if round_number == 1:
+            return ["https://official.example.org/jane"]
+        assert "site:wikipedia.org" in query
+        return ["https://en.wikipedia.org/wiki/Jane_Doe"]
+
+    pipeline, calls = fake_services(
+        settings,
+        store,
+        monkeypatch,
+        search_urls=results_for_round,
+        page_text="Jane Doe has a public biography.",
+        extraction_mapping={"full_name": "Jane Doe"},
+        plan_status=503,
+    )
+
+    result = await pipeline.research(
+        str(uuid4()),
+        str(uuid4()),
+        PersonSeed(full_name="Jane Doe"),
+    )
+
+    queries = [json.loads(item)["query"] for item in calls["queries"]]
+    assert queries == [
+        '"Jane Doe"',
+        '"Jane Doe" site:wikipedia.org career education',
+    ]
+    assert calls["plans"] == 1
+    assert result.profile.metrics.queries_performed == 2
+    assert "SOURCE_ADVISOR_PROVIDER_ERROR" in result.profile.metrics.error_codes
+    assert result.profile.metrics.stop_reason != "PROVIDER_FAILED"
 
 
 @pytest.mark.asyncio

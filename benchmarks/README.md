@@ -27,6 +27,11 @@ different grounded claims. This measures content-cache reuse without sharing
 person-specific extraction. Larger directory bodies exercise normal chunking.
 The full pipeline still records its usual durable checkpoints.
 
+The default fixtures use name-only seeds, so they retain the broad bounded baseline
+through the same production path used by context-bearing seeds. Deterministic
+organisation/role/history clues narrow that path when present; passive source-list
+metadata does not create a separate research mode or alter benchmark work counts.
+
 Reports include elapsed time, average time per person, SQL statement counts,
 constant-query result reads, search/fetch/extraction calls, cache hits, logical
 HTTP/person concurrency and aggregated `person_performance` events when supported
@@ -48,10 +53,12 @@ choose a different internal representative UUID; only that representative is
 compared by its complete fact content, while the full source-linked
 evidence/support sets are still compared. Full normalized results are available
 in each generated report for investigating differences. Reports produced before
-normalization version 5 intentionally cannot be compared: version 3 added nested
+normalization version 6 intentionally cannot be compared: version 3 added nested
 education-record normalization, version 4 recorded the earlier controlled-degree
 and review pass, and version 5 records seed-aware identity, expanded degree types
 and subjects, current-role recency, source authority, and selected-value-floor decisions.
+Version 6 records immutable seed-name output, research-only confidence and coverage,
+explicit-current role scoring, and conservative credential grouping.
 
 The checked-in measurement summary records one before/after run. It contains
 counts and hashes, not multi-megabyte duplicated result bodies. To compare another
@@ -141,3 +148,23 @@ The recovery branch is covered separately with deterministic failure fixtures: i
 uses existing query/source budgets, does not retry a failed canonical URL, and remains
 inactive for healthy batches. Timings are single-machine observations and stay
 non-gating.
+
+## Seed-context and reconciliation pass measurement
+
+Normalization version 6 was run on 2026-09-28 with the same 2 ms mocked latency and
+production pipeline. The fixtures remain name-only and therefore measure the unchanged
+broad bounded path; the seed-aware path uses the same orchestration with deterministic
+context terms. Intentional identity, current-role, name-output, and education-grouping
+changes produce new hashes, so hashes are not compared with version 5.
+
+| People | Elapsed (s) | SQL statements | Model attempts | Searches | Extractions | Cache hit rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.461 | 173 | 4 | 1 | 2 | 0% |
+| 5 | 1.604 | 749 | 20 | 5 | 10 | 80% |
+| 25 | 7.994 | 3,629 | 100 | 25 | 50 | 96% |
+| 100 | 52.290 | 25,028 | 800 | 100 | 600 | 99% |
+
+Work counts remain stable: one search per person, two physical page fetches per batch,
+and six queries for every completed-result read. The 100-person run reached three
+concurrent people and two concurrent extractions. These timings are local,
+single-run observations and remain non-gating.

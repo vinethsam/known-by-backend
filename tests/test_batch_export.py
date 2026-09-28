@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from app.config import Settings
 from app.export.batch import BatchParseError, normalize_header, parse_batch
 from app.export.formats import export_results
+from app.research.discovery import build_query
 from app.schemas import (
     FieldDecision,
     JobResults,
@@ -120,6 +121,60 @@ def test_flexible_schema_uses_context_and_ignores_unknown_columns():
     assert seed.known_attributes == {}
     assert batch.rows[0]["favorite_colour"] == "blue"
     assert batch.rows[0]["random_code"] == "ABC-123"
+    query = build_query(seed)
+    assert "blue" not in query
+    assert "ABC-123" not in query
+
+
+@pytest.mark.parametrize(
+    "metadata_header",
+    [
+        "LIST_NAME",
+        "list_name",
+        "source_list",
+        "source_dataset",
+        "dataset_name",
+        "cohort",
+        "source_cohort",
+    ],
+)
+def test_source_list_metadata_is_preserved_but_excluded_from_research_context(metadata_header):
+    batch = parse_batch(
+        f"name,{metadata_header}\nJane Doe,Prime Ministers\n".encode(),
+        "people.csv",
+        None,
+        _settings(),
+    )
+    seed = batch.seeds[0]
+
+    assert batch.columns == ["name", metadata_header]
+    assert batch.rows == [{"name": "Jane Doe", metadata_header: "Prime Ministers"}]
+    assert seed.full_name == "Jane Doe"
+    assert seed.known_attributes == {}
+    assert "Prime Ministers" not in seed.model_dump_json()
+    assert build_query(seed) == '"Jane Doe"'
+
+
+def test_mixed_source_lists_and_duplicate_people_remain_separate_input_rows():
+    batch = parse_batch(
+        b"name,LIST_NAME,unknown_note\n"
+        b"Jane Doe,Forbes 2000,first occurrence\n"
+        b"Alex Smith,Prime Ministers,second person\n"
+        b"Jane Doe,YALI,second occurrence\n",
+        "people.csv",
+        None,
+        _settings(MAX_BATCH_ROWS=3),
+    )
+
+    assert [seed.full_name for seed in batch.seeds] == ["Jane Doe", "Alex Smith", "Jane Doe"]
+    assert [row["LIST_NAME"] for row in batch.rows] == ["Forbes 2000", "Prime Ministers", "YALI"]
+    assert [row["unknown_note"] for row in batch.rows] == [
+        "first occurrence",
+        "second person",
+        "second occurrence",
+    ]
+    assert all(seed.known_attributes == {} for seed in batch.seeds)
+    assert all("LIST_NAME" not in seed.model_dump_json() for seed in batch.seeds)
 
 
 def test_more_specific_person_name_alias_beats_generic_name():
@@ -401,6 +456,97 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
     assert master_url not in rows[0]["university_name_source_urls"]
     assert bachelor_url not in rows[1]["university_name_source_urls"]
     assert [row["profile_link"] for row in rows] == [bachelor_url, master_url]
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_source_list_metadata_follows_each_derived_education_row_without_cross_leak(format):
+    results = _results()
+    first = results.people[0]
+    first.person_id = "forbes-person"
+    first.row_index = 2
+    first.original_row = {
+        "name": "Jane Doe",
+        "LIST_NAME": "Forbes 2000",
+        "source_note": "first membership",
+    }
+    first.result.profile.person_id = first.person_id
+    first.result.profile.input_name = "Jane Doe"
+
+    def education_record(record_id, degree):
+        profile = first.result.profile
+        fields = {field: decision.model_copy(deep=True) for field, decision in profile.fields.items()}
+        fields[ProfileField.degree_type] = FieldDecision(
+            value=degree,
+            confidence=90,
+            review_required=False,
+        )
+        return ProfileRecord(
+            record_id=record_id,
+            fields=fields,
+            profile_confidence=90,
+            coverage=100,
+            review_required=False,
+            status=PersonStatus.completed,
+        )
+
+    first.result.profile.records = [
+        education_record("bachelors", "Bachelor's Degree"),
+        education_record("masters", "Master's Degree"),
+    ]
+    second = first.model_copy(deep=True)
+    second.person_id = "yali-person"
+    second.row_index = 3
+    second.original_row = {
+        "name": "Jane Doe",
+        "LIST_NAME": "YALI",
+        "source_note": "second membership",
+    }
+    second.result.profile.person_id = second.person_id
+    second.result.profile.records = [education_record("doctoral", "Doctoral Degree")]
+    results.people = [first, second]
+
+    data = export_results(results, ["name", "LIST_NAME", "source_note"], format)
+    if format == "csv":
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+    else:
+        workbook = load_workbook(io.BytesIO(data), data_only=False)
+        values = list(workbook.active.values)
+        workbook.close()
+        headers = list(values[0])
+        rows = [dict(zip(headers, values[index], strict=True)) for index in range(1, len(values))]
+
+    assert [row["degree_type"] for row in rows] == [
+        "Bachelor's Degree",
+        "Master's Degree",
+        "Doctoral Degree",
+    ]
+    assert [row["LIST_NAME"] for row in rows] == ["Forbes 2000", "Forbes 2000", "YALI"]
+    assert [row["source_note"] for row in rows] == [
+        "first membership",
+        "first membership",
+        "second membership",
+    ]
+    assert [row["name"] for row in rows] == ["Jane Doe", "Jane Doe", "Jane Doe"]
+
+
+def test_batch_without_source_list_metadata_keeps_existing_parse_and_export_shape():
+    batch = parse_batch(
+        b"name,organisation\nJane Doe,Example Ltd\n",
+        "people.csv",
+        None,
+        _settings(),
+    )
+    assert batch.columns == ["name", "organisation"]
+    assert batch.rows == [{"name": "Jane Doe", "organisation": "Example Ltd"}]
+
+    results = _results()
+    results.people[0].original_row = dict(batch.rows[0])
+    exported = list(
+        csv.DictReader(io.StringIO(export_results(results, batch.columns, "csv").decode("utf-8-sig")))
+    )
+    assert exported[0]["name"] == "Jane Doe"
+    assert exported[0]["organisation"] == "Example Ltd"
+    assert not ({"LIST_NAME", "source_list", "source_dataset", "cohort"} & set(exported[0]))
 
 
 def test_field_provenance_export_keeps_failed_person_and_formula_safety():

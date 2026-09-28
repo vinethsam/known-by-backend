@@ -41,18 +41,35 @@ remain separate retry/research failures with their specific error codes.
 - Single-person research and CSV/TSV/XLSX batch enrichment with original rows preserved.
   Batch headers are inferred deterministically across common space, snake-case,
   kebab-case, camelCase, and punctuation variants; only a usable person-name column
-  is required.
+  is required. A name-only row follows the normal broad but bounded research path.
 - Iterative public-source discovery, seed-aware identity gating, canonical URL
   deduplication, bounded static-to-browser recovery, and within-job content caching.
-- Multi-source selection of seven profile fields: name, current organisation, current
-  job title, university, degree, subject, and a representative profile link.
+- Seven output field decisions: the validated input name plus six evidence-derived
+  fields for current organisation, current job title, university, degree, subject,
+  and a representative profile link. The input name is immutable in output, carries
+  deterministic 100% input certainty, and is excluded from research confidence and
+  coverage; web identity assessment remains separate.
 - Spreadsheet organisation, title, country/location, university, subject, year, and
-  known attributes constrain identity resolution but never become final evidence.
-  When the seed supplies an identity anchor, same-name sources that do not connect to
-  a locally associated anchor remain provisional and cannot populate final facts.
+  known attributes narrow initial searches, rank candidates, and constrain identity
+  resolution. They are hypotheses to verify and never become claims, provenance,
+  confidence, or final facts without retrieved evidence. Current-employer and
+  government-office headers carry a stronger current-role hypothesis; alumni and
+  former-employer headers remain useful identity/history clues without being assumed
+  current. When the seed supplies an identity anchor, same-name sources that do not
+  connect to it remain provisional. An explicit contradiction also remains provisional
+  so reliable current evidence can correct a stale or inaccurate seed; it
+  becomes field-eligible only through the bounded identity-corroboration rules.
+- Source-list metadata such as `LIST_NAME`, `source_list`, `source_dataset`,
+  `dataset_name`, `cohort`, and `source_cohort` stays passive. It is preserved exactly
+  on every derived output row, including separate education records, but never enters
+  queries, prompts, identity scoring, evidence selection, provenance, or confidence.
 - Organisation and title stay paired. Freshness bands and a compact public-office
   taxonomy prioritize current primary, executive, academic, and government roles over
   stale employment, board/advisory work, parties, countries, and official buildings.
+  An explicitly current undated role retains a full currentness signal. A strong
+  unpaired current role can trigger one bounded official institution search before
+  unresolved important fields receive one Wikipedia completion query within the
+  existing search budget.
 - Field-level supporting URLs, claim IDs, conflicts, confidence, and review reasons.
   Distinct supported education credentials produce separate records while shared
   identity and current-employment decisions repeat safely.
@@ -60,16 +77,22 @@ remain separate retry/research failures with their specific error codes.
   exporting `Bachelor's Degree`, `Master's Degree`, `Doctoral Degree`, `Medical Degree`,
   `Law Degree`, `Diploma`, `Postgraduate Diploma`, or `Postgraduate Degree`. Subjects
   explicitly encoded in degree titles are split into the existing Subject field.
-  Vague qualifications, certifications, honorary awards, ongoing study, postdoctoral
-  work, and training stay in the evidence ledger without becoming earned-degree rows.
+  Credentials split only with positive evidence such as different degree levels,
+  qualification labels, dates, or materially distinct institutions. Institution
+  location suffixes and alternate subject wording remain grouped when they do not
+  prove another qualification. University-only, subject-only, vague qualifications,
+  certifications, honorary awards, ongoing study, postdoctoral work, and training stay
+  in the evidence ledger without becoming earned-degree rows.
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
   coverage remains distinct from confidence. The default field-review threshold is
   50%. Selected values below the separate 10% floor become null while their evidence,
   alternatives, provenance, and reason codes remain available. Record review is
   reserved for serious identity, relationship, grouping, contradiction, or
   representative-source issues. See [scoring rules](docs/confidence.md).
-- Wikipedia remains eligible as deterministic `encyclopedia` evidence at authority
-  `0.60`, below first-party, government, employer, university, and publication sources.
+- Wikipedia is an explicit missing-field fallback when bounded first-party discovery
+  remains incomplete. It stays deterministic `encyclopedia` evidence at authority
+  `0.60`, below first-party, government, employer, university, and publication sources,
+  so stronger official evidence wins conflicts.
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
 - Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. The
@@ -119,9 +142,10 @@ installation. It does not make paid provider calls or prove Chromium can launch.
 Verify the existing Cloudflare Worker's upstream URL/redirect protections and
 Chromium sandbox support on the target runtime.
 
-The accuracy and recovery changes use existing profile/source JSON and configuration;
-they add no Alembic migration or export column. Keep the normal `alembic upgrade head`
-pre-deploy step and redeploy the web and worker from the same revision.
+The accuracy and reconciliation changes use existing profile/source JSON and
+configuration; they add no Alembic migration or export column. Keep the normal
+`alembic upgrade head` pre-deploy step and redeploy the web and worker from the same
+revision.
 
 ## Configuration
 
@@ -219,10 +243,17 @@ available at `/docs`; health and readiness are public.
 | POST | `/process` | Preserved static URL-to-Markdown interface |
 
 Batch uploads are seed data and may use headers such as `alumni_full_name`,
-`memberName`, `company`, `government_office`, `role`, `country_of_origin`, or
-`university_name`. The importer infers one mapping per file and passes recognized
-context into the normal research seed. Unknown columns remain in the preserved input
-row but do not influence research. Equally strong name candidates return an explicit
+`memberName`, `company`, `current_employer`, `alumni_organisation`, `former_employer`,
+`government_office`, `role`, `country_of_origin`, or `university_name`. The importer
+infers one mapping per file and passes recognized person context into the normal
+research seed; no context field is required. Context improves discovery and namesake
+resolution but remains unverified input until public evidence corroborates it. Newer,
+stronger current evidence can therefore correct and replace a seeded
+affiliation as the selected current organisation. The seed is retained only as an
+identity/history clue unless retrieved evidence independently supports it. Passive
+source-list metadata and unknown columns remain in the preserved input row and do not
+influence research. Two otherwise identical people in different source lists remain
+separate input rows and results. Equally strong name candidates return an explicit
 ambiguity error; a missing-name error lists the observed headers. The optional legacy
 `name_column` form field remains available as an explicit override.
 
