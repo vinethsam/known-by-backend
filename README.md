@@ -46,7 +46,8 @@ remain separate retry/research failures with their specific error codes.
   deduplication, bounded static-to-browser recovery, and within-job content caching.
 - Seven output field decisions: the validated input name plus six evidence-derived
   fields for current organisation, current job title, university, degree, subject,
-  and a representative profile link. The input name is immutable in output, carries
+  and a representative profile link. The input name keeps its identity with display
+  casing normalized for output, carries
   deterministic 100% input certainty, and is excluded from research confidence and
   coverage; web identity assessment remains separate.
 - Spreadsheet organisation, title, country/location, university, subject, year, and
@@ -83,6 +84,11 @@ remain separate retry/research failures with their specific error codes.
   prove another qualification. University-only, subject-only, vague qualifications,
   certifications, honorary awards, ongoing study, postdoctoral work, and training stay
   in the evidence ledger without becoming earned-degree rows.
+- Small exact-phrase mappings render familiar Spanish, French, and Portuguese titles,
+  subjects, and institutional terms in English. Display casing preserves recognized
+  acronyms, name particles, and internal capitals. Unknown proper names retain their
+  grounded wording; raw input, claims, quotations, and source titles stay unchanged.
+  These transformations add no model calls.
 - Deterministic field/profile confidence, alternatives, conflicts, and review reasons;
   coverage remains distinct from confidence. The default field-review threshold is
   50%. Selected values below the separate 10% floor become null while their evidence,
@@ -99,6 +105,11 @@ remain separate retry/research failures with their specific error codes.
   default export stays compact; an additive [field-provenance mode](docs/exports.md)
   includes the supporting URLs for every selected field. XLSX marks only populated
   fields below the configured review threshold, and their confidence cells, in pale yellow.
+- Human-readable CSV/XLSX filenames use the first nonempty source-list value and the
+  job start time in UTC, such as `Forbes-2000_2026-09-29_0241.xlsx`; repeated exports
+  retain that filename. A shared internal [results library](docs/library.md) retains
+  completed exports only after an explicit save. All authorized team members can list,
+  download, and delete saved files; job cleanup does not delete them.
 
 Trial runs use the production pipeline and settings. No dataset or sample-source
 allowlist restricts discovery. Automated tests replace external calls with fixtures.
@@ -113,6 +124,7 @@ allowlist restricts discovery. Automated tests replace external calls with fixtu
 | `app/research/concurrency.py`, `extraction.py`, `telemetry.py` | Bounded I/O, ordered extraction, and person performance logs |
 | `app/retrieval/`, `app/processing/` | Safe acquisition, Markdown, and bounded chunks |
 | `app/db/`, `alembic/` | Persistence, job leases, cache, and migrations |
+| `app/library.py`, `app/db/library.py` | Shared file contracts and replaceable artifact storage |
 | `app/export/`, `app/worker.py` | Batch input/output and background execution |
 | `app/input_validation.py` | Shared text bounds and Unicode/control validation |
 | `tests/` | Offline tests and optional PostgreSQL integration checks |
@@ -142,10 +154,10 @@ installation. It does not make paid provider calls or prove Chromium can launch.
 Verify the existing Cloudflare Worker's upstream URL/redirect protections and
 Chromium sandbox support on the target runtime.
 
-The accuracy and reconciliation changes use existing profile/source JSON and
-configuration; they add no Alembic migration or export column. Keep the normal
-`alembic upgrade head` pre-deploy step and redeploy the web and worker from the same
-revision.
+The shared library adds migration `202609290001` for retained CSV/XLSX bytes and
+minimal file metadata. Run `alembic upgrade head` in the web pre-deploy step and
+redeploy web and worker from the same revision. Existing research tables and export
+columns are unchanged. Back up saved files with the PostgreSQL database.
 
 ## Configuration
 
@@ -164,6 +176,8 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
   `PERSON_TIMEOUT_SECONDS`, `WORKER_MAX_ATTEMPTS`.
 - **Concurrency:** `MAX_CONCURRENT_PEOPLE`, `MAX_CONCURRENT_FETCHES`,
   `PER_DOMAIN_CONCURRENCY`, `MAX_CONCURRENT_EXTRACTIONS` (default `2` per worker).
+- **Shared library:** `LIBRARY_MAX_FILE_BYTES` (10 MB), `LIBRARY_MAX_TOTAL_BYTES`
+  (250 MB), and `LIBRARY_MAX_FILES` (500); byte limits use decimal bytes.
 - **Selection and review policy:** `SCORING__SELECTION_THRESHOLD` (default `10`) omits
   extremely weak selected values; `SCORING__REVIEW_THRESHOLD` (default `50`) keeps
   questionable populated values visible and reviewable.
@@ -177,9 +191,10 @@ positive configured values are forwarded.
 Worker crash recovery is separately attempt-limited. Use plain model IDs and ensure
 OpenRouter workspace settings permit Exa without forced legacy web plugins.
 
-LinkedIn and LinkedIn-owned redirect/content hosts are excluded before source
-validation and again at the network boundary. They never enter automated static or
-browser retrieval, extraction, or evidence records. The separately deployed static
+LinkedIn and ordinary social-media hosts are excluded through the central source
+policy before candidate admission and at retrieval and evidence boundaries. This
+includes LinkedIn redirect/content hosts, Facebook, Instagram, X/Twitter, TikTok,
+Threads, and Snapchat; Wikipedia remains permitted. The separately deployed static
 Worker must enforce the same deny policy before each redirect hop.
 
 Provider, transport, retrieval, and structured-response failures that leave zero
@@ -228,8 +243,10 @@ and every returned claim still passes deterministic grounding checks.
 
 ## API
 
-Send the configured bearer token on research and `/process` requests. API schemas are
-available at `/docs`; health and readiness are public.
+Send the configured bearer token on research, library, and `/process` requests. The
+library requires `API_ACCESS_TOKEN` even in development and is unavailable without it.
+The existing single-token access model gives authorized team members the same library
+permissions. API schemas are available at `/docs`; health and readiness are public.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -240,6 +257,10 @@ available at `/docs`; health and readiness are public.
 | GET | `/v1/jobs/{job_id}/results` | Profiles, evidence, and original rows |
 | POST | `/v1/jobs/{job_id}/cancel` | Cancel outstanding work |
 | GET | `/v1/jobs/{job_id}/export` | Export using `format=csv|xlsx`; add `provenance=field` for field source URLs |
+| POST | `/v1/jobs/{job_id}/library` | Explicitly save a completed export; body `{"format":"xlsx","provenance":"none"}` |
+| GET | `/v1/library/files` | List saved file metadata; bounded `limit` and `offset` |
+| GET | `/v1/library/files/{file_id}` | Download retained CSV/XLSX bytes |
+| DELETE | `/v1/library/files/{file_id}` | Delete a saved file and release its quota |
 | POST | `/process` | Preserved static URL-to-Markdown interface |
 
 Batch uploads are seed data and may use headers such as `alumni_full_name`,

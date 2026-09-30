@@ -18,8 +18,15 @@ deterministic evidence-strength heuristics, not calibrated probabilities.
 | Structured professional directory | 0.65 |
 | Encyclopedia/Wikipedia | 0.60 |
 | Aggregator | 0.45 |
-| Social/user-generated | 0.35 |
+| Social/user-generated | Ineligible (legacy weight 0.35 retained for schema compatibility) |
 | Unknown | 0.25 |
+
+LinkedIn and ordinary social-media sources are excluded by the central source policy,
+regardless of their claimed authority. A blocked requested, final, or canonical URL,
+or a `social` source classification, prevents the source from contributing claims,
+corroboration, conflicts, confidence, representative links, or exported provenance.
+The stored social weight remains only for compatibility; it does not make social
+sources eligible. Wikipedia remains permitted.
 
 Authority and identity remain separate. An authoritative page about another person
 is rejected. Government classification is country-neutral and includes official
@@ -42,10 +49,24 @@ conflict to stronger current official evidence.
 ## Identity
 
 The validated seed name is input identity, not an enriched web field. Reconciliation
-copies that exact name into every output record with deterministic confidence **100**,
-no selected web claim or source provenance, and no name-field review. Web evidence
+copies that name with conservative display casing into every output record with
+deterministic confidence **100**, no selected web claim or source provenance, and no
+name-field review. Web evidence
 cannot blank, expand, or replace it. This number expresses input certainty only; web
 identity matching and ambiguity remain separate internal decisions.
+
+Obvious uppercase/lowercase/sentence-case presentation is normalized without changing
+the raw seed, original input cells, or source quotations. Names preserve recognized
+particles, apostrophes, hyphens, internal capitals and Roman numerals. Known acronyms
+remain intact. Cosmetic casing does not change evidence confidence.
+
+Small exact-phrase dictionaries map common Spanish, French and Portuguese government,
+executive and academic titles, subjects and generic institutional terms to English.
+Examples include `presidente` to `President`, `premier ministre` to `Prime Minister`,
+and `directeur général` to `Director General`. Degree terminology uses the controlled
+English taxonomy. Unknown proper institutional names keep grounded source wording;
+the backend does not invent translations. Raw claims, evidence, URLs and provenance
+titles are never translated. These transformations require no provider call.
 
 All other seed context is an unverified hypothesis. It can narrow the first query,
 increase the rank of matching candidates, reject unrelated namesakes, and guide bounded
@@ -118,7 +139,7 @@ call is added. No translation API is used.
 Field quality is relationship-aware:
 
 - a web name variant is assessed internally against the seed while the output name
-  remains unchanged;
+  keeps the seed identity with normalized display casing;
 - a job title without an organisation in its source-local employment group is
   penalized and reviewed;
 - sentence-like biographical prose and unusually long title fragments receive a
@@ -284,9 +305,10 @@ grounding, pairing, source-authority, and conflict rules.
 ## Representative profile link
 
 The representative link is derived after the other six fields for each record. For
-every source, reconciliation counts distinct selected fields that source supports.
-If a directory-or-better source contributed, aggregator, social and unknown sources
-are excluded from winning. Remaining candidates are ordered by:
+every eligible source, reconciliation counts distinct selected fields that source
+supports. Social and other source-policy exclusions cannot win or provide a fallback.
+If a directory-or-better source contributed, aggregator and unknown sources are
+excluded from winning. Remaining candidates are ordered by:
 
 1. selected-field contribution count;
 2. authority;

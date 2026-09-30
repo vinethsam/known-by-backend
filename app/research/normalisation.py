@@ -82,7 +82,74 @@ class NormalisationResult:
     subject: str | None = None
 
 
-_LOWERCASE_WORDS = {"a", "an", "and", "at", "by", "for", "in", "of", "on", "the", "to"}
+_LOWERCASE_WORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "by",
+    "for",
+    "in",
+    "of",
+    "on",
+    "the",
+    "to",
+    "da",
+    "das",
+    "de",
+    "del",
+    "des",
+    "do",
+    "dos",
+    "du",
+    "e",
+    "et",
+    "la",
+    "las",
+    "le",
+    "los",
+    "y",
+}
+_NAME_PARTICLES = {
+    "da",
+    "de",
+    "del",
+    "della",
+    "der",
+    "di",
+    "do",
+    "dos",
+    "du",
+    "la",
+    "le",
+    "van",
+    "von",
+    "den",
+    "ten",
+    "ter",
+}
+_ROMAN_NUMERALS = {
+    "i",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+    "xi",
+    "xii",
+    "xiii",
+    "xiv",
+    "xv",
+    "xvi",
+    "xvii",
+    "xviii",
+    "xix",
+    "xx",
+}
 _ACRONYMS = {
     "ai": "AI",
     "ba": "BA",
@@ -93,18 +160,117 @@ _ACRONYMS = {
     "ceo": "CEO",
     "cfo": "CFO",
     "cio": "CIO",
+    "coo": "COO",
     "cto": "CTO",
     "hr": "HR",
+    "ibm": "IBM",
+    "imf": "IMF",
     "it": "IT",
+    "jd": "JD",
+    "llb": "LLB",
+    "llc": "LLC",
     "ma": "MA",
     "mba": "MBA",
+    "mbbs": "MBBS",
+    "md": "MD",
     "meng": "MEng",
     "mpa": "MPA",
     "mph": "MPH",
     "msc": "MSc",
+    "mit": "MIT",
+    "nato": "NATO",
+    "nasa": "NASA",
+    "ngo": "NGO",
+    "ongc": "ONGC",
     "phd": "PhD",
+    "plc": "PLC",
     "pmp": "PMP",
+    "r&d": "R&D",
     "stem": "STEM",
+    "svp": "SVP",
+    "un": "UN",
+    "unesco": "UNESCO",
+    "usa": "USA",
+    "uk": "UK",
+    "vp": "VP",
+}
+
+# Exact phrases only: translating fragments in an unfamiliar proper name or a
+# longer role description could invent an affiliation or change its meaning.
+_TITLE_EQUIVALENTS = {
+    # Spanish / French / Portuguese government titles.
+    "presidente": "President",
+    "president": "President",
+    "presidente de la republica": "President",
+    "president de la republique": "President",
+    "presidente da republica": "President",
+    "primer ministro": "Prime Minister",
+    "primera ministra": "Prime Minister",
+    "premier ministre": "Prime Minister",
+    "premiere ministre": "Prime Minister",
+    "primeiro ministro": "Prime Minister",
+    "primeira ministra": "Prime Minister",
+    "presidente del gobierno": "Prime Minister",
+    "ministro": "Minister",
+    "ministra": "Minister",
+    "ministre": "Minister",
+    "gobernador": "Governor",
+    "gouverneur": "Governor",
+    "governador": "Governor",
+    # Executive / institutional titles; do not infer that Director General is CEO.
+    "director general": "Director General",
+    "directora general": "Director General",
+    "directeur general": "Director General",
+    "directrice generale": "Director General",
+    "diretor geral": "Director General",
+    "diretora geral": "Director General",
+    "director ejecutivo": "Executive Director",
+    "directeur executif": "Executive Director",
+    "diretor executivo": "Executive Director",
+    "secretario general": "Secretary General",
+    "secretaire general": "Secretary General",
+    "secretario geral": "Secretary General",
+    "profesor universitario": "University Professor",
+    "professeur des universites": "University Professor",
+    "professor universitario": "University Professor",
+}
+_SUBJECT_EQUIVALENTS = {
+    "computer sciences": "Computer Science",
+    "economics science": "Economics",
+    "ciencias de la computacion": "Computer Science",
+    "informatique": "Computer Science",
+    "ciencia da computacao": "Computer Science",
+    "ciencias politicas": "Political Science",
+    "science politique": "Political Science",
+    "sciences politiques": "Political Science",
+    "ciencia politica": "Political Science",
+    "derecho": "Law",
+    "droit": "Law",
+    "direito": "Law",
+    "medicina": "Medicine",
+    "medecine": "Medicine",
+    "matematicas": "Mathematics",
+    "mathematiques": "Mathematics",
+    "matematica": "Mathematics",
+    "economia": "Economics",
+    "economie": "Economics",
+    "ingenieria": "Engineering",
+    "ingenierie": "Engineering",
+    "engenharia": "Engineering",
+    "administracion publica": "Public Administration",
+    "administration publique": "Public Administration",
+    "administracao publica": "Public Administration",
+}
+_INSTITUTION_EQUIVALENTS = {
+    "naciones unidas": "United Nations",
+    "nations unies": "United Nations",
+    "nacoes unidas": "United Nations",
+    "ministerio de finanzas": "Ministry of Finance",
+    "ministere des finances": "Ministry of Finance",
+    "ministerio das financas": "Ministry of Finance",
+    "ministerio de educacion": "Ministry of Education",
+    "ministere de l education": "Ministry of Education",
+    "ministerio da educacao": "Ministry of Education",
 }
 
 
@@ -128,37 +294,112 @@ def _clean_display(value: str) -> str:
     return " ".join(value.split()).strip(" ,")
 
 
-def _title_case_token(token: str, *, first: bool) -> str:
+def _title_case_word(word: str, *, is_name: bool) -> str:
+    key = word.casefold()
+    acronym_key = key.replace(".", "")
+    if not is_name and acronym_key in _ACRONYMS:
+        return _ACRONYMS[acronym_key]
+    if is_name and re.fullmatch(r"(?:[^\W\d_]\.)+[^\W\d_]?", word):
+        return word.upper()
+    if key in _ROMAN_NUMERALS:
+        return word.upper()
+    # Preserve deliberate internal capitals such as McDonald, eBay, iPhone and
+    # OpenAI, while repairing ordinary sentence case one word at a time.
+    if any(character.isupper() for character in word[1:]) and any(character.islower() for character in word):
+        return word
+    if is_name and key.startswith("mc") and len(word) > 2:
+        return "Mc" + word[2:3].upper() + word[3:].lower()
+    if is_name and key == "macdonald":
+        return "MacDonald"
+    return word[:1].upper() + word[1:].lower()
+
+
+def _title_case_token(
+    token: str,
+    *,
+    first: bool,
+    last: bool,
+    is_name: bool,
+    mixed_case: bool,
+    preserve_institution_acronyms: bool,
+) -> str:
     prefix = token[: len(token) - len(token.lstrip("([{\"'"))]
     suffix = token[len(token.rstrip(")]},.;:\"'")) :]
     core = token[len(prefix) : len(token) - len(suffix) if suffix else None]
     key = comparison_key(core)
     if not core:
         return token
-    if key in _LOWERCASE_WORDS:
-        styled = core[:1].upper() + core[1:].lower() if first else core.casefold()
-    elif key in _ACRONYMS:
-        styled = _ACRONYMS[key]
-    elif core.isupper() and len(core) <= 5:
+    lowercase_words = _NAME_PARTICLES if is_name else _LOWERCASE_WORDS
+    if not is_name and last and len(core) == 1 and core.isupper():
         styled = core
+    elif (
+        preserve_institution_acronyms
+        and mixed_case
+        and core.isupper()
+        and core.isalpha()
+        and 2 <= len(core) <= 5
+        and key not in lowercase_words
+    ):
+        # A clean institutional name can contain an acronym absent from the
+        # curated map (EBRD Foundation). Do not guess its expansion or casing.
+        styled = core
+    elif (
+        not is_name
+        and mixed_case
+        and key in _NAME_PARTICLES | {"las", "los"}
+        and core[:1].isupper()
+        and not core.isupper()
+    ):
+        styled = core
+    elif key in lowercase_words:
+        styled = core.casefold() if is_name or not first else core[:1].upper() + core[1:].lower()
     else:
-        styled = core[:1].upper() + core[1:].lower()
+        pieces = re.split(r"([-‐‑'’])", core)
+        styled = "".join(
+            piece.lower()
+            if index > 0 and pieces[index - 1] in {"'", "’"} and piece.casefold() == "s"
+            else _title_case_word(piece, is_name=is_name)
+            for index, piece in enumerate(pieces)
+        )
     return prefix + styled + suffix
 
 
-def _conservative_title_case(value: str) -> str:
-    letters = "".join(char for char in value if char.isalpha())
-    if not letters or (not letters.islower() and not letters.isupper()):
+def _conservative_title_case(
+    value: str, *, is_name: bool = False, preserve_institution_acronyms: bool = False
+) -> str:
+    words = value.split()
+    letters = "".join(character for character in value if character.isalpha())
+    mixed_case = not letters.isupper() and not letters.islower()
+    return " ".join(
+        _title_case_token(
+            token,
+            first=index == 0,
+            last=index == len(words) - 1,
+            is_name=is_name,
+            mixed_case=mixed_case,
+            preserve_institution_acronyms=preserve_institution_acronyms,
+        )
+        for index, token in enumerate(words)
+    )
+
+
+def _english_display(field: ProfileField, value: str) -> str:
+    if field == ProfileField.job_title:
+        mappings = _TITLE_EQUIVALENTS
+    elif field == ProfileField.subject:
+        mappings = _SUBJECT_EQUIVALENTS
+    elif field in {ProfileField.organisation, ProfileField.university_name}:
+        mappings = _INSTITUTION_EQUIVALENTS
+    else:
         return value
-    if letters.isupper() and " " not in value and comparison_key(value) not in _ACRONYMS:
-        return value
-    return " ".join(_title_case_token(token, first=index == 0) for index, token in enumerate(value.split()))
+    return mappings.get(_accentless_key(value), value)
 
 
 _DOCTORAL_PATTERNS = (
     r"\bph\s*d\b",
     r"\bd\s*phil\b",
     r"\bdoctor(?:ate|al degree| of philosophy|ado)\b",
+    r"\b(?:doctorat|doutorado|doutoramento)\b",
     r"\bpromoviert(?:e|er|en|es)?\b",
 )
 _MEDICAL_PATTERNS = (
@@ -195,6 +436,7 @@ _MASTERS_PATTERNS = (
     r"\bm\s*a\b",
     r"\bmaster(?: s| degree| 2| of\b|s\b|\b)",
     r"\bmaestria\b",
+    r"\b(?:maitrise|mestrado)\b",
     r"\blaurea magistrale\b",
 )
 _BACHELORS_PATTERNS = (
@@ -209,6 +451,7 @@ _BACHELORS_PATTERNS = (
     r"\bbachelor(?: s| degree| of\b|s\b|\b)",
     r"\bundergraduate degree\b",
     r"\blicence\b",
+    r"\blicenciatura\b",
     r"\blaurea\b",
 )
 _GENERIC_DEGREE_VALUES = {"degree", "college degree", "university degree", "diplome", "diplomee"}
@@ -402,7 +645,11 @@ def normalise_degree_candidates(value: str) -> list[NormalisationResult]:
         ]
     if levels:
         multilingual = bool(
-            re.search(r"\b(maestria|licence|laurea|diplomee?|promoviert(?:e|er|en|es)?)\b", key)
+            re.search(
+                r"\b(maestria|maitrise|mestrado|licence|licenciatura|laurea|doctorat|doutorado|"
+                r"doutoramento|diplomee?|promoviert(?:e|er|en|es)?)\b",
+                key,
+            )
         )
         return [
             NormalisationResult(
@@ -444,8 +691,7 @@ def normalise_value(field: ProfileField, value: str) -> NormalisationResult:
     if field == ProfileField.degree_type:
         return normalise_degree_candidates(display)[0]
     if field == ProfileField.subject:
-        aliases = {"computer sciences": "computer science", "economics science": "economics"}
-        return NormalisationResult(aliases.get(key, key), 1)
+        return NormalisationResult(comparison_key(_english_display(field, display)), 1)
     if field in {ProfileField.organisation, ProfileField.university_name}:
         key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc)$", "", key)
     if field == ProfileField.full_name:
@@ -458,13 +704,23 @@ def normalise_value(field: ProfileField, value: str) -> NormalisationResult:
 
 
 def normalise_display(field: ProfileField, value: str) -> str:
+    if field == ProfileField.profile_link:
+        return value
     display = _clean_display(value)
     if field == ProfileField.degree_type:
         return normalise_value(field, display).value
-    if field in {ProfileField.subject, ProfileField.job_title, ProfileField.university_name}:
-        return _conservative_title_case(display)
-    if field == ProfileField.organisation:
-        return _conservative_title_case(display)
+    if field == ProfileField.full_name:
+        return _conservative_title_case(display, is_name=True)
+    if field in {
+        ProfileField.subject,
+        ProfileField.job_title,
+        ProfileField.university_name,
+        ProfileField.organisation,
+    }:
+        return _conservative_title_case(
+            _english_display(field, display),
+            preserve_institution_acronyms=field in {ProfileField.organisation, ProfileField.university_name},
+        )
     return display
 
 

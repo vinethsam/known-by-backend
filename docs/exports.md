@@ -22,10 +22,11 @@ record are not included. The existing person-wide `source_urls` column remains
 available in both modes for compatibility and research diagnostics.
 
 A result with several education records produces one export row per record.
-Original input columns, the exact seed name, and shared employment values repeat on
+Original input columns, the display-normalized seed name, and shared employment values repeat on
 those rows, while education fields, confidence, coverage, review state, profile link,
 and field provenance remain record-specific. The enriched `full_name` value always
-uses the validated seed name with deterministic confidence `100`. It has no selected
+uses the validated seed name with conservative display casing and deterministic
+confidence `100`. The original input cell stays unchanged. It has no selected
 web claim, field-level review, or supporting source URL; web identity remains internal
 and the optional `full_name_source_urls` cell is therefore blank. Existing
 single-record results and historical flat profiles still produce one row. Failed tasks
@@ -54,3 +55,19 @@ The accuracy/reconciliation pass adds no export columns. Enriched values below
 decision is null; their raw claims, alternative IDs, provenance, confidence, and reason
 codes remain available in the JSON result/evidence ledger. Seed metadata and original
 input columns remain unchanged.
+
+## Download filenames and retained files
+
+CSV and XLSX downloads use `<List-Name>_<YYYY-MM-DD>_<HHmm>.<extension>`, with the
+research/job start in UTC. Repeated downloads use the same timestamp; an unstarted job
+uses its creation time. The first nonempty list value in original row order supplies
+the filename only. With no list metadata the prefix is `KnownBy`. The list prefix is
+sanitized to safe readable Unicode and hyphens, bounded to 100 characters and 180 UTF-8
+bytes; job IDs are absent. `Content-Disposition` includes an ASCII fallback and an
+encoded Unicode filename when needed.
+
+An explicit save to the [shared results library](library.md) uses this identical
+export renderer, filename, provenance mode, and highlighting threshold. Saving does
+not alter research or call providers. The saved bytes remain downloadable after job
+cleanup. XLSX archive packaging timestamps may differ between separate renderings;
+the cells, columns, evidence, formulas protections, and styles are the same.

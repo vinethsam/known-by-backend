@@ -38,7 +38,7 @@ from app.research.identity import (
 from app.research.reconciliation import reconcile
 from app.research.telemetry import count, person_performance, stage
 from app.retrieval.service import FetchError, RetrievedPage
-from app.retrieval.urls import canonicalise_url, domain_key
+from app.retrieval.urls import canonicalise_url, domain_key, source_policy_allows, source_record_allowed
 from app.schemas import (
     PersonSeed,
     ProfileField,
@@ -143,7 +143,14 @@ class ResearchOrchestrator:
                 profile.research_status = "needs_review"
             else:
                 profile.research_status = "clean"
-            return ResearchResult(profile=profile, sources=sources, claims=claims, usage=usage)
+            allowed_sources = [source for source in sources if source_record_allowed(source)]
+            allowed_ids = {source.source_id for source in allowed_sources}
+            return ResearchResult(
+                profile=profile,
+                sources=allowed_sources,
+                claims=[claim for claim in claims if claim.source_id in allowed_ids],
+                usage=usage,
+            )
 
         async def save():
             if checkpoint is not None:
@@ -181,6 +188,8 @@ class ResearchOrchestrator:
 
         async def process_candidate(candidate, page=None):
             nonlocal claims, no_new_claims, evidence_changed
+            if not source_policy_allows(candidate.url, source_type=candidate.source_type):
+                return
             canonical = canonicalise_url(candidate.url)
             if canonical in seen_urls:
                 return
@@ -208,6 +217,8 @@ class ResearchOrchestrator:
                     with stage("retrieval_ms"):
                         page = await self.retrieval.retrieve(candidate.url, job_id=job_id)
                 source.final_url = page.final_url
+                if not source_policy_allows(candidate.url, page.final_url, source_type=candidate.source_type):
+                    raise FetchError("SOURCE_POLICY_BLOCKED")
                 source.canonical_url = canonicalise_url(page.final_url)
                 seen_urls.add(source.canonical_url)
                 source.domain = domain_key(page.final_url)
@@ -376,6 +387,9 @@ class ResearchOrchestrator:
                     candidate.source_type = decision.source_type
                     candidate.relevance = decision.relevance
                     validated_candidates[candidate.url] = candidate
+                if not source_policy_allows(candidate.url, source_type=candidate.source_type):
+                    rejected_urls.add(candidate.url)
+                    continue
                 eligible.append(candidate)
                 if limit is not None:
                     pending_candidates[candidate.url] = candidate

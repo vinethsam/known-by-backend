@@ -13,6 +13,7 @@ from app.research.normalisation import (
     normalise_degree_candidates,
     normalise_value,
 )
+from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import EvidenceClaim, ExtractionResponse, PersonSeed, ProfileField, SourceRecord, utcnow
 
 
@@ -32,6 +33,8 @@ def date_is_grounded(value: date, evidence: str) -> bool:
 def validate_claims(
     response: ExtractionResponse, seed: PersonSeed, source: SourceRecord, chunk: str, model: str
 ) -> tuple[list[EvidenceClaim], list[str]]:
+    if not source_record_allowed(source):
+        return [], ["SOURCE_POLICY_BLOCKED"]
     claims, reasons = [], []
     content = literal_key(chunk)
     for claim in response.claims:
@@ -47,6 +50,9 @@ def validate_claims(
             reasons.append("UNGROUNDED_VALUE")
             continue
         if claim.field == ProfileField.profile_link:
+            if not source_policy_allows(claim.value):
+                reasons.append("SOURCE_POLICY_BLOCKED")
+                continue
             from app.retrieval.urls import canonicalise_url
 
             try:

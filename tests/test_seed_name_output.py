@@ -68,10 +68,10 @@ def _claim(
     )
 
 
-def test_seed_name_is_immutable_without_web_evidence():
+def test_seed_name_identity_is_immutable_and_display_is_normalized_without_web_evidence():
     profile = reconcile(
         PERSON_ID,
-        PersonSeed(full_name="Donald Trump"),
+        PersonSeed(full_name="DONALD TRUMP"),
         [],
         [],
         ScoringPolicy(),
@@ -79,6 +79,7 @@ def test_seed_name_is_immutable_without_web_evidence():
 
     name = profile.fields[ProfileField.full_name]
     assert name.value == "Donald Trump"
+    assert profile.input_name == "DONALD TRUMP"
     assert name.confidence == 100
     assert not name.review_required
     assert name.review_reason_codes == []
@@ -193,7 +194,7 @@ def test_every_education_record_repeats_seed_name_and_exports_input_certainty():
     ]
     profile = reconcile(
         PERSON_ID,
-        PersonSeed(full_name="Donald Trump"),
+        PersonSeed(full_name="DONALD TRUMP"),
         claims,
         sources,
         ScoringPolicy(),
@@ -218,7 +219,7 @@ def test_every_education_record_repeats_seed_name_and_exports_input_certainty():
             PersonResultView(
                 person_id=PERSON_ID,
                 row_index=2,
-                original_row={"ALUMNI_FULL_NAME": "Donald Trump"},
+                original_row={"ALUMNI_FULL_NAME": "DONALD TRUMP"},
                 status=PersonStatus.review_required,
                 result=ResearchResult(profile=profile, sources=sources, claims=claims),
             )
@@ -229,4 +230,5 @@ def test_every_education_record_repeats_seed_name_and_exports_input_certainty():
 
     assert len(rows) == 3
     assert {row["full_name"] for row in rows} == {"Donald Trump"}
+    assert {row["ALUMNI_FULL_NAME"] for row in rows} == {"DONALD TRUMP"}
     assert {float(row["full_name_confidence"]) for row in rows} == {100.0}

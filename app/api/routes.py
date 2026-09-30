@@ -16,13 +16,16 @@ from fastapi.responses import JSONResponse, Response
 from app.api.limits import RequestSizeLimitMiddleware
 from app.config import Settings, get_settings
 from app.db import Store
+from app.db.library import DatabaseResultFileStorage
+from app.export.artifacts import build_export_artifact, export_media_type
 from app.export.batch import BatchParseError, parse_batch
-from app.export.formats import export_results
+from app.export.naming import content_disposition
+from app.library import LibraryLimitError, ResultFileStorage, SavedResultFile, SaveResultRequest
 from app.logging import configure_logging
 from app.processing import html_to_markdown
 from app.retrieval.service import FetchConfigurationError, FetchError, FetchTimeoutError, StaticFetcher
 from app.retrieval.urls import URLValidationError, validate_public_url
-from app.schemas import Contract, JobCreated, JobResults, JobView, PersonSeed
+from app.schemas import Contract, JobCreated, JobResults, JobStatus, JobView, PersonSeed
 from schemas import FetchRequest, ProcessedPage
 
 logger = logging.getLogger(__name__)
@@ -38,10 +41,16 @@ class ReadyResponse(Contract):
     missing_configuration: list[str]
 
 
-def create_app(settings: Settings | None = None, store: Store | None = None, fetcher=None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: Store | None = None,
+    fetcher=None,
+    library: ResultFileStorage | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
     store = store or Store(settings)
     fetcher = fetcher or StaticFetcher(settings)
+    library = library or DatabaseResultFileStorage(store.session_factory, settings)
 
     @asynccontextmanager
     async def lifespan(application):
@@ -63,6 +72,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None, fet
                 )
 
     secured = [Depends(authorize)]
+
+    async def authorize_library(authorization: str | None = Header(default=None)):
+        # Local deployments may omit auth for ordinary API debugging. Retained
+        # shared files must never become public even in that configuration.
+        if not settings.API_ACCESS_TOKEN or not settings.API_ACCESS_TOKEN.get_secret_value().strip():
+            raise HTTPException(503, "Shared library requires API_ACCESS_TOKEN")
+        await authorize(authorization)
+
+    library_secured = [Depends(authorize_library)]
 
     async def accept_jobs():
         if not await asyncio.to_thread(store.ready):
@@ -170,32 +188,86 @@ def create_app(settings: Settings | None = None, store: Store | None = None, fet
             raise HTTPException(409, "Job is already finished")
         return await get_job(job_id)
 
+    async def job_export(job_id, format, provenance, *, require_completed=False):
+        job = await get_job(job_id)
+        if require_completed and job.status != JobStatus.completed:
+            raise HTTPException(409, "Only completed research jobs can be saved to the library")
+        results = await get_results(job_id)
+        if require_completed and (
+            results.status != JobStatus.completed
+            or not results.people
+            or any(person.result is None for person in results.people)
+        ):
+            raise HTTPException(409, "Completed result is unavailable")
+        columns = await asyncio.to_thread(store.get_columns, str(job_id))
+        return await asyncio.to_thread(
+            build_export_artifact,
+            results,
+            columns,
+            job,
+            format,
+            provenance=provenance,
+            low_confidence_threshold=settings.SCORING.review_threshold,
+        )
+
     @application.get("/v1/jobs/{job_id}/export", dependencies=secured)
     async def export(
         job_id: UUID,
         format: Literal["csv", "xlsx"] = Query(default="csv"),
         provenance: Literal["none", "field"] = Query(default="none"),
     ):
-        results = await get_results(job_id)
-        columns = await asyncio.to_thread(store.get_columns, str(job_id))
-        data = await asyncio.to_thread(
-            export_results,
-            results,
-            columns,
-            format,
-            provenance=provenance,
-            low_confidence_threshold=settings.SCORING.review_threshold,
-        )
-        mime = (
-            "text/csv; charset=utf-8"
-            if format == "csv"
-            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        artifact = await job_export(job_id, format, provenance)
         return Response(
-            content=data,
-            media_type=mime,
-            headers={"Content-Disposition": f'attachment; filename="research-{job_id}.{format}"'},
+            content=artifact.content,
+            media_type=export_media_type(artifact.format),
+            headers={"Content-Disposition": content_disposition(artifact.filename)},
         )
+
+    @application.post(
+        "/v1/jobs/{job_id}/library",
+        response_model=SavedResultFile,
+        status_code=201,
+        dependencies=library_secured,
+    )
+    async def save_result(job_id: UUID, request: SaveResultRequest, response: Response):
+        artifact = await job_export(job_id, request.format, request.provenance, require_completed=True)
+        try:
+            saved = await asyncio.to_thread(library.save, artifact)
+        except LibraryLimitError as exc:
+            raise HTTPException(413, str(exc)) from None
+        response.headers["Location"] = f"/v1/library/files/{saved.file_id}"
+        response.headers["Cache-Control"] = "private, no-store"
+        return saved
+
+    @application.get("/v1/library/files", response_model=list[SavedResultFile], dependencies=library_secured)
+    async def list_saved_results(
+        response: Response,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
+        response.headers["Cache-Control"] = "private, no-store"
+        return await asyncio.to_thread(library.list_files, limit=limit, offset=offset)
+
+    @application.get("/v1/library/files/{file_id}", dependencies=library_secured)
+    async def download_saved_result(file_id: UUID):
+        saved = await asyncio.to_thread(library.get, str(file_id))
+        if saved is None:
+            raise HTTPException(404, "Saved result not found")
+        return Response(
+            content=saved.content,
+            media_type=export_media_type(saved.metadata.format),
+            headers={
+                "Content-Disposition": content_disposition(saved.metadata.filename),
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @application.delete("/v1/library/files/{file_id}", status_code=204, dependencies=library_secured)
+    async def delete_saved_result(file_id: UUID):
+        if not await asyncio.to_thread(library.delete, str(file_id)):
+            raise HTTPException(404, "Saved result not found")
+        return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
 
     @application.post("/process", response_model=ProcessedPage, dependencies=secured, tags=["legacy-debug"])
     async def process_page(request: FetchRequest):

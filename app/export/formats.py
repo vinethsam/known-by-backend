@@ -10,6 +10,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
+from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -69,6 +70,13 @@ def _flatten_results(
                 row = _base_row(person, original_columns, enrichment_map, status=record.status)
                 for field in ProfileField:
                     decision = record.fields.get(field)
+                    if (
+                        field == ProfileField.profile_link
+                        and decision
+                        and decision.value
+                        and not source_policy_allows(decision.value)
+                    ):
+                        decision = None
                     row[enrichment_map[field.value]] = (
                         decision.value if decision and decision.value is not None else ""
                     )
@@ -133,7 +141,11 @@ def _unique_column(name: str, existing: list[str]) -> str:
 
 def _compact_source_urls(result) -> str:
     return _compact_urls(
-        (source.canonical_url or source.final_url or source.requested_url for source in result.sources),
+        (
+            source.canonical_url or source.final_url or source.requested_url
+            for source in result.sources
+            if source_record_allowed(source)
+        ),
         limit=10,
     )
 
@@ -142,7 +154,7 @@ def _compact_urls(values, *, limit: int | None = None) -> str:
     urls: list[str] = []
     for value in values:
         url = str(value)
-        if url and url not in urls:
+        if url and url not in urls and source_policy_allows(url):
             urls.append(url)
     return "; ".join(urls if limit is None else urls[:limit])
 

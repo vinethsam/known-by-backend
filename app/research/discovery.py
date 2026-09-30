@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy, Settings, get_settings
 from app.research.identity import seed_known_attributes
-from app.retrieval.urls import canonicalise_url, domain_key, is_blocked_source_host
+from app.retrieval.urls import canonicalise_url, domain_key, is_blocked_source_host, source_policy_allows
 from app.schemas import PersonSeed, SourceCandidate, SourceType
 
 
@@ -67,6 +67,8 @@ def deduplicate_candidates(
 ) -> list[SourceCandidate]:
     by_canonical: dict[str, SourceCandidate] = {}
     for candidate in candidates:
+        if not source_policy_allows(candidate.url, source_type=candidate.source_type):
+            continue
         parts = _valid_url_parts(candidate.url)
         if parts is None:
             continue
@@ -88,6 +90,8 @@ def rank_candidates(
     settings = settings or get_settings()
     scored: list[SourceCandidate] = []
     for candidate in candidates:
+        if not source_policy_allows(candidate.url, source_type=candidate.source_type):
+            continue
         score = candidate.score
         if seed is not None:
             score = candidate_score(candidate, seed, settings)

@@ -62,7 +62,43 @@ _COMMON_TWO_PART_SUFFIXES = {
 }
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 _BLOCKED_SUFFIXES = (".localhost",)
-_BLOCKED_SOURCE_HOSTS = frozenset({"licdn.com", "linkedin.cn", "linkedin.com", "lnkd.in"})
+_BLOCKED_SOURCE_HOSTS = frozenset(
+    {
+        "licdn.com",
+        "linkedin.cn",
+        "linkedin.com",
+        "linkedin.com.cn",
+        "lnkd.in",
+        "facebook.com",
+        "fb.com",
+        "fb.me",
+        "fb.watch",
+        "fbcdn.net",
+        "instagram.com",
+        "cdninstagram.com",
+        "x.com",
+        "twitter.com",
+        "t.co",
+        "twimg.com",
+        "tiktok.com",
+        "tiktokcdn.com",
+        "tiktokv.com",
+        "threads.net",
+        "threads.com",
+        "snapchat.com",
+        "snap.com",
+        "pinterest.com",
+        "pin.it",
+        "tumblr.com",
+        "reddit.com",
+        "redd.it",
+        "bsky.app",
+        "bsky.social",
+        "mastodon.social",
+        "vk.com",
+        "weibo.com",
+    }
+)
 _BLOCKED_SOURCE_SUFFIXES = tuple(f".{host}" for host in sorted(_BLOCKED_SOURCE_HOSTS))
 _METADATA_IPS = {
     ipaddress.ip_address("169.254.169.254"),
@@ -158,6 +194,35 @@ def is_blocked_source_host(host: str) -> bool:
 
     normalized = _host_to_ascii(host)
     return normalized in _BLOCKED_SOURCE_HOSTS or normalized.endswith(_BLOCKED_SOURCE_SUFFIXES)
+
+
+def source_policy_allows(*urls: str, source_type: str | None = None) -> bool:
+    """Apply one source policy to candidates, redirects, evidence and provenance.
+
+    Every observed URL must be permitted, so a permitted redirect destination
+    cannot launder a forbidden source. A social classification also excludes
+    federated or less common platforms absent from the explicit domain list.
+    This check is deterministic and never performs DNS or network calls.
+    """
+    if source_type == "social":
+        return False
+    for url in urls:
+        if not url:
+            continue
+        try:
+            host = urlsplit(canonicalise_url(url)).hostname or ""
+        except ValueError:
+            return False
+        if is_blocked_source_host(host):
+            return False
+    return True
+
+
+def source_record_allowed(source) -> bool:
+    """Check all source URL identities, including the pre-redirect URL."""
+    return source_policy_allows(
+        source.requested_url, source.final_url, source.canonical_url, source_type=source.source_type
+    )
 
 
 def _reject_blocked_hostname(host: str) -> None:

@@ -1145,7 +1145,9 @@ def reconcile(
 ) -> PersonProfile:
     """Return a person profile whose legacy fields mirror its primary output record."""
 
-    sources = {source.source_id: source for source in source_records}
+    from app.retrieval.urls import source_record_allowed
+
+    sources = {source.source_id: source for source in source_records if source_record_allowed(source)}
     eligible_source_ids = eligible_identity_source_ids(seed, claims, sources, policy)
     accepted = [
         claim
@@ -1174,7 +1176,7 @@ def reconcile(
         quality_reasons,
     )
     full_name = FieldDecision(
-        value=seed.full_name,
+        value=normalise_display(ProfileField.full_name, seed.full_name),
         confidence=100,
         review_required=False,
         scoring_components={

@@ -9,6 +9,7 @@ from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_
 from app.research.concurrency import ordered_window
 from app.research.identity import research_seed_payload
 from app.research.telemetry import count, stage
+from app.retrieval.urls import source_policy_allows
 from app.schemas import ExtractionResponse, PersonSeed
 
 
@@ -21,6 +22,8 @@ async def extract_chunks(
     semaphore: asyncio.Semaphore,
     concurrency: int,
 ) -> AsyncIterator[tuple[str, ExtractionResponse]]:
+    if not source_policy_allows(source_url):
+        return
     payloads = [
         {
             "person": research_seed_payload(seed),

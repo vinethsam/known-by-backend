@@ -57,7 +57,9 @@ def _store(tmp_path, **overrides):
 def _result(person_id: str, status: PersonStatus = PersonStatus.completed) -> ResearchResult:
     fields = {
         field: FieldDecision(
-            value=f"{field.value} value",
+            value="https://example.com/profile"
+            if field == ProfileField.profile_link
+            else f"{field.value} value",
             confidence=90,
             review_required=False,
             sources=["https://example.com/profile"],
@@ -387,10 +389,13 @@ def test_alembic_upgrade_and_downgrade(tmp_path):
     with store.engine.connect() as conn:
         tables = conn.execute(text("select name from sqlite_master where type='table'")).scalars().all()
     assert "jobs" in tables
+    assert "saved_result_files" in tables
+    command.check(cfg)
     command.downgrade(cfg, "base")
     with store.engine.connect() as conn:
         tables = conn.execute(text("select name from sqlite_master where type='table'")).scalars().all()
     assert "jobs" not in tables
+    assert "saved_result_files" not in tables
 
 
 def test_postgresql_migration_and_skip_locked_sql_compile():
@@ -399,6 +404,8 @@ def test_postgresql_migration_and_skip_locked_sql_compile():
     cfg.set_main_option("sqlalchemy.url", "postgresql+psycopg://user:pass@example.invalid/db")
     command.upgrade(cfg, "head", sql=True)
     assert "CREATE TABLE jobs" in buffer.getvalue()
+    assert "CREATE TABLE saved_result_files" in buffer.getvalue()
+    assert "content BYTEA" in buffer.getvalue()
 
     sql = str(select(PersonTaskRow).with_for_update(skip_locked=True).compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE SKIP LOCKED" in sql

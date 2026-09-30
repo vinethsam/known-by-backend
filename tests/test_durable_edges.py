@@ -13,8 +13,11 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.config import Settings
+from app.db.library import DatabaseResultFileStorage
 from app.db.models import PersonTaskRow, RetrievalCacheRow
 from app.db.store import Store, normalize_database_url
+from app.export.artifacts import build_export_artifact
+from app.library import LibraryLimitError
 from app.schemas import (
     EvidenceClaim,
     FieldDecision,
@@ -206,3 +209,32 @@ def test_cancellation_and_completion_race_never_revives_cancelled_task(store):
         ("cancelled", "cancelled"),
     }
     assert not store.renew_lease(lease)
+
+
+def test_library_quota_is_atomic_across_independent_storage_instances(store):
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    lease = store.claim_task("worker")
+    assert store.finish_task(lease, result_for(lease))
+    artifact = build_export_artifact(
+        store.get_results(job.job_id), store.get_columns(job.job_id), store.get_job(job.job_id), "csv"
+    )
+    settings = store.settings.model_copy(update={"LIBRARY_MAX_FILES": 1})
+
+    def save():
+        adapter = DatabaseResultFileStorage(store.session_factory, settings)
+        try:
+            return adapter.save(artifact)
+        except LibraryLimitError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        attempts = [pool.submit(save) for _ in range(2)]
+        saved = [attempt.result() for attempt in attempts]
+
+    assert sum(item is not None for item in saved) == 1
+    adapter = DatabaseResultFileStorage(store.session_factory, settings)
+    rows = adapter.list_files()
+    assert len(rows) == 1
+    assert adapter.get(rows[0].file_id).content == artifact.content
+    assert adapter.delete(rows[0].file_id)
+    assert adapter.save(artifact).filename == artifact.filename

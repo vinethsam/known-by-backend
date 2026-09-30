@@ -16,8 +16,9 @@ Unknown or ambiguous optional columns are not guessed. Source-list fields such a
 `LIST_NAME`, `source_list`, `source_dataset`, `dataset_name`, `cohort`, and
 `source_cohort` are recognized as passive row metadata and are never converted into
 person clues. Original rows and row indexes remain the traceability mechanism. The
-validated person name is the immutable output identity: every output record repeats it
-with 100% input certainty and no web provenance or name-field review. Other spreadsheet
+validated person name is the immutable identity: every output record repeats it with
+conservative display casing, 100% input certainty and no web provenance or name-field
+review. Raw seed text and original input cells remain unchanged. Other spreadsheet
 person values are hypotheses only and never become web evidence, provenance, confidence,
 or final enriched facts by themselves.
 
@@ -33,8 +34,8 @@ deterministic, with evidence-derived coverage reported separately.
 
 Reconciliation is multi-source. A field decision can cite supporting claims and URLs
 from several independent sources. Distinct supported education credentials become
-separate `ProfileRecord` objects; the exact seed name and selected current-employment
-decisions repeat on each record, while education claims stay scoped to their
+separate `ProfileRecord` objects; the display-normalized seed name and selected
+current-employment decisions repeat on each record, while education claims stay scoped to their
 credential. Export projection starts from the complete original row, so passive
 source-list metadata repeats unchanged on every derived record. Identical people from
 different input rows or source lists remain separate tasks and results. The existing
@@ -53,6 +54,25 @@ source bodies are not fetched through a per-person query loop. Evidence and usag
 ledger writes use batched upserts within each short checkpoint transaction. Field
 decisions are inserted together. Lease fencing and durable checkpoint boundaries
 remain in place; concurrent requests never share a SQLAlchemy session.
+
+The shared results library is independent of that research lifecycle. Only an explicit
+authorized request for a completed job generates a retained artifact through the normal
+export renderer. `saved_result_files` stores the resulting CSV/XLSX bytes and minimal
+file metadata, with no foreign key to temporary jobs and no copied research entities.
+`ResultFileStorage` isolates the API from the SQL implementation. PostgreSQL transaction
+advisory locking and SQLite write reservations serialize shared quota checks; metadata
+list queries never load file bytes. Migration `202609290001` creates this separate
+table. All library operations require the configured bearer token, including in
+development; the existing single-token model grants the authorized team shared list,
+download, save, and delete permissions. Saving adds no research or provider call.
+See [library API and limits](library.md).
+
+Normal downloads and saved artifacts use the same export renderer and filename helper.
+The filename is `<List-Name>_<YYYY-MM-DD>_<HHmm>.<csv|xlsx>`, using the first nonempty
+source-list value in original input order and the job start in UTC (creation time for
+an unstarted job). Missing list names use `KnownBy`; safe Unicode names and encoded
+download headers preserve readability. Internal job IDs never form the visible filename.
+The original list-name cells remain unchanged.
 
 ## Discovery and models
 
@@ -112,11 +132,21 @@ Every source selected in the current bounded discovery round is consumed before 
 target-confidence stop. This allows corroboration and additional credentials without
 changing the concurrent fetch window, extraction semaphore, budgets or source caps.
 
-LinkedIn and its redirect/content host trees are excluded by a shared hostname policy.
-The policy runs while parsing search citations, while admitting supplied candidates,
-and again at the network boundary. Exact hosts and subdomains are blocked; hostname
-lookalikes remain ordinary candidates. LinkedIn candidates therefore never reach the
-source advisor, retrieval, browser rendering, or claim extraction.
+LinkedIn and ordinary social-media sources are excluded by one deterministic source
+policy. The hostname denylist includes redirect/content host trees and blocks exact
+hosts and their subdomains; hostname lookalikes remain ordinary candidates. A `social`
+classification also excludes less common platforms outside that list. The policy runs
+at candidate, retrieval, extraction, reconciliation, confidence, and export boundaries,
+including requested and final redirect URLs. Excluded sources cannot supply claims,
+representative links, or exported source provenance. Wikipedia remains eligible under
+its existing encyclopedia authority. The separately deployed static Worker must apply
+the same deny policy before each upstream redirect hop.
+
+At the database read boundary, historical results containing forbidden evidence are
+re-reconciled using only their eligible retained sources and original seed. This
+removes stale social-derived values and confidence from JSON results, exports, and
+new library saves without another search/model call or rewriting raw stored ledgers.
+Clean results retain their stored decisions and the existing six-query result read.
 
 OpenRouter citations are read from
 `choices[*].message.annotations[*].url_citation`; the nested `url` is required, while
@@ -187,6 +217,13 @@ relationship using freshness, currentness, primary-role type, and evidence stren
 public roles receive a compact office subtype. It computes confidence and coverage per
 record, applies the selected-value floor, and derives a representative URL from selected
 field contributions. All steps are deterministic and require no additional model request.
+
+Selected display values also use small exact-phrase English mappings for common Spanish,
+French, and Portuguese titles, subjects, and generic institutional terms. Unknown proper
+names keep their grounded wording. Conservative casing preserves recognized acronyms,
+name particles, apostrophes, hyphens, Roman numerals, and deliberate internal capitals.
+These presentation rules leave raw seed text, claim values, evidence excerpts, source
+titles, and URLs intact and do not add a translation service or model call.
 
 Source/advisor prompts treat non-name seed fields as unverified hypotheses and allow
 newer retrieved evidence to disagree with them. Passive source-list metadata is

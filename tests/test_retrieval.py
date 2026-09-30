@@ -263,13 +263,14 @@ async def test_validate_public_url_accepts_arbitrary_public_sources(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_browser_route_rejects_redirect_to_linkedin_before_request(monkeypatch):
+@pytest.mark.parametrize("host", ["www.linkedin.com", "lnkd.in", "facebook.com", "instagram.com", "x.com"])
+async def test_browser_route_rejects_redirect_to_social_source_before_request(monkeypatch, host):
     public_dns(monkeypatch)
     requests = []
 
     def handler(request):
         requests.append(str(request.url))
-        return httpx.Response(302, headers={"location": "https://www.linkedin.com/in/jane"})
+        return httpx.Response(302, headers={"location": f"https://{host}/in/jane"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         route_client = BrowserRouteHTTPClient(settings(), client)

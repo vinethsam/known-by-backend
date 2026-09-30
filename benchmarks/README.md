@@ -168,3 +168,18 @@ Work counts remain stable: one search per person, two physical page fetches per 
 and six queries for every completed-result read. The 100-person run reached three
 concurrent people and two concurrent extractions. These timings are local,
 single-run observations and remain non-gating.
+
+## Source/display refinement and library check
+
+On 2026-09-30, the production offline harness ran for 1 and 5 people with the same
+2 ms mocked latency and normal research settings. The library remains inactive
+during research; explicit saves are covered separately by API/storage tests.
+
+| People | Elapsed (s) | SQL statements | Model attempts | Searches | Extractions | Cache hit rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.435 | 173 | 4 | 1 | 2 | 0% |
+| 5 | 1.520 | 749 | 20 | 5 | 10 | 80% |
+
+Work counts match the previous recorded pass: two physical fetches per batch and
+six SELECTs for completed-result reads. No live provider calls were made. These
+single-machine timings are non-gating; no broader speedup is claimed.

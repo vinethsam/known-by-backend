@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the seed-context and reconciliation pass on **2026-09-28**, Windows,
+Validated locally after the source/display/export refinement and shared-library pass on **2026-09-30**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,17 +9,40 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Final full test suite | **479 passed, 5 skipped, 2 warnings** in **16.52 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Final full test suite | **669 passed, 6 skipped, 2 warnings** in **24.50 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Focused source policy, persistence, and library checks | **99 passed**, before adding four more browser redirect cases |
 | Focused pre-edit accuracy baseline | **219 passed** |
-| Offline production-pipeline benchmark | Completed for 1, 5, 25, and 100 people with mocked HTTP and no paid calls |
+| Offline production-pipeline benchmark | Current pass: 1 and 5 people with mocked HTTP and unchanged work counts; previous pass also covered 25 and 100 |
 | Ruff lint | `ruff check .` passed |
-| Ruff formatting | All 81 files already formatted |
+| Ruff formatting | All 92 Python files formatted |
 | Python compile/import | Application and compatibility entry points passed |
-| Alembic | Single head `202609150001`; fresh SQLite upgrade/check/downgrade passed with no schema drift |
+| Alembic | Single head `202609290001`; fresh SQLite upgrade/check/downgrade passed with no schema drift; PostgreSQL BYTEA DDL compiled offline |
 | Git diff whitespace check | Passed |
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Current refinement and shared-library coverage
+
+Source-policy fixtures reject LinkedIn and social host trees, redirect destinations,
+and `social` classifications before evidence admission. They verify extraction makes
+no model call for blocked URLs, blocked evidence cannot affect selected fields or
+confidence, and Wikipedia and official sources remain eligible. Legacy persisted
+results are re-reconciled from eligible retained evidence before JSON results,
+ordinary exports, and library saves, without rewriting their historical ledgers.
+
+Display fixtures cover common Spanish/French/Portuguese English equivalents, controlled
+degrees, subjects, conservative name/title/institution casing, acronyms, particles,
+apostrophes, hyphens, and unchanged raw evidence. Filename fixtures cover stable UTC
+job-start naming, original row-order list selection, fallback names, Unicode, unsafe
+characters, length limits, and Content-Disposition without job IDs.
+
+Library fixtures exercise explicit CSV/XLSX saves, identical normal-export content,
+metadata-only listing, authenticated shared downloads/deletes, tokenless fail-closed
+access, rejected formats/arbitrary uploads/incomplete jobs, file-size limits, concurrent
+count/byte quotas, and saved-file survival after job deletion. Completing or exporting
+a job saves nothing automatically. Provider construction/calls are forbidden in the
+save fixture; no new research tables or model work are introduced.
 
 ## Current coverage
 
@@ -100,8 +123,11 @@ offline and make no paid OpenRouter calls.
 
 ## Migration coverage
 
-The accuracy pass uses existing profile/source JSON and configuration. It adds no
-Alembic migration and no CSV/XLSX export columns.
+The source/display refinement uses existing profile/source JSON and adds no export
+columns. The shared file library adds migration `202609290001` with one independent
+artifact table and no research-table changes or job foreign keys. Fresh upgrade,
+schema-drift check, downgrade, and PostgreSQL SQL compilation are tested. Deployment
+must apply the migration before starting the updated web and worker services.
 
 - Real OpenRouter request/response adapters under HTTP fixtures: server-tool syntax,
   citation-only discovery, canonical deduplication, missing or malformed results,
@@ -119,7 +145,7 @@ Alembic migration and no CSV/XLSX export columns.
 
 ## Deployment checks still required
 
-- **PostgreSQL runtime:** five tests skipped because `TEST_POSTGRES_URL` is unset.
+- **PostgreSQL runtime:** six tests skipped because `TEST_POSTGRES_URL` is unset.
   CI supplies a disposable PostgreSQL database; these tests use isolated schemas.
 - **Live OpenRouter and Cloudflare:** configure the production variables and run one
   person plus a small batch through the normal API. Verify source-model tool support,
@@ -127,7 +153,7 @@ Alembic migration and no CSV/XLSX export columns.
   OpenRouter workspace settings permit Exa and no forced legacy web plugin adds
   implicit search. Search costs are additional to model tokens.
 - **Cloudflare protections:** the separately deployed Worker must enforce upstream
-  public-address, redirect, and LinkedIn host-policy checks before every hop; its code
+  public-address, redirect, and social-source host-policy checks before every hop; its code
   is outside this repository. Backend final-URL validation cannot undo a request that
   an external Worker already followed.
 - **Chromium:** local browser fixtures do not establish real launch/rendering or

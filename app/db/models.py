@@ -4,11 +4,13 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -156,3 +158,26 @@ class WorkerHeartbeatRow(Base):
 
     worker_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class SavedResultFileRow(Base):
+    """An explicitly retained export, independent of all temporary research rows."""
+
+    __tablename__ = "saved_result_files"
+
+    file_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    filename: Mapped[str] = mapped_column(String(200), nullable=False)
+    format: Mapped[str] = mapped_column(String(4), nullable=False)
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    research_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The original list remains unchanged inside the export. No person data is
+    # copied into metadata and there is deliberately no foreign key to jobs.
+    list_name: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+
+    __table_args__ = (
+        CheckConstraint("format IN ('csv', 'xlsx')", name="ck_saved_result_files_format"),
+        CheckConstraint("size_bytes > 0", name="ck_saved_result_files_size"),
+        Index("ix_saved_result_files_saved_at", "saved_at", "file_id"),
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.config import ScoringPolicy
+from app.retrieval.urls import source_record_allowed
 from app.schemas import EvidenceClaim, FieldDecision, ProfileField, SourceRecord, SourceType, utcnow
 
 VOLATILE_FIELDS = {ProfileField.organisation, ProfileField.job_title}
@@ -80,6 +81,8 @@ def claim_strength(
     effective_identities: dict[str, float] | None = None,
     field_quality: float = 1,
 ) -> tuple[float, dict]:
+    if not source_record_allowed(source):
+        return 0.0, {"claim_strength": 0.0, "source_policy_blocked": True}
     recency = recency_signal(claim, source, policy, today or utcnow().date())
     baseline_identity = min(source.identity.score, claim.identity_relevance)
     identity = max(baseline_identity, (effective_identities or {}).get(source.source_id, 0))
@@ -131,6 +134,16 @@ def confidence_for_group(
     effective_identities: dict[str, float] | None = None,
     quality_by_claim: dict[str, float] | None = None,
 ) -> tuple[float, dict, list[str], EvidenceClaim]:
+    original_support = support
+    support = [claim for claim in support if source_record_allowed(sources[claim.source_id])]
+    conflicts = [claim for claim in conflicts if source_record_allowed(sources[claim.source_id])]
+    if not support:
+        return (
+            0.0,
+            {"claim_strength": 0.0, "source_policy_blocked": True},
+            ["SOURCE_POLICY_BLOCKED"],
+            original_support[0],
+        )
     quality_by_claim = quality_by_claim or {}
     field_identities = dict(effective_identities or {})
     name_identity_floor = 0.0

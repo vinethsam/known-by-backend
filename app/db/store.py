@@ -41,6 +41,7 @@ from app.db.models import (
     UsageRecordRow,
     WorkerHeartbeatRow,
 )
+from app.research.source_policy import sanitize_research_result
 from app.schemas import (
     EvidenceClaim,
     JobCreated,
@@ -58,7 +59,7 @@ from app.schemas import (
     utcnow,
 )
 
-EXPECTED_ALEMBIC_REVISION = "202609150001"
+EXPECTED_ALEMBIC_REVISION = "202609290001"
 SUCCESS_STATUSES = {PersonStatus.completed.value, PersonStatus.review_required.value}
 TERMINAL_STATUSES = SUCCESS_STATUSES | {PersonStatus.failed.value, PersonStatus.cancelled.value}
 
@@ -342,6 +343,7 @@ class Store:
                     "usage_records",
                     "retrieval_cache",
                     "worker_heartbeats",
+                    "saved_result_files",
                 }
                 if not required.issubset(tables):
                     return False
@@ -731,6 +733,9 @@ class Store:
                 sources=[SourceRecord.model_validate(row.data_json) for row in sources],
                 claims=[EvidenceClaim.model_validate(row.data_json) for row in claims],
                 usage=[UsageRecord.model_validate(row.data_json) for row in usage],
+            )
+            result = sanitize_research_result(
+                result, PersonSeed.model_validate(task.seed_json), self.settings.SCORING
             )
             result.profile.status = PersonStatus(task.status)
             if task.status in {"queued", "researching", "failed", "cancelled"}:
