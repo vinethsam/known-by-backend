@@ -10,6 +10,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
+from app.research.normalisation import finalize_display
 from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
 
@@ -62,9 +63,9 @@ def _flatten_results(
     rows: list[dict[str, Any]] = []
     for person in results.people:
         if person.result:
-            profile = person.result.profile
+            profile = finalize_display(person.result.profile)
             # Historical profiles have no records. Treat their flat decision set as
-            # one record so the established export remains byte-for-byte compatible.
+            # one record with the same columns and final selected-value normalization.
             records = list(getattr(profile, "records", ()) or (profile,))
             for record in records:
                 row = _base_row(person, original_columns, enrichment_map, status=record.status)

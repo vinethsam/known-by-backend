@@ -1,0 +1,141 @@
+{
+  "date": "2026-10-01",
+  "baseline": "359202acfd51211746d2a59b93af24dff9a02871",
+  "fixture_version": 1,
+  "normalization_version": 6,
+  "mock_latency_ms": 2,
+  "batches": [
+    {
+      "people": 1,
+      "before_ms": 427.86,
+      "after_ms": 359.33,
+      "counts_unchanged": true,
+      "counts": {
+        "db_statements": 173,
+        "db_insert": 76,
+        "db_select": 57,
+        "db_update": 23,
+        "people": 1,
+        "db_delete": 17,
+        "models": 4,
+        "searches": 1,
+        "validations": 1,
+        "cache_misses": 2,
+        "fetches": 2,
+        "extractions": 2
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.0,
+      "before_hash": "50ea7b4239f0b63ac026f1dc075c51a95fe4e254c2ef311f811d1d7341fb388b",
+      "after_hash": "05c367720c9fc46be77b0360cd6ecdb72a12eaefa6009ad833df5717e328280b",
+      "peak_concurrency": {
+        "people": 1,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      }
+    },
+    {
+      "people": 5,
+      "before_ms": 1528.97,
+      "after_ms": 1618.52,
+      "counts_unchanged": true,
+      "counts": {
+        "db_statements": 749,
+        "db_insert": 352,
+        "db_select": 217,
+        "db_update": 99,
+        "people": 5,
+        "db_delete": 81,
+        "models": 20,
+        "searches": 5,
+        "validations": 5,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 8,
+        "extractions": 10
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.8,
+      "before_hash": "63dbf7e104c2da936811e3942113b2b800344821ddae86e81a50dee098cd4a28",
+      "after_hash": "c028c2240e903fa5ce9965b744b213b39ab2bd26c5dc15bcabbc3582bfc8e396",
+      "peak_concurrency": {
+        "people": 3,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      }
+    },
+    {
+      "people": 25,
+      "before_ms": 7416.07,
+      "after_ms": 9212.06,
+      "counts_unchanged": true,
+      "counts": {
+        "db_statements": 3629,
+        "db_insert": 1732,
+        "db_select": 1017,
+        "db_update": 479,
+        "people": 25,
+        "db_delete": 401,
+        "models": 100,
+        "searches": 25,
+        "validations": 25,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 48,
+        "extractions": 50
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.96,
+      "before_hash": "42593d89764dcd145fe268ff33991be8a85fc01ee472cd64f37038d84df64472",
+      "after_hash": "b59182a564b20b579bc524744c8608bc42fe92f2703098be087aec68158dec1c",
+      "peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 2
+      }
+    },
+    {
+      "people": 100,
+      "before_ms": 55161.28,
+      "after_ms": 61779.13,
+      "counts_unchanged": true,
+      "counts": {
+        "db_statements": 25028,
+        "db_insert": 12706,
+        "db_select": 6417,
+        "db_update": 3104,
+        "people": 100,
+        "db_delete": 2801,
+        "models": 800,
+        "searches": 100,
+        "validations": 100,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 198,
+        "extractions": 600
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.99,
+      "before_hash": "bd20c1d0d5c6253131303df718931dea2e6eb1487dccfb7e59d0f8b473cf15bc",
+      "after_hash": "6cdcb939d14f66bcb137012aab0f31202e611e38dcc8f6d31138c793c6641400",
+      "peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 1,
+        "extractions": 2
+      }
+    }
+  ],
+  "baseline_method": "Isolated git archive of baseline commit, same virtualenv and mocked harness"
+}

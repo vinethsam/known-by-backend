@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.input_validation import MAX_INPUT_URL_CHARS, normalized_input_text, validate_input_text
 
@@ -58,6 +58,10 @@ class JobStatus(StrEnum):
     partial = "partial"
     failed = "failed"
     cancelled = "cancelled"
+
+    @property
+    def label(self) -> str:
+        return "Completed with issues" if self == JobStatus.partial else self.value.capitalize()
 
 
 class PersonStatus(StrEnum):
@@ -319,6 +323,11 @@ class JobView(JobCreated):
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
+    @computed_field
+    @property
+    def status_label(self) -> str:
+        return self.status.label
+
 
 class PersonResultView(Contract):
     person_id: str
@@ -333,3 +342,8 @@ class JobResults(Contract):
     job_id: str
     status: JobStatus
     people: list[PersonResultView]
+
+    @computed_field
+    @property
+    def status_label(self) -> str:
+        return self.status.label

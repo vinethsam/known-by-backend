@@ -32,6 +32,7 @@ CONTEXT_FIELDS = (
     "citation_count",
     "selected_source_count",
     "performance",
+    "decision",
 )
 
 

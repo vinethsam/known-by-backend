@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the source/display/export refinement and shared-library pass on **2026-09-30**, Windows,
+Validated locally after the regression recovery pass on **2026-10-01**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,18 +9,36 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Final full test suite | **669 passed, 6 skipped, 2 warnings** in **24.50 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
-| Focused source policy, persistence, and library checks | **99 passed**, before adding four more browser redirect cases |
-| Focused pre-edit accuracy baseline | **219 passed** |
-| Offline production-pipeline benchmark | Current pass: 1 and 5 people with mocked HTTP and unchanged work counts; previous pass also covered 25 and 100 |
+| Final full test suite | **730 passed, 6 skipped, 2 warnings** in **29.38 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Frozen golden panel | **14 passed** across all ten requested people; the same panel at `359202a` passed 2 and failed 12 |
+| Focused checks | Final database/migration, decision-trace, and education check: **34 passed**; identity, confidence, role, normalization, export, and outcome cases also pass in the full suite |
+| Offline production-pipeline benchmark | 1, 5, 25, and 100 people with mocked HTTP; before/after search, model, extraction, SQL, cache, and result-read counts unchanged |
 | Ruff lint | `ruff check .` passed |
-| Ruff formatting | All 92 Python files formatted |
+| Ruff formatting | All Python files formatted |
 | Python compile/import | Application and compatibility entry points passed |
 | Alembic | Single head `202609290001`; fresh SQLite upgrade/check/downgrade passed with no schema drift; PostgreSQL BYTEA DDL compiled offline |
 | Git diff whitespace check | Passed |
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Regression recovery coverage
+
+The [recovery report](quality-recovery.md) records specific historical function
+changes, all ten named golden fixtures, and their outcomes. The same synthetic panel
+ran against isolated archives of all four requested historical revisions. It measures
+downstream behavior with frozen evidence, not the accuracy of live biographies.
+Additional guards verify genuinely dated news/archive evidence still ages, multiple
+roles in one quote cannot create an invented pair, final CSV/XLSX normalization keeps
+input/provenance intact, disconnected namesakes abstain, partial education is grounded,
+and duplicate credentials remain suppressed. Plaintext log fixtures validate useful
+decision detail, final identity eligibility, bounded payloads, and sensitive-data
+exclusion. Mixed job outcomes retain completed records and expose the new display label.
+
+The 100-person offline benchmark took 55.161 seconds before and 61.779 seconds after;
+single-run timings are non-gating and do not establish a speedup. Provider/search and
+database work counts are identical. The [benchmark record](../benchmarks/README.md#regression-recovery-measurement)
+contains all four sizes and explains the intentional confidence/hash differences.
 
 ## Current refinement and shared-library coverage
 
@@ -123,6 +141,8 @@ offline and make no paid OpenRouter calls.
 
 ## Migration coverage
 
+The regression recovery adds no migration or schema change. Alembic logging setup
+preserves application loggers; the single migration head remains `202609290001`.
 The source/display refinement uses existing profile/source JSON and adds no export
 columns. The shared file library adds migration `202609290001` with one independent
 artifact table and no research-table changes or job foreign keys. Fresh upgrade,
@@ -168,6 +188,8 @@ configuration, apply migrations, and check `/health` then `/ready`. Readiness ch
 configuration and runtime prerequisites without making paid calls; it does not
 prove live model compatibility or successful Chromium rendering.
 
-No live provider request was made during this hardening pass. The next deployment check
-should use one bounded person through the normal production API and confirm citation
-counts, selected-source counts, persisted attempt diagnostics, and the terminal code.
+No live provider request was made during this recovery pass. The smallest useful
+next quality panel is Andrew Marsh + Entergy, Anutin Charnvirakul, Jafar Hassan,
+Tshering Tobgay, Elizabeth Adams without context, and Isaac Lungu through the normal
+production API/settings. Inspect actual retrieved evidence and the new decision
+traces for identity, current roles, institution specificity, links, and credentials.

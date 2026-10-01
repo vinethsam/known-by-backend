@@ -41,6 +41,7 @@ from app.db.models import (
     UsageRecordRow,
     WorkerHeartbeatRow,
 )
+from app.research.normalisation import finalize_display
 from app.research.source_policy import sanitize_research_result
 from app.schemas import (
     EvidenceClaim,
@@ -737,6 +738,7 @@ class Store:
             result = sanitize_research_result(
                 result, PersonSeed.model_validate(task.seed_json), self.settings.SCORING
             )
+            result.profile = finalize_display(result.profile)
             result.profile.status = PersonStatus(task.status)
             if task.status in {"queued", "researching", "failed", "cancelled"}:
                 result.profile.research_status = task.status

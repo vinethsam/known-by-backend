@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from app.input_validation import repair_mojibake
-from app.schemas import ProfileField, SourceType
+from app.schemas import PersonProfile, ProfileField, SourceType
 
 BACHELORS_DEGREE = "Bachelor's Degree"
 MASTERS_DEGREE = "Master's Degree"
@@ -198,6 +198,17 @@ _ACRONYMS = {
 # Exact phrases only: translating fragments in an unfamiliar proper name or a
 # longer role description could invent an affiliation or change its meaning.
 _TITLE_EQUIVALENTS = {
+    # Canonical output titles, including the common public-office abbreviation.
+    "pm": "Prime Minister",
+    "p m": "Prime Minister",
+    "prime minister": "Prime Minister",
+    "vice president": "Vice President",
+    "minister": "Minister",
+    "chief executive officer": "Chief Executive Officer",
+    "chair": "Chair",
+    "chairman": "Chair",
+    "chairwoman": "Chair",
+    "director": "Director",
     # Spanish / French / Portuguese government titles.
     "presidente": "President",
     "president": "President",
@@ -724,6 +735,28 @@ def normalise_display(field: ProfileField, value: str) -> str:
     return display
 
 
+def finalize_display(profile: PersonProfile) -> PersonProfile:
+    """Last presentation gate for every selected record, without changing evidence.
+
+    This also handles stored profiles produced before canonical title fixes. Scores,
+    review flags, source links, raw input identity and claim references are retained.
+    """
+    changes = []
+    for index, fields in enumerate([profile.fields, *(record.fields for record in profile.records)]):
+        for field, decision in fields.items():
+            if decision.value is not None:
+                display = normalise_display(field, decision.value)
+                if display != decision.value:
+                    changes.append((index, field, display))
+    if not changes:
+        return profile
+    finalized = profile.model_copy(deep=True)
+    targets = [finalized.fields, *(record.fields for record in finalized.records)]
+    for index, field, value in changes:
+        targets[index][field].value = value
+    return finalized
+
+
 def is_non_organisation_place(value: str) -> bool:
     key = comparison_key(value)
     return bool(
@@ -756,7 +789,7 @@ def classify_public_office(
     source_types: set[SourceType] | None = None,
 ) -> PublicOfficeType | None:
     organisation_key = comparison_key(organisation or "")
-    title_key = comparison_key(title or "")
+    title_key = comparison_key(normalise_display(ProfileField.job_title, title or ""))
     source_types = source_types or set()
     government_source = SourceType.government in source_types
     public_reference_source = government_source or SourceType.encyclopedia in source_types
@@ -765,6 +798,19 @@ def classify_public_office(
     private_institution = bool(_PRIVATE_INSTITUTION_RE.search(organisation_key)) or abbreviated_institution
     if re.search(r"\b(political party|party|movement|coalition)\b", organisation_key):
         return None
+    # A primary office is the title itself, not a phrase inside an administrative
+    # role such as Head of the Prime Minister's Office. Check before 'minister'.
+    if re.match(r"^(prime minister|head of government)(?:$| of )", title_key) or (
+        title_key in {"chancellor", "federal chancellor"}
+        and (government_source or bool(_PUBLIC_INSTITUTION_RE.search(organisation_key)))
+    ):
+        return PublicOfficeType.head_of_government
+    if (
+        re.match(r"^(head of state|president)(?:$| of )", title_key)
+        and not private_institution
+        and (public_reference_source or bool(_PUBLIC_INSTITUTION_RE.search(organisation_key)))
+    ):
+        return PublicOfficeType.head_of_state
     if re.search(r"\b(court|judiciary)\b", organisation_key) or re.search(
         r"\b(chief justice|justice|judge|magistrate)\b", title_key
     ):
@@ -784,7 +830,7 @@ def classify_public_office(
     if (
         re.search(r"\b(ministry|ministerial department)\b", organisation_key)
         or re.search(r"\b(cabinet minister|minister of|government minister)\b", title_key)
-        or (government_source and re.search(r"\bminister\b", title_key))
+        or (government_source and re.match(r"^(?:(?:deputy|assistant) )?minister(?:$| of | for )", title_key))
     ):
         return PublicOfficeType.ministerial
     if re.search(r"\b(government agency|public agency|regulatory agency)\b", organisation_key) or (
@@ -795,17 +841,6 @@ def classify_public_office(
         government_source and re.search(r"\b(?:department of|department)\b", organisation_key)
     ):
         return PublicOfficeType.government_department
-    if re.search(r"\b(prime minister|head of government)\b", title_key) or (
-        re.search(r"\bchancellor\b", title_key)
-        and (government_source or bool(_PUBLIC_INSTITUTION_RE.search(organisation_key)))
-    ):
-        return PublicOfficeType.head_of_government
-    if re.search(r"\b(head of state)\b", title_key) or (
-        re.search(r"\bpresident\b", title_key)
-        and not private_institution
-        and (public_reference_source or bool(_PUBLIC_INSTITUTION_RE.search(organisation_key)))
-    ):
-        return PublicOfficeType.head_of_state
     if re.search(r"\b(cabinet|executive office|presidency|chancellery)\b", organisation_key) or (
         government_source and re.search(r"\boffice of the\b", organisation_key)
     ):

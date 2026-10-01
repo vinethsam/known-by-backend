@@ -32,6 +32,13 @@ and the optional `full_name_source_urls` cell is therefore blank. Existing
 single-record results and historical flat profiles still produce one row. Failed tasks
 and tasks without a result also produce one row with empty enrichment values.
 
+The final display gate applies to every selected record, including older stored
+profiles: `PM`, `Pm`, `pm`, and capitalization variants become `Prime Minister`.
+Canonical English titles/degrees and conservative casing use the same normalization
+as JSON results. Scores, review flags, raw input, evidence, provenance, and columns
+are unchanged. Internal decision traces and the API-only `status_label` add no export
+columns. Shared Library saves use this same export path.
+
 Source-list columns such as `LIST_NAME`, `source_list`, `source_dataset`,
 `dataset_name`, `cohort`, and `source_cohort` are passive input metadata. Their original
 header and value are preserved through the existing original-row projection and repeat

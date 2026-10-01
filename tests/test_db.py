@@ -55,11 +55,18 @@ def _store(tmp_path, **overrides):
 
 
 def _result(person_id: str, status: PersonStatus = PersonStatus.completed) -> ResearchResult:
+    values = {
+        ProfileField.full_name: "Ada Lovelace",
+        ProfileField.organisation: "Example Company",
+        ProfileField.job_title: "Director",
+        ProfileField.university_name: "Example University",
+        ProfileField.degree_type: "Master's Degree",
+        ProfileField.subject: "Mathematics",
+        ProfileField.profile_link: "https://example.com/profile",
+    }
     fields = {
         field: FieldDecision(
-            value="https://example.com/profile"
-            if field == ProfileField.profile_link
-            else f"{field.value} value",
+            value=values[field],
             confidence=90,
             review_required=False,
             sources=["https://example.com/profile"],
@@ -194,7 +201,7 @@ def test_profile_records_survive_checkpoint_and_final_result_without_migration(t
     result.profile.records = [
         record("bachelors", "Bachelor's Degree", "University A", "https://a.example/ada"),
         record("masters", "Master's Degree", "University B", "https://b.example/ada"),
-        record("doctorate", "PhD", "University C", "https://c.example/ada"),
+        record("doctorate", "Doctoral Degree", "University C", "https://c.example/ada"),
     ]
     expected = [item.model_dump(mode="json") for item in result.profile.records]
 
@@ -263,7 +270,7 @@ def test_checkpoint_is_fenced_and_replaced_on_reclaim(tmp_path):
     assert job.status == JobStatus.running
     view = store.get_results(created.job_id).people[0]
     assert view.status == PersonStatus.researching
-    assert view.result.profile.fields[ProfileField.job_title].value == "first checkpoint"
+    assert view.result.profile.fields[ProfileField.job_title].value == "First Checkpoint"
 
     with store.session_factory.begin() as session:
         task = session.scalar(select(PersonTaskRow).where(PersonTaskRow.person_id == first.person_id))
@@ -277,7 +284,7 @@ def test_checkpoint_is_fenced_and_replaced_on_reclaim(tmp_path):
     assert store.checkpoint(second, second_result)
     assert store.finish_task(second, second_result)
     final_view = store.get_results(created.job_id).people[0]
-    assert final_view.result.profile.fields[ProfileField.job_title].value == "second checkpoint"
+    assert final_view.result.profile.fields[ProfileField.job_title].value == "Second Checkpoint"
 
 
 def test_cancel_fences_late_results_and_cache_upserts(tmp_path):

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
+from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy
 from app.retrieval.urls import source_record_allowed
@@ -56,12 +58,41 @@ def _independent_pairs(claims: list[EvidenceClaim], sources: dict[str, SourceRec
     return paired
 
 
+def role_observation_date(claim: EvidenceClaim, source: SourceRecord) -> date | None:
+    """A living institutional biography's creation date is not a current role's date.
+
+    Explicit fact dates, historical claims and dated news retain normal aging. The
+    exception requires current, explicit evidence on a recognizable official profile;
+    an official domain alone cannot freshen an archived announcement.
+    """
+    if claim.as_of_date is not None:
+        return claim.as_of_date
+    profile_context = f"{source.title} {urlsplit(source.final_url or source.requested_url).path}".casefold()
+    current_profile = (
+        claim.is_current is True
+        and claim.end_date is None
+        and claim.directness == "explicit"
+        and source.source_type
+        in {
+            SourceType.first_party,
+            SourceType.government,
+            SourceType.employer,
+            SourceType.university,
+        }
+        and bool(re.search(r"\b(biography|biographies|bio|profile|leadership|team)\b", profile_context))
+        and not re.search(
+            r"\b(news|press|release|releases|archive|archives|article|articles)\b", profile_context
+        )
+    )
+    return None if current_profile else source.published_at
+
+
 def recency_signal(claim: EvidenceClaim, source: SourceRecord, policy: ScoringPolicy, today: date) -> float:
     if claim.field not in VOLATILE_FIELDS:
         return 1
     if claim.is_current is False or claim.end_date is not None:
         return policy.historical_current_factor
-    observed = claim.as_of_date or source.published_at
+    observed = role_observation_date(claim, source)
     if claim.is_current is True and observed is None:
         # Explicit present-tense evidence is stronger than an undated role whose
         # currentness is merely unknown. Identity and source authority still apply.
@@ -90,14 +121,14 @@ def claim_strength(
     base = (
         policy.authority_weight * source.authority_score
         + policy.directness_weight * directness
-        + policy.recency_weight * recency
+        + policy.recency_weight
     )
     preferred = policy.preferred_bonus if source.preferred_source else 0
     quality = max(0, min(1, field_quality))
-    # Recency is a weak additive signal in the evidence mix, but dated current roles
-    # also need a meaningful age discount. Unknown dates retain a modest 0.90 factor:
-    # absence is uncertainty, not proof that a role is stale. Timeless fields stay at one.
-    observed = claim.as_of_date or source.published_at
+    # Apply age/currentness once, here. Reducing the recency term in base as well
+    # would penalize the same uncertainty twice. Its base allocation is neutral;
+    # unknown currentness gets one modest factor, while genuinely dated facts age.
+    observed = role_observation_date(claim, source)
     if claim.field not in VOLATILE_FIELDS:
         time_sensitivity = 1.0
     elif claim.is_current is True and observed is None:
@@ -115,6 +146,13 @@ def claim_strength(
         "identity": identity,
         "directness": directness,
         "recency": recency,
+        "recency_basis": "claim_date"
+        if claim.as_of_date
+        else "page_date"
+        if observed
+        else "current_statement"
+        if claim.is_current is True
+        else "unknown",
         "normalisation": claim.normalisation_certainty,
         "field_quality": quality,
         "time_sensitivity": time_sensitivity,
@@ -260,7 +298,7 @@ def confidence_for_group(
         corroboration_identity=corroboration_identity,
         conflict_strength=strongest_conflict,
         conflict_penalty=penalty,
-        formula_version="evidence-v2",
+        formula_version="evidence-v3",
         name_identity_floor=name_identity_floor,
     )
     return round(score, 2), components, reasons, selected

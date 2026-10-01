@@ -332,7 +332,7 @@ def eligible_identity_source_ids(
     }
     anchors = seed_identity_anchors(seed)
     if not anchors:
-        return eligible
+        return _unseeded_identity_source_ids(claims, sources, policy, eligible)
     direct = {
         source_id
         for source_id in eligible
@@ -407,6 +407,113 @@ def eligible_identity_source_ids(
                 confirmed.add(source_id)
                 break
     return confirmed
+
+
+def _unseeded_identity_source_ids(
+    claims: list[EvidenceClaim],
+    sources: dict[str, SourceRecord],
+    policy: ScoringPolicy,
+    eligible: set[str],
+) -> set[str]:
+    """Do not assemble a name-only profile from disconnected namesakes.
+
+    A shared explicit institution connects provisional sources. Names, degree
+    levels and generic role/subject combinations cannot establish that connection.
+    This is an eligibility check only: it never increases an identity score.
+    """
+
+    institutions: dict[str, set[str]] = defaultdict(set)
+    substantive: set[str] = set()
+    generic_institutions = {
+        "agency",
+        "college",
+        "company",
+        "government",
+        "institution",
+        "ministry",
+        "office",
+        "organisation",
+        "organization",
+        "school",
+        "university",
+    }
+    for claim in claims:
+        if (
+            claim.source_id not in eligible
+            or claim.identity_relevance < policy.identity_minimum
+            or claim.field not in _CONTEXT_FIELDS
+        ):
+            continue
+        substantive.add(claim.source_id)
+        if (
+            claim.directness != "explicit"
+            or claim.field.value not in _INSTITUTION_FIELDS
+            or claim.normalisation_certainty < 0.8
+        ):
+            continue
+        key = _clue_key(claim.field.value, claim.normalised_value)
+        if key and key.removeprefix("the ") not in generic_institutions:
+            # An institution may be an employer on one page and an alma mater on
+            # another; that is still a useful, externally grounded identity clue.
+            institutions[claim.source_id].add(key)
+    if len(substantive) <= 1:
+        return eligible
+    non_substantive = eligible - substantive
+    secure = {
+        source_id
+        for source_id in substantive
+        if sources[source_id].identity.score >= policy.identity_review_threshold
+        and sources[source_id].identity.signals.get("model_relevance") != "ambiguous"
+    }
+
+    def compatible(left: str, right: str) -> bool:
+        return bool(institutions[left] & institutions[right])
+
+    if secure:
+        # Keep the existing one-hop safeguard: an ambiguous intermediate page
+        # cannot admit another disconnected page into an identified person's facts.
+        return (
+            non_substantive
+            | secure
+            | {
+                source_id
+                for source_id in substantive - secure
+                if any(compatible(source_id, anchor_id) for anchor_id in secure)
+            }
+        )
+    credible = {
+        source_id
+        for source_id in substantive
+        if sources[source_id].authority_score >= policy.authority[SourceType.directory]
+    }
+    participants = credible or substantive
+    remaining = set(participants)
+    components: list[set[str]] = []
+    while remaining:
+        connected = {min(remaining)}
+        pending = list(connected)
+        remaining -= connected
+        while pending:
+            source_id = pending.pop()
+            adjacent = {other for other in remaining if compatible(source_id, other)}
+            connected.update(adjacent)
+            remaining -= adjacent
+            pending.extend(sorted(adjacent))
+        components.append(connected)
+    if len(components) != 1:
+        # There is no evidence that identifies the intended namesake. Preserve
+        # provisional claims outside final selection instead of guessing a cluster.
+        return non_substantive
+    connected = components[0]
+    return (
+        non_substantive
+        | connected
+        | {
+            source_id
+            for source_id in substantive - connected
+            if any(compatible(source_id, anchor_id) for anchor_id in connected)
+        }
+    )
 
 
 def effective_identity_scores(

@@ -183,3 +183,31 @@ during research; explicit saves are covered separately by API/storage tests.
 Work counts match the previous recorded pass: two physical fetches per batch and
 six SELECTs for completed-result reads. No live provider calls were made. These
 single-machine timings are non-gating; no broader speedup is claimed.
+
+## Regression recovery measurement
+
+On 2026-10-01 the same offline production harness and 2 ms mocked HTTP latency
+compared an isolated `git archive` of `359202a` with the recovery implementation,
+using the same virtual environment. Both reports use fixture version
+1 and normalization version 6. The serialization-normalization algorithm is unchanged;
+selected confidence and scoring metadata intentionally change with `evidence-v3`, so
+the output hashes differ and exact output equivalence is not the acceptance criterion.
+Golden fixtures separately verify improved selection against the frozen evidence.
+
+| People | Before (s) | After (s) | SQL, both | Model attempts, both | Searches, both | Extractions, both |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.428 | 0.359 | 173 | 4 | 1 | 2 |
+| 5 | 1.529 | 1.619 | 749 | 20 | 5 | 10 |
+| 25 | 7.416 | 9.212 | 3,629 | 100 | 25 | 50 |
+| 100 | 55.161 | 61.779 | 25,028 | 800 | 100 | 600 |
+
+Every batch retains two physical fetches, six result-read SELECTs, and cache hit
+rates of 0%, 80%, 96%, and 99%. The largest after-run reaches three concurrent people
+and two concurrent extractions. No search/model/token budget or browser work changed.
+These single local timing samples include disk and scheduling variability; larger
+after-runs were slower, and this pass makes no latency-improvement claim. Additional
+deterministic selection checks and bounded logging do not add provider cost.
+
+Compact counts, timings, and hashes are checked in at
+[`quality-recovery.json`](quality-recovery.json). Full result bodies are omitted to
+avoid duplicating large synthetic profiles. No live requests were made.

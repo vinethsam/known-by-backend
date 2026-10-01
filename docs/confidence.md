@@ -1,4 +1,4 @@
-# Evidence confidence, version `evidence-v2`
+# Evidence confidence, version `evidence-v3`
 
 KnownBy calculates confidence in Python. Model responses supply grounded claims and
 source classifications; they never supply confidence percentages. Scores are
@@ -114,6 +114,15 @@ cluster through one explicit shared institution, or two other explicit context f
 bridges are one hop and cannot chain an unrelated cluster into eligibility. Context
 bonuses are capped and leave the stored page-level identity assessment unchanged.
 
+Before those bonuses apply, name-only sources must also pass a coherence check.
+Multiple provisional sources connect through explicit, non-generic institution
+evidence; the same name, degree level, or generic role/subject pair cannot connect
+them. Disconnected credible namesake groups remain alternatives rather than being
+combined or choosing whichever group is largest. A single substantive source can
+still produce a reviewable partial profile. Independently secure sources can admit
+a provisional source through one direct shared institution, without a chain of
+ambiguous intermediaries. This check does not increase any identity score.
+
 The internal web-name evidence decision has one additional narrow rule. Two independent,
 non-mirrored, explicit exact-name claims from publication-or-better sources receive an
 identity floor above the review threshold. This can resolve web-identity ambiguity for
@@ -166,11 +175,15 @@ P = 0.02 for a preferred source; otherwise 0
 R = recency factor
 T = field-aware time multiplier
 
-base(c) = 0.55*A + 0.30*D + 0.15*R
+base(c) = 0.55*A + 0.30*D + 0.15
 strength(c) = I * N * Q * min(1, base(c) + P) * T
 ```
 
 For organisation and job title, dated evidence decays with a 730-day half-life.
+Recency is applied once through `T`; its base allocation is neutral. Version 2
+reduced both the additive recency component and the multiplier for the same age
+uncertainty. Authority, identity, directness, normalization, pairing quality, and
+material conflicts remain distinct checks.
 An undated claim with explicit `is_current=true` uses `R=1` and `T=1`; present-tense
 currentness is stronger than missing temporal information, while identity, authority,
 directness, and conflicts still apply. Otherwise unknown recency is **0.65** and uses
@@ -179,7 +192,11 @@ volatile evidence uses `T=0.35 + 0.65*R`, making stale high-authority evidence
 materially weaker. Explicitly ended/former roles are historical alternatives and do
 not populate current fields. Education and internal web-name claims use `T=1` and do
 not decay; the representative-link score is derived from the selected claims it
-summarizes.
+summarizes. Explicit claim dates always control aging. An old page creation date
+does not age an undated, explicit current statement on a recognizable official
+person, government, employer, or university biography/profile/leadership/team page.
+News, press releases, archives, and articles retain their publication dates; merely
+being on an official domain cannot refresh old evidence.
 
 Equivalent normalized values form a support group. Independent support is computed
 with a maximum distinct domain/content-hash pairing. The strongest claim is the base;
@@ -245,9 +262,15 @@ one qualification remains one record until positive evidence establishes another
   establishes distinct credentials; one non-subject contextual disagreement remains
   an ambiguous record rather than proof of two qualifications.
 - Ungrouped components are never spliced together merely to fill missing fields.
-- A university-only, subject-only, or otherwise degree-free bundle cannot create a
-  credential row. It may corroborate exactly one compatible proven credential;
-  otherwise it remains orphan alternative evidence.
+  An identical quote on the same source that contains the separate components can
+  establish a relationship when exactly one credential is compatible; sharing only
+  a page or section cannot.
+- A reliable university-only bundle can retain a partial education record without
+  inventing a degree. This requires explicit evidence, publication-level authority
+  or better, secure identity at the existing identity review threshold, and evidence
+  strength above the unchanged field-review threshold. Subject-only or weak
+  fragments cannot seed a record. Partial evidence can attach to exactly one
+  compatible credential; otherwise it remains orphan alternative evidence.
 - A safe compound claim containing distinct controlled types, such as `maestría y un doctorado`,
   expands before grouping while every expanded claim retains the same literal raw value.
 - Certifications, executive programmes, honorary awards, postdoctoral work, ongoing
@@ -256,7 +279,8 @@ one qualification remains one record until positive evidence establishes another
   `graduate studies` remain alternatives; ambiguous values make the degree field
   reviewable without manufacturing a credential.
 
-Each confirmed credential becomes a `ProfileRecord`. The immutable seed name and
+Each confirmed credential or reliable partial institution becomes a `ProfileRecord`.
+The immutable seed name and
 selected current-role decisions are copied into every record; university, degree and
 subject decisions are scoped to that credential. No confirmed education produces one
 general record.
@@ -265,22 +289,29 @@ clients, while `PersonProfile.records` is the complete additive result.
 
 ## Current employment
 
-Organisation and job title are ranked as relationship clusters. A deterministic
-freshness band wins first, then relationship-type priority, explicit current status,
-exact observation date, relationship completeness, evidence strength and a stable
-signature. An explicitly current undated role receives full recency/currentness
-signals rather than the generic unknown-date discount; this does not bypass identity,
-authority, directness, pairing, or conflict checks.
-This lets a recent primary role beat a stale `is_current` label while preventing a
-board page updated a few days later from displacing a current CEO. The compact
-taxonomy covers government office, executive/primary employment, academic, board,
-advisory, political-party, historical and other affiliations. Current government
-office outranks an equally current party/private affiliation; executive employment
-outranks an equally current board/advisory role. Both selected fields come from the
-same cluster. Historical roles remain alternatives. Equally current, same-type,
+Organisation and job title are ranked as relationship clusters. Explicit current
+evidence in a usable freshness band wins first, followed by relationship priority,
+primary national office, supported institution specificity, freshness/currentness,
+authority, observation date, completeness, evidence strength, and a stable signature.
+An explicitly current undated role receives full recency/currentness signals; this
+does not bypass identity, authority, directness, pairing, or conflict checks.
+The compact taxonomy covers government office, executive/primary employment,
+academic, board, advisory, political-party, historical and other affiliations.
+Current government office outranks a comparable party/private affiliation; primary
+employment outranks board/advisory work. Prime Minister is distinct from Head of the
+Prime Minister's Office. A specific grounded institution beats generic Government
+when the evidence supports the same current primary role. No institution is invented.
+
+Both selected fields come from the same cluster. Missing extraction group labels
+can be repaired only when one unambiguous organisation/title pair shares the same
+literal quote, person, source, and compatible dates. Different quotes or multiple
+competing roles cannot be spliced together. A final deterministic sanity check can
+replace a secondary winner with an already available, identity-secure, sufficiently
+strong current primary public-office relationship, retaining the entire pair.
+Historical and secondary roles remain alternatives. Equally current, same-priority,
 similarly supported relationships produce `CURRENT_ROLE_CONFLICT` instead of mixed
 fields. An exact seed country/location is excluded as an organisation and retained as
-alternative evidence; the reconciler never invents an office name.
+alternative evidence.
 Public residences and similarly named government buildings are excluded under the
 same rule when the paired title and government source identify them as places rather
 than employing organisations.
@@ -307,6 +338,12 @@ grounding, pairing, source-authority, and conflict rules.
 The representative link is derived after the other six fields for each record. For
 every eligible source, reconciliation counts distinct selected fields that source
 supports. Social and other source-policy exclusions cannot win or provide a fallback.
+Source identity must clear the existing identity minimum, and each contributing
+claim must clear the selected-value floor. Composite claim strength is not itself
+an identity score and is no longer compared against the identity threshold. A
+credible source supporting a reviewable selected field can therefore retain a link
+without pretending the field is high confidence. The immutable seed name contributes
+no web claim or link credit.
 If a directory-or-better source contributed, aggregator and unknown sources are
 excluded from winning. Remaining candidates are ordered by:
 
@@ -321,6 +358,15 @@ excluded from winning. Remaining candidates are ordered by:
 If only weak sources exist, the best deterministic fallback is returned with
 `LOW_SOURCE_AUTHORITY` review. Because education support is record-scoped, separate
 credentials can choose separate representative links. No extra model call is used.
+
+## Final display gate
+
+After reconciliation, and again at stored-result/export boundaries, all selected
+records pass through deterministic display normalization. `PM`, `Pm`, `pm`,
+`Prime minister`, and `PRIME MINISTER` become `Prime Minister`. Common title
+equivalents, English mappings, controlled degree names, and conservative casing
+apply consistently to the legacy projection and every education record. Raw input,
+claims, quoted evidence, URLs, confidence, review flags, and provenance are unchanged.
 
 ## Profile confidence and coverage
 

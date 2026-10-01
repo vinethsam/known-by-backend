@@ -16,7 +16,9 @@ from app.research.confidence import (
     claim_tie_key,
     confidence_for_group,
     profile_scores,
+    role_observation_date,
 )
+from app.research.decision_trace import log_decision
 from app.research.identity import effective_identity_scores, eligible_identity_source_ids
 from app.research.normalisation import (
     BACHELORS_DEGREE,
@@ -29,11 +31,13 @@ from app.research.normalisation import (
     POSTGRADUATE_DIPLOMA,
     RELATIONSHIP_PRIORITY,
     EducationKind,
+    PublicOfficeType,
     RelationshipType,
     classify_education,
     classify_public_office,
     classify_relationship,
     comparison_key,
+    finalize_display,
     is_non_organisation_place,
     is_probable_country_context,
     name_key,
@@ -76,7 +80,9 @@ class _EvidenceCluster:
 def _value_key(field_name: ProfileField, value: str) -> str:
     """Use conservative equivalence for grouping while preserving every raw value."""
 
-    key = comparison_key(value)
+    key = comparison_key(
+        normalise_display(field_name, value) if field_name == ProfileField.job_title else value
+    )
     if field_name != ProfileField.university_name:
         return key
     tokens = [token for token in key.split() if token not in {"the", "of"}]
@@ -367,6 +373,17 @@ def _education_clusters(
         )
     )
     clusters: list[_EvidenceCluster] = []
+
+    def trace_grouping(bundle: _FactBundle, reason: str, compatible_count: int) -> None:
+        log_decision(
+            "education_grouping",
+            person_id=bundle.claims[0].person_id,
+            source_id=bundle.source_id,
+            candidate={claim.field.value: claim.normalised_value for claim in bundle.claims},
+            compatible_credentials=compatible_count,
+            reason=reason,
+        )
+
     for bundle in bundles:
         compatible: list[tuple[int, _EvidenceCluster]] = []
         for cluster in clusters:
@@ -381,6 +398,7 @@ def _education_clusters(
             best_matches = [cluster for overlap, cluster in compatible if overlap == best_overlap]
             if len(best_matches) == 1:
                 best_matches[0].bundles.append(bundle)
+                trace_grouping(bundle, "merge_compatible_credential", 1)
             else:
                 # A generic institution/degree bundle that fits several proven
                 # credentials cannot be assigned to one campus or qualification by
@@ -389,9 +407,11 @@ def _education_clusters(
                 for cluster in best_matches:
                     cluster.ambiguous = True
                     cluster.alternatives.extend(bundle.claims)
+                trace_grouping(bundle, "ambiguous_between_credentials", len(best_matches))
             continue
         if not clusters or all(_definitely_distinct_education(bundle, cluster) for cluster in clusters):
             clusters.append(_EvidenceCluster(bundles=[bundle]))
+            trace_grouping(bundle, "first_or_positively_distinct_credential", 0)
             continue
 
         candidates = [cluster for cluster in clusters if not _definitely_distinct_education(bundle, cluster)]
@@ -418,10 +438,12 @@ def _education_clusters(
             # uncertain when institution and degree already identify one record.
             if conflicting_fields - {ProfileField.subject}:
                 target.ambiguous = True
+            trace_grouping(bundle, "merge_conflicting_descriptions_without_duplicate_degree", len(candidates))
         else:
             # Never splice unrelated, ungrouped education components together.
             target.ambiguous = True
             target.alternatives.extend(bundle.claims)
+            trace_grouping(bundle, "retain_unpaired_credential_alternative", len(candidates))
 
     def cluster_order(cluster: _EvidenceCluster) -> tuple[float, str]:
         strength = max(
@@ -430,22 +452,123 @@ def _education_clusters(
         )
         return -strength, _cluster_signature(cluster)
 
+    def shares_credential_context(bundle: _FactBundle, cluster: _EvidenceCluster) -> bool:
+        # Extractors can omit a fact_group while quoting the same credential for
+        # its separate components. An identical quote from the same page is a
+        # grounded relationship; merely sharing a page or section is not.
+        return any(
+            left.source_id == right.source_id
+            and bool(context := comparison_key(left.evidence_text))
+            and context == comparison_key(right.evidence_text)
+            and comparison_key(left.raw_value) in context
+            and comparison_key(right.raw_value) in context
+            for left in bundle.claims
+            for right in cluster.claims
+        )
+
+    def reliable_partial_institution(bundle: _FactBundle) -> bool:
+        for claim in bundle.claims:
+            if claim.field != ProfileField.university_name or claim.directness != "explicit":
+                continue
+            source = sources[claim.source_id]
+            strength, components = claim_strength(
+                claim, source, policy, today, effective_identities=identities
+            )
+            if (
+                source.authority_score >= policy.authority[SourceType.publication]
+                and components.get("identity", 0) >= policy.identity_review_threshold
+                and strength * 100 >= policy.review_threshold
+            ):
+                return True
+        return False
+
+    # Resolve institutions before subject-only fragments, so a directly grounded
+    # subject can attach to its partial education record regardless of input order.
+    orphan_bundles.sort(
+        key=lambda bundle: (
+            not any(claim.field == ProfileField.university_name for claim in bundle.claims),
+            -_bundle_strength(bundle, sources, policy, today, identities),
+            sources[bundle.source_id].canonical_url or sources[bundle.source_id].requested_url,
+            bundle.fact_group,
+        )
+    )
     orphans: list[EvidenceClaim] = []
     for bundle in orphan_bundles:
         compatible = [
             cluster
             for cluster in clusters
-            if (overlap_conflict := _overlap_and_conflict(bundle.claims, cluster.claims))[0]
-            and not overlap_conflict[1]
+            if not (overlap_conflict := _overlap_and_conflict(bundle.claims, cluster.claims))[1]
+            and (overlap_conflict[0] or shares_credential_context(bundle, cluster))
         ]
         if len(compatible) == 1:
-            # A fragment may corroborate one already-proven credential, but it may
-            # never seed a credential or be guessed onto several possible records.
             compatible[0].bundles.append(bundle)
+            action = "attach_partial_to_unique_credential"
+        elif not clusters and reliable_partial_institution(bundle):
+            # A reliable university is useful even when no degree is reported.
+            # Keep unknown fields null; this does not assert a qualification.
+            clusters.append(_EvidenceCluster(bundles=[bundle]))
+            action = "retain_reliable_partial_institution"
         else:
             orphans.extend(bundle.claims)
+            action = "retain_ambiguous_or_weak_fragment_as_alternative"
+        log_decision(
+            "education_partial",
+            person_id=bundle.claims[0].person_id,
+            fields=sorted({claim.field.value for claim in bundle.claims}),
+            source_id=bundle.source_id,
+            compatible_credentials=len(compatible),
+            reason=action,
+        )
 
+    log_decision(
+        "education",
+        person_id=claims[0].person_id if claims else "",
+        candidate_bundles=len(bundles) + len(orphan_bundles),
+        credential_count=len(clusters),
+        merged_bundles=sum(max(0, len(cluster.bundles) - 1) for cluster in clusters),
+        ambiguous_credentials=sum(cluster.ambiguous for cluster in clusters),
+        non_degree_claims=len(excluded),
+        orphan_alternatives=len(orphans),
+    )
     return sorted(clusters, key=cluster_order), _unique_claims(excluded), _unique_claims(orphans)
+
+
+def _employment_bundles(claims: list[EvidenceClaim]) -> list[_FactBundle]:
+    """Recover an explicit quoted pair when only the model's group label is absent.
+
+    Different sentences, subjects, source pages or ambiguous multi-role quotes must
+    never be joined. The original claims and optional fact_group remain untouched.
+    """
+    bundles = _build_bundles(claims, VOLATILE_FIELDS)
+    ungrouped: dict[tuple, list[_FactBundle]] = defaultdict(list)
+    for bundle in bundles:
+        claim = bundle.claims[0]
+        if not bundle.explicitly_grouped and claim.directness == "explicit":
+            ungrouped[
+                (
+                    claim.source_id,
+                    name_key(claim.subject_name),
+                    comparison_key(claim.evidence_text),
+                    claim.is_current is False,
+                    claim.end_date,
+                )
+            ].append(bundle)
+    replaced: set[str] = set()
+    inferred = []
+    for (_, _, quote, _, _), items in ungrouped.items():
+        paired = [claim for bundle in items for claim in bundle.claims]
+        values = _values(paired)
+        if set(values) != VOLATILE_FIELDS or any(len(values[field]) != 1 for field in VOLATILE_FIELDS):
+            continue
+        if len({claim.as_of_date for claim in paired if claim.as_of_date}) > 1:
+            continue
+        if not all(f" {comparison_key(claim.raw_value)} " in f" {quote} " for claim in paired):
+            continue
+        inferred.append(_FactBundle(items[0].source_id, items[0].fact_group, paired, True))
+        replaced.update(f"{bundle.source_id}:{bundle.fact_group}" for bundle in items)
+    return [
+        bundle for bundle in bundles if f"{bundle.source_id}:{bundle.fact_group}" not in replaced
+    ] + inferred
 
 
 def _employment_clusters(claims: list[EvidenceClaim]) -> list[_EvidenceCluster]:
@@ -455,7 +578,7 @@ def _employment_clusters(claims: list[EvidenceClaim]) -> list[_EvidenceCluster]:
         if claim.field in VOLATILE_FIELDS and claim.is_current is not False and claim.end_date is None
     ]
     clusters: list[_EvidenceCluster] = []
-    for bundle in _build_bundles(active, VOLATILE_FIELDS):
+    for bundle in _employment_bundles(active):
         compatible: list[tuple[int, _EvidenceCluster]] = []
         for cluster in clusters:
             overlap, conflict = _overlap_and_conflict(bundle.claims, cluster.claims)
@@ -472,7 +595,8 @@ def _employment_clusters(claims: list[EvidenceClaim]) -> list[_EvidenceCluster]:
 def _relation_fields_by_claim(claims: list[EvidenceClaim]) -> dict[str, set[ProfileField]]:
     result: dict[str, set[ProfileField]] = {}
     for fields in (EDUCATION_FIELDS, VOLATILE_FIELDS):
-        for bundle in _build_bundles(claims, fields):
+        bundles = _employment_bundles(claims) if fields == VOLATILE_FIELDS else _build_bundles(claims, fields)
+        for bundle in bundles:
             related = {claim.field for claim in bundle.claims}
             for claim in bundle.claims:
                 result[claim.claim_id] = related
@@ -698,19 +822,18 @@ def _employment_decisions(
     geography_keys = {
         comparison_key(value) for value in (seed.country, seed.location) if value and comparison_key(value)
     }
+    paired_titles_by_claim = {
+        claim.claim_id: [item.raw_value for item in bundle.claims if item.field == ProfileField.job_title]
+        for bundle in _employment_bundles(claims)
+        for claim in bundle.claims
+    }
 
     def invalid_organisation(claim: EvidenceClaim) -> bool:
         if claim.field != ProfileField.organisation:
             return False
         if comparison_key(claim.raw_value) in geography_keys:
             return True
-        paired_titles = [
-            item.raw_value
-            for item in claims
-            if item.field == ProfileField.job_title
-            and item.source_id == claim.source_id
-            and item.fact_group == claim.fact_group
-        ]
+        paired_titles = paired_titles_by_claim.get(claim.claim_id, [])
         paired_title = " ".join(paired_titles) or None
         source_types = {sources[claim.source_id].source_type}
         if is_probable_country_context(
@@ -762,7 +885,11 @@ def _employment_decisions(
             claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation
         )
         titles = " ".join(
-            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.job_title
+            dict.fromkeys(
+                normalise_display(ProfileField.job_title, claim.raw_value)
+                for claim in cluster.claims
+                if claim.field == ProfileField.job_title
+            )
         )
         return classify_relationship(
             organisations or None,
@@ -775,7 +902,11 @@ def _employment_decisions(
             claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation
         )
         titles = " ".join(
-            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.job_title
+            dict.fromkeys(
+                normalise_display(ProfileField.job_title, claim.raw_value)
+                for claim in cluster.claims
+                if claim.field == ProfileField.job_title
+            )
         )
         return classify_public_office(
             organisations or None,
@@ -783,14 +914,20 @@ def _employment_decisions(
             source_types={sources[claim.source_id].source_type for claim in cluster.claims},
         )
 
-    def rank(cluster: _EvidenceCluster) -> tuple[int, int, int, float, int, int, float]:
+    def institution_specificity(cluster: _EvidenceCluster) -> int:
+        values = [claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation]
+        generic = {"government", "state", "public sector", "administration", "ministry", "office", "cabinet"}
+        return int(any(comparison_key(value).removeprefix("the ") not in generic for value in values))
+
+    rank_cache: dict[int, tuple] = {}
+
+    def rank(cluster: _EvidenceCluster) -> tuple:
+        if id(cluster) in rank_cache:
+            return rank_cache[id(cluster)]
         cluster_claims = cluster.claims
         explicitly_current = int(any(claim.is_current is True for claim in cluster_claims))
         observed = max(
-            (
-                claim.as_of_date or sources[claim.source_id].published_at or date.min
-                for claim in cluster_claims
-            ),
+            (role_observation_date(claim, sources[claim.source_id]) or date.min for claim in cluster_claims),
             default=date.min,
         )
         reference_date = today or utcnow().date()
@@ -808,6 +945,13 @@ def _employment_decisions(
                 freshness = 1
         completeness = len({claim.field for claim in cluster_claims} & VOLATILE_FIELDS)
         relationship_priority = RELATIONSHIP_PRIORITY[relationship_type(cluster)]
+        primary_office = int(
+            public_office_type(cluster)
+            in {
+                PublicOfficeType.head_of_government,
+                PublicOfficeType.head_of_state,
+            }
+        )
         authority = max(sources[claim.source_id].authority_score for claim in cluster_claims)
         strength = max(
             claim_strength(
@@ -820,32 +964,92 @@ def _employment_decisions(
             )[0]
             for claim in cluster_claims
         )
-        return (
-            freshness,
+        ranked = (
+            int(bool(explicitly_current) and freshness >= 3),
             relationship_priority,
+            primary_office,
+            institution_specificity(cluster),
+            freshness,
             explicitly_current,
             authority,
             observed.toordinal(),
             completeness,
             strength,
         )
+        rank_cache[id(cluster)] = ranked
+        return ranked
 
     clusters.sort(
         key=lambda cluster: tuple(-value for value in rank(cluster)) + (_cluster_signature(cluster),)
     )
     selected = clusters[0]
     selected_rank = rank(selected)
+    # Final sanity gate reuses grounded pairs and evidence strength. A generic or
+    # secondary winner cannot displace a secure current primary office; no values
+    # are fabricated or combined across candidate relationships.
+    primary_candidates = [
+        cluster
+        for cluster in clusters
+        if rank(cluster)[0]
+        and rank(cluster)[2]
+        and rank(cluster)[-1] >= policy.review_threshold / 100
+        and all(
+            identities.get(claim.source_id, sources[claim.source_id].identity.score)
+            >= policy.identity_review_threshold
+            for claim in cluster.claims
+        )
+    ]
+    sanity_reason = None
+    if primary_candidates and not selected_rank[2]:
+        selected = min(
+            primary_candidates,
+            key=lambda cluster: tuple(-value for value in rank(cluster)) + (_cluster_signature(cluster),),
+        )
+        selected_rank = rank(selected)
+        sanity_reason = "secure_current_primary_office"
     unresolved: list[_EvidenceCluster] = []
-    alternatives = list(clusters[1:])
-    for cluster in clusters[1:]:
+    alternatives = [cluster for cluster in clusters if cluster is not selected]
+    for cluster in alternatives:
         candidate_rank = rank(cluster)
-        same_current_state = candidate_rank[:3] == selected_rank[:3]
+        same_current_state = candidate_rank[:6] == selected_rank[:6]
         same_observation = (
-            candidate_rank[4] == selected_rank[4] == date.min.toordinal()
-            or abs(candidate_rank[4] - selected_rank[4]) <= 30
-        ) and abs(candidate_rank[6] - selected_rank[6]) <= 0.1
+            candidate_rank[7] == selected_rank[7] == date.min.toordinal()
+            or abs(candidate_rank[7] - selected_rank[7]) <= 30
+        ) and abs(candidate_rank[-1] - selected_rank[-1]) <= 0.1
         if same_current_state and same_observation:
             unresolved.append(cluster)
+
+    def describe(cluster):
+        scores = rank(cluster)
+        return {
+            "values": sorted({claim.raw_value for claim in cluster.claims}),
+            "currentness": scores[0],
+            "relationship": relationship_type(cluster).value,
+            "primary_office": scores[2],
+            "specific_institution": scores[3],
+            "freshness": scores[4],
+            "authority": scores[6],
+            "score": scores[-1],
+            "directness": sorted({claim.directness for claim in cluster.claims}),
+            "components": claim_strength(
+                cluster.claims[0],
+                sources[cluster.claims[0].source_id],
+                policy,
+                today,
+                effective_identities=identities,
+                field_quality=qualities.get(cluster.claims[0].claim_id, 1),
+            )[1],
+        }
+
+    log_decision(
+        "current_role",
+        person_id=claims[0].person_id,
+        winner=describe(selected),
+        runner_up=describe(alternatives[0]) if alternatives else None,
+        reason=sanity_reason or "current_primary_specific_relationship_then_freshness_and_evidence",
+        competing_current_relationships=len(unresolved),
+        historical_claims=len(historical),
+    )
 
     decisions = {}
     for field_name in sorted(VOLATILE_FIELDS, key=lambda value: value.value):
@@ -913,7 +1117,11 @@ def _representative_link(
                 effective_identities=identities,
                 field_quality=qualities.get(claim.claim_id, 1),
             )[0]
-            if strength < policy.identity_minimum:
+            identity = max(
+                min(sources[claim.source_id].identity.score, claim.identity_relevance),
+                identities.get(claim.source_id, 0),
+            )
+            if identity < policy.identity_minimum or strength < policy.selection_threshold / 100:
                 continue
             existing = per_source_fields[claim.source_id].get(field_name)
             if (
@@ -955,6 +1163,12 @@ def _representative_link(
             )
         )
     if not candidates:
+        log_decision(
+            "profile_link",
+            person_id=claims[0].person_id if claims else "",
+            reason="no_eligible_selected_field_contribution",
+            result=None,
+        )
         return FieldDecision(review_reason_codes=["MISSING_FIELD"], review_required=False)
 
     # Quantity is meaningful only among reasonably reliable sources. If at least
@@ -980,6 +1194,22 @@ def _representative_link(
         )
     )
     source_id, url, count, total, authority, directness, identity, recency, contributed = ranked[0]
+    log_decision(
+        "profile_link",
+        person_id=claims[0].person_id if claims else "",
+        result=url,
+        candidates=[
+            {
+                "url": item[1],
+                "contributions": item[2],
+                "authority": item[4],
+                "identity": item[6],
+                "strength": item[3],
+            }
+            for item in ranked
+        ],
+        reason="eligible_selected_contributions_and_source_authority",
+    )
     supporting = sorted(
         (claim for _, claim in contributed.values()),
         key=lambda claim: claim_tie_key(claim, sources),
@@ -1157,6 +1387,14 @@ def reconcile(
         and not sources[claim.source_id].identity.rejected
         and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
     ]
+    unconfirmed = [
+        claim
+        for claim in claims
+        if claim.source_id in sources
+        and claim.source_id not in eligible_source_ids
+        and not sources[claim.source_id].identity.rejected
+        and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
+    ]
     identities = effective_identity_scores(accepted, sources, policy, seed=seed)
     relation_fields = _relation_fields_by_claim(accepted)
     quality_pairs = {claim.claim_id: _quality_for_claim(claim, seed, relation_fields) for claim in accepted}
@@ -1244,6 +1482,18 @@ def reconcile(
         fields[ProfileField.profile_link] = _representative_link(
             fields, accepted, sources, policy, today, identities, qualities
         )
+        if scope_index == 0:
+            for field_name, decision in fields.items():
+                if field_name == ProfileField.full_name:
+                    continue
+                retained = [claim.claim_id for claim in unconfirmed if claim.field == field_name]
+                if retained:
+                    decision.alternative_claim_ids = list(
+                        dict.fromkeys([*decision.alternative_claim_ids, *retained])
+                    )
+                    decision.review_reason_codes = list(
+                        dict.fromkeys([*decision.review_reason_codes, "IDENTITY_CONTEXT_UNCONFIRMED"])
+                    )
         profile_confidence, coverage = profile_scores(fields, policy)
         review, record_reasons = _record_review(fields, policy, web_identity)
         records.append(
@@ -1288,22 +1538,24 @@ def reconcile(
                 ]
             )
         )
-    return PersonProfile(
-        person_id=person_id,
-        input_name=seed.full_name,
-        fields=legacy_fields,
-        profile_confidence=primary.profile_confidence,
-        coverage=primary.coverage,
-        review_required=overall_review,
-        status=PersonStatus.review_required if overall_review else PersonStatus.completed,
-        sources_considered=len(source_records),
-        sources_used=len(
-            {
-                source_id
-                for record in records
-                for decision in record.fields.values()
-                for source_id in decision.supporting_source_ids
-            }
-        ),
-        records=records,
+    return finalize_display(
+        PersonProfile(
+            person_id=person_id,
+            input_name=seed.full_name,
+            fields=legacy_fields,
+            profile_confidence=primary.profile_confidence,
+            coverage=primary.coverage,
+            review_required=overall_review,
+            status=PersonStatus.review_required if overall_review else PersonStatus.completed,
+            sources_considered=len(source_records),
+            sources_used=len(
+                {
+                    source_id
+                    for record in records
+                    for decision in record.fields.values()
+                    for source_id in decision.supporting_source_ids
+                }
+            ),
+            records=records,
+        )
     )

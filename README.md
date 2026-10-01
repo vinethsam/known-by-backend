@@ -81,9 +81,11 @@ remain separate retry/research failures with their specific error codes.
   Credentials split only with positive evidence such as different degree levels,
   qualification labels, dates, or materially distinct institutions. Institution
   location suffixes and alternate subject wording remain grouped when they do not
-  prove another qualification. University-only, subject-only, vague qualifications,
-  certifications, honorary awards, ongoing study, postdoctoral work, and training stay
-  in the evidence ledger without becoming earned-degree rows.
+  prove another qualification. Reliable university-only evidence can remain a partial
+  record with no invented degree; compatible quoted context can attach partial facts
+  to one credential. Weak or ambiguous fragments, subject-only evidence, vague
+  qualifications, certifications, honorary awards, ongoing study, postdoctoral work,
+  and training stay in the evidence ledger without becoming invented earned-degree rows.
 - Small exact-phrase mappings render familiar Spanish, French, and Portuguese titles,
   subjects, and institutional terms in English. Display casing preserves recognized
   acronyms, name particles, and internal capitals. Unknown proper names retain their
@@ -113,6 +115,9 @@ remain separate retry/research failures with their specific error codes.
 
 Trial runs use the production pipeline and settings. No dataset or sample-source
 allowlist restricts discovery. Automated tests replace external calls with fixtures.
+The [quality recovery record](docs/quality-recovery.md) documents evidence-selection
+regressions and their offline golden fixtures. Compact decision summaries appear at
+INFO; DEBUG adds selection reasons that remain readable in plaintext Railway exports.
 
 ## Backend structure
 
@@ -279,6 +284,12 @@ ambiguity error; a missing-name error lists the observed headers. The optional l
 `name_column` form field remains available as an explicit override.
 
 ## Status and limitations
+
+Status and result responses include `status_label`. A terminal job with successful
+and failed records keeps its compatible `partial` code and displays **Completed with
+issues**; completed records and progress counts remain available. See the
+[quality recovery report](docs/quality-recovery.md) for the historical comparison,
+golden outcomes, confidence changes, and internal decision logs.
 
 Confidence is an evidence heuristic, not a calibrated probability; ambiguous identity
 and conflicting facts require review. Public source availability and coverage vary.

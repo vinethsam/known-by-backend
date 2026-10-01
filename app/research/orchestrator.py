@@ -18,6 +18,7 @@ from app.providers.source_advisor import SourceAdvisor
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
 from app.research.concurrency import Outcome, ordered_window
+from app.research.decision_trace import log_result_decisions
 from app.research.discovery import (
     build_fallback_queries,
     build_queries,
@@ -112,6 +113,7 @@ class ResearchOrchestrator:
         seen_urls, seen_hashes, queries_done, discovered_urls = set(), set(), set(), set()
         validated_candidates, pending_candidates = {}, {}
         rejected_urls = set()
+        trace_candidate_urls, trace_rejected_urls = set(), set()
         no_new_claims = 0
         citation_count = 0
         eligible_candidate_count = 0
@@ -318,6 +320,15 @@ class ResearchOrchestrator:
         async def validate_and_process(candidates, preloaded=None, limit=None):
             nonlocal eligible_candidate_count, candidates_filtered_empty
             supplied_count = len(candidates)
+            # Trace unique candidate dispositions without changing discovery metrics or budgets.
+            for candidate in candidates:
+                try:
+                    trace_url = canonicalise_url(candidate.url)
+                except ValueError:
+                    trace_url = candidate.url
+                trace_candidate_urls.add(trace_url)
+                if not source_policy_allows(candidate.url, source_type=candidate.source_type):
+                    trace_rejected_urls.add(trace_url)
             for url in set(pending_candidates) & (seen_urls | rejected_urls):
                 pending_candidates.pop(url, None)
             candidates = [
@@ -818,4 +829,23 @@ class ResearchOrchestrator:
                 metrics.stop_reason = "NO_ELIGIBLE_CANDIDATES"
         metrics.error_codes = sorted(set(metrics.error_codes))
         await save()
-        return result()
+        final = result()
+        rejected = (
+            trace_rejected_urls
+            | rejected_urls
+            | {
+                source.requested_url
+                for source in sources
+                if source.processing_status in {"failed", "identity_rejected", "duplicate"}
+            }
+        )
+        log_result_decisions(
+            seed,
+            final,
+            job_id=job_id,
+            candidate_count=len(trace_candidate_urls),
+            rejected_source_count=len(rejected),
+            source_records=sources,
+            policy=settings.SCORING,
+        )
+        return final

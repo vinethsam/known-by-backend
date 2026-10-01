@@ -252,7 +252,7 @@ def test_clearly_distinct_degree_levels_remain_separate_credentials():
     }
 
 
-def test_university_only_fragment_does_not_create_an_education_record():
+def test_reliable_university_only_evidence_preserves_partial_education():
     profile = profile_for(
         [
             claim(
@@ -266,12 +266,6 @@ def test_university_only_fragment_does_not_create_an_education_record():
 
     assert len(profile.records) == 1
     record = profile.records[0]
-    assert record.record_id == "general"
-    assert all(
-        record.fields[field].value is None
-        for field in {
-            ProfileField.university_name,
-            ProfileField.degree_type,
-            ProfileField.subject,
-        }
-    )
+    assert record.fields[ProfileField.university_name].value == "University of Example"
+    assert record.fields[ProfileField.degree_type].value is None
+    assert record.fields[ProfileField.subject].value is None

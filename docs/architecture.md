@@ -224,6 +224,12 @@ names keep their grounded wording. Conservative casing preserves recognized acro
 name particles, apostrophes, hyphens, Roman numerals, and deliberate internal capitals.
 These presentation rules leave raw seed text, claim values, evidence excerpts, source
 titles, and URLs intact and do not add a translation service or model call.
+The same deterministic gate runs after final reconciliation and at stored-result and
+export boundaries, including every education record. Current-role selection keeps
+organisation/title pairs together, prefers supported primary offices over secondary
+affiliations, and does not use a biography's creation date to age an explicit current
+statement. Name-only provisional sources must pass an institution-context coherence
+check before they can form a combined profile. See [quality recovery](quality-recovery.md).
 
 Source/advisor prompts treat non-name seed fields as unverified hypotheses and allow
 newer retrieved evidence to disagree with them. Passive source-list metadata is
@@ -305,6 +311,13 @@ attempt, including persistence and final status work at the worker boundary. It 
 no telemetry table or tiny per-stage writes and leaves result contracts unchanged.
 See [performance measurement](performance.md) for timing/counter definitions and
 the offline benchmark harness.
+
+`app/research/decision_trace.py` adds a bounded final INFO summary and opt-in DEBUG
+selection explanations. Details and person/job correlation IDs appear in textual
+messages as well as structured metadata for Railway log exports. No evidence blobs,
+prompts, additional database writes, or model requests are introduced. Status/results
+responses expose the additive `status_label`; the terminal `partial` code displays
+as `Completed with issues` while persisted states and completed records stay intact.
 
 The existing `/process` contract and root `main:app` entrypoint remain supported.
 Settings use uppercase attributes; credentials are `SecretStr` values and must never
