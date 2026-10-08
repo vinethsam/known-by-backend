@@ -128,6 +128,14 @@ government-office, and other strong institutional clues can provide anchors.
 Alumni/former affiliations remain supporting historical identity clues, and job title
 is the fallback when no stronger anchor is present.
 
+If no retrieved source repeats a seeded anchor, the anchor remains a hypothesis rather
+than an absolute veto. Exactly one cluster may become eligible when at least two
+independent, non-mirrored, directory-or-better sources explicitly identify the same
+specific current organisation for the named person. Multiple corroborated clusters,
+generic institutions, historical/alumni affiliations, weak identity, or a lone source
+remain provisional. This narrow fallback salvages a verified corrective affiliation
+without merging disconnected namesakes.
+
 Every source selected in the current bounded discovery round is consumed before a
 target-confidence stop. This allows corroboration and additional credentials without
 changing the concurrent fetch window, extraction semaphore, budgets or source caps.
@@ -155,9 +163,9 @@ are canonicalized and deduplicated, and URLs that fail safety checks never becom
 candidates. Ordinary assistant content is never parsed for URLs. If no citations are
 available, or filtering or advisor selection leaves no source, orchestration records
 `NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES` and returns
-a completed zero-coverage profile with `research_status=insufficient_evidence` and
-explicit missing fields. These expected empty states are neither human-review items nor
-infrastructure-level failed jobs. An empty first query may use deterministic clue-relaxing
+a failed zero-coverage result with `research_status=insufficient_evidence` and explicit
+missing fields. These expected empty states are distinct from infrastructure/provider
+failures and from human review. An empty first query may use deterministic clue-relaxing
 fallbacks, always within the existing hard budgets. If selected sources all fail or
 produce no identity-eligible grounded claims, one deterministic recovery queue uses
 the same clue-based queries. Seen URLs remain excluded, and the existing query,
@@ -194,6 +202,15 @@ generic result. Structured logs repeat that code with job, person, pipeline stag
 model, and the safe attempt fields above. Discovery/advisor boundaries also log
 candidate, citation, and selected-source counts. Credentials, authorization headers,
 secrets, and raw model response bodies are never included.
+
+Source, claim, and field failures remain local. Successfully grounded claims accumulate
+across discovery and recovery rounds; later failures never reset that ledger. A person
+with any selected enrichment succeeds, using `partial_coverage` when coverage is below
+100 and `needs_review` only for evidence that actually needs inspection. A zero-coverage
+person fails with the closest terminal reason. `RETRIEVAL_FAILED` is reserved for an
+attempt where no source was successfully retrieved; later grounding, identity, and
+selection failures retain their own reasons. `MAX_SOURCES` is a stop reason, not an
+outcome, and does not invalidate usable evidence.
 
 The extraction role receives bounded processed text and returns schema-validated
 claims with literal evidence. Deterministic grounding and identity checks run before

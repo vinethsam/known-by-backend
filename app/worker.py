@@ -17,7 +17,7 @@ from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
 from app.research.telemetry import person_performance, stage
 from app.retrieval.service import RetrievalService
-from app.schemas import utcnow
+from app.schemas import PersonStatus, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +75,16 @@ async def _process_lease(store, orchestrator, lease, settings):
     async def work():
         async with asyncio.timeout(settings.PERSON_TIMEOUT_SECONDS):
             result = await orchestrator.research(lease.job_id, lease.person_id, lease.seed, checkpoint)
-        fatal_error = terminal_research_error(result.profile.metrics.error_codes)
-        if result.profile.coverage == 0 and fatal_error:
-            await persist(store.fail_task, lease, fatal_error)
+        if result.profile.coverage == 0:
+            failure_reason = (
+                result.profile.metrics.failure_reason
+                or terminal_research_error(result.profile.metrics.error_codes)
+                or "INSUFFICIENT_EVIDENCE"
+            )
+            result.profile.status = PersonStatus.failed
+            for record in result.profile.records:
+                record.status = PersonStatus.failed
+            await persist(store.fail_task, lease, failure_reason, result)
         else:
             await persist(store.finish_task, lease, result)
 

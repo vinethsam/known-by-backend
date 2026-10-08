@@ -90,8 +90,8 @@ is not automatically current. Specific known attributes can also be anchors when
 labels and values identify the person; country, location, subject, and year remain
 supporting clues. If no stronger anchor is supplied, job title is the fallback.
 
-When a seed has an anchor, at least one source must match it before that source's claims
-may populate final fields. Missing anchor text is provisional rather than contradictory:
+When a seed has an anchor, a direct or bridged match is the normal route before that
+source's claims may populate final fields. Missing anchor text is provisional rather than contradictory:
 the page may still be extracted and retained, but it cannot win a field by agreeing
 with other unanchored namesakes. An explicit denial of a seeded affiliation is recorded
 as a contradiction and keeps the source provisional; it does not reject the source at
@@ -104,6 +104,14 @@ Retrieved corroboration strengthens identity through the normal score. When newe
 reliable web evidence establishes another current employer, that evidence can win
 current-role selection; the seeded employer remains a research clue and is not emitted
 as a current or historical fact without its own evidence.
+
+If no source matches the seed anchor, exactly one independently corroborated corrective
+cluster can become eligible. It requires at least two non-mirrored domains at
+directory-or-better authority, secure identity, and the same explicit, specific,
+currently asserted organisation. Alumni/history claims, generic organisations, a
+single source, or multiple competing clusters cannot use this fallback. The rule keeps
+the seed as a hypothesis while preventing a stale clue from discarding otherwise
+coherent current evidence.
 
 Name-only research can strengthen identity after extraction. An explicit normalized
 organisation, title, university, degree or subject must agree on another independent
@@ -132,8 +140,10 @@ score, or the identity score used for unrelated facts.
 ## Claim eligibility and field quality
 
 Every model claim must be literal in the supplied source chunk, contain its raw value,
-name the seeded person, and use grounded dates. Raw values and excerpts remain in the
-claim ledger. Deterministic normalization handles Unicode, punctuation, conservative
+and name the seeded person. Unsupported `as_of_date` or `end_date` metadata is removed
+from an otherwise grounded claim; it does not reject the value, its source siblings, or
+the person. Other ungrounded values and evidence spans remain rejected claim by claim.
+Raw values and excerpts remain in the claim ledger. Deterministic normalization handles Unicode, punctuation, conservative
 organisation suffixes, subject aliases and common degree forms. Selected degree output
 uses `Bachelor's Degree`, `Master's Degree`, `Doctoral Degree`, `Medical Degree`,
 `Law Degree`, `Diploma`, `Postgraduate Diploma`, or `Postgraduate Degree`; common
@@ -235,9 +245,10 @@ at least two populated critical fields below the review threshold. The guarantee
 name is excluded from these research-quality checks.
 One weak optional subject, a suppressed optional subject, one fetch failure, a weak
 non-material conflict, or incomplete coverage does not escalate the record.
-Zero-coverage discovery outcomes use `research_status=insufficient_evidence`;
-provider/retrieval errors remain retry/research failures, while clean and reviewable
-profiles use `clean` and `needs_review` respectively.
+Usable incomplete profiles use `research_status=partial_coverage` unless their evidence
+needs review. Zero-coverage evidence outcomes use `insufficient_evidence`; technical
+provider/extraction or genuine retrieval errors use `retryable_research_failure`.
+`needs_review` remains separate from failure, and full usable profiles use `clean`.
 
 ## Education records
 

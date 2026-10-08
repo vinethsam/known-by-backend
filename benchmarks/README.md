@@ -211,3 +211,24 @@ deterministic selection checks and bounded logging do not add provider cost.
 Compact counts, timings, and hashes are checked in at
 [`quality-recovery.json`](quality-recovery.json). Full result bodies are omitted to
 avoid duplicating large synthetic profiles. No live requests were made.
+
+## Partial-failure salvage measurement
+
+On 2026-10-08 the production offline harness compared an isolated `git archive` of
+`cb210c6` with the partial-failure salvage implementation. Both runs used fixture
+version 1, normalization version 6, the same virtual environment, production limits,
+and 2 ms mocked HTTP latency. All normalized result hashes match.
+
+| People | Before (s) | After (s) | SQL, both | Model attempts, both | Searches, both | Extractions, both |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.552 | 0.410 | 173 | 4 | 1 | 2 |
+| 5 | 1.955 | 1.576 | 749 | 20 | 5 | 10 |
+| 25 | 9.238 | 7.607 | 3,629 | 100 | 25 | 50 |
+| 100 | 61.037 | 60.612 | 25,028 | 800 | 100 | 600 |
+
+Every batch retains two physical fetches, six completed-result SELECTs, and cache hit
+rates of 0%, 80%, 96%, and 99%. The implementation adds no search, source, model,
+extraction, Playwright, or token work. Local elapsed measurements are single non-gating
+samples and do not establish a general speedup. Compact counts and matching hashes are
+checked in at [`partial-failure-salvage.json`](partial-failure-salvage.json). No live
+request was made.

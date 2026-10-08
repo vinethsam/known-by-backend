@@ -176,6 +176,11 @@ accurate task counts retained. This is an additive response field, not a databas
 status migration or CSV/XLSX column. No table or migration was added; the existing
 head remains `202609290001`. Shared Library retention and authorization are unchanged.
 
+The later [partial-failure salvage pass](partial-failure-salvage.md) adds terminal
+attempted/successful/unsuccessful counts, treats zero-coverage people as unsuccessful,
+and keeps usable incomplete profiles successful. It does not change the compatibility
+job code or this historical recovery result.
+
 ## Validation and performance
 
 On 2026-10-01 the full offline suite passed **730 tests**, with six PostgreSQL runtime

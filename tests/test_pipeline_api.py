@@ -209,14 +209,19 @@ def fake_services(
                 ]
             }
         else:
-            mapping = extraction_mapping or {
-                "full_name": "Jane Doe",
-                "organisation": "Example Foundation",
-                "job_title": "Programme Director",
-                "university_name": "Example University",
-                "degree_type": "BSc",
-                "subject": "Economics",
-            }
+            mapping = (
+                extraction_mapping(data)
+                if callable(extraction_mapping)
+                else extraction_mapping
+                or {
+                    "full_name": "Jane Doe",
+                    "organisation": "Example Foundation",
+                    "job_title": "Programme Director",
+                    "university_name": "Example University",
+                    "degree_type": "BSc",
+                    "subject": "Economics",
+                }
+            )
             answer = {
                 "claims": [
                     {
@@ -330,8 +335,8 @@ async def test_no_usable_search_citations_finish_as_insufficient_evidence(
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "completed"
-    assert person.error_code is None
+    assert person.status == "failed"
+    assert person.error_code == "INSUFFICIENT_EVIDENCE"
     assert person.result is not None
     assert person.result.profile.coverage == 0
     assert person.result.profile.research_status == "insufficient_evidence"
@@ -560,8 +565,8 @@ async def test_all_unrelated_candidates_finish_without_retrieval(tmp_path, monke
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "completed"
-    assert person.error_code is None
+    assert person.status == "failed"
+    assert person.error_code == "INSUFFICIENT_EVIDENCE"
     assert person.result is not None
     assert person.result.profile.research_status == "insufficient_evidence"
     assert person.result.profile.metrics.error_codes == []
@@ -584,8 +589,8 @@ async def test_candidates_empty_after_filtering_finish_without_advisor(tmp_path,
     await process_lease(store, pipeline, store.claim_task("worker"), settings)
 
     person = store.get_results(job.job_id).people[0]
-    assert person.status == "completed"
-    assert person.error_code is None
+    assert person.status == "failed"
+    assert person.error_code == "INSUFFICIENT_EVIDENCE"
     assert person.result is not None
     assert person.result.profile.metrics.stop_reason == "NO_ELIGIBLE_CANDIDATES"
     assert person.result.profile.research_status == "insufficient_evidence"

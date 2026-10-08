@@ -1,6 +1,6 @@
 # Validation record
 
-Validated locally after the regression recovery pass on **2026-10-01**, Windows,
+Validated locally after the partial-failure salvage pass on **2026-10-08**, Windows,
 Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
 queue, worker, providers, and settings; fixtures replace external network responses
 without a second research pipeline or paid provider calls.
@@ -9,9 +9,9 @@ without a second research pipeline or paid provider calls.
 
 | Check | Result |
 | --- | --- |
-| Final full test suite | **730 passed, 6 skipped, 2 warnings** in **29.38 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
+| Final full test suite | **739 passed, 6 skipped, 2 warnings** in **32.99 seconds**; PostgreSQL integration requires `TEST_POSTGRES_URL` |
 | Frozen golden panel | **14 passed** across all ten requested people; the same panel at `359202a` passed 2 and failed 12 |
-| Focused checks | Final database/migration, decision-trace, and education check: **34 passed**; identity, confidence, role, normalization, export, and outcome cases also pass in the full suite |
+| Focused checks | Partial-failure, pipeline, decision-trace, and job-outcome set: **47 passed**; identity, confidence, role, normalization, export, persistence, and recovery cases also pass in the full suite |
 | Offline production-pipeline benchmark | 1, 5, 25, and 100 people with mocked HTTP; before/after search, model, extraction, SQL, cache, and result-read counts unchanged |
 | Ruff lint | `ruff check .` passed |
 | Ruff formatting | All Python files formatted |
@@ -21,6 +21,22 @@ without a second research pipeline or paid provider calls.
 
 Two upstream deprecation warnings concern Starlette's TestClient transport and its
 AnyIO portal alias. Neither failed a test. No paid provider requests were made.
+
+## Partial-failure salvage coverage
+
+The [salvage report](partial-failure-salvage.md) records the failure scope, selection
+gate, outcome taxonomy, decision trace, and benchmark. Deterministic fixtures cover
+three failed plus three successful sources, ten mixed claims, `MAX_SOURCES`, unsupported
+dates, mixed valid/invalid fields, failed recovery after valid evidence, true retrieval
+failure, grounding failure, identity failure, and disconnected namesakes. A partial
+source failure now reduces only the affected coverage. Zero-coverage records are failed
+with the stage that prevented selection; they are not returned as ordinary completed
+profiles or represented through `review_required`.
+
+The 1/5/25/100-person before/after benchmark produced identical normalized result hashes
+and unchanged provider/database work counts. No search, source, model, extraction,
+browser, or token budget changed. Compact results are in
+[`partial-failure-salvage.json`](../benchmarks/partial-failure-salvage.json).
 
 ## Regression recovery coverage
 
@@ -123,15 +139,15 @@ and orchestration path with network responses replaced locally. They cover:
 | Case | Expected contract |
 | --- | --- |
 | Valid `url_citation` | Canonical citation URLs become source candidates and valid advisor output proceeds to retrieval. |
-| No citation | Model prose URLs remain ignored; bounded deterministic fallback queries run when budget remains, then the person ends `completed` with `research_status=insufficient_evidence` and `NO_SEARCH_CITATIONS`. |
+| No citation | Model prose URLs remain ignored; bounded deterministic fallback queries run when budget remains, then the zero-coverage person fails with `research_status=insufficient_evidence` while retaining `NO_SEARCH_CITATIONS`. |
 | Malformed citation metadata | Invalid annotations do not become candidates or cause an opaque exception. |
 | Advisor provider or HTTP failure | The zero-coverage task preserves `SOURCE_ADVISOR_PROVIDER_ERROR`; its attempt record retains the HTTP category and status. |
 | Advisor invalid JSON | The provider attempt records `OPENROUTER_SCHEMA_ERROR` and retains its safe diagnostic reason. |
 | Advisor schema mismatch | The task records a validation/schema code without logging the raw response. |
-| Empty candidates after filtering | The person ends `completed` with `research_status=insufficient_evidence` and `NO_ELIGIBLE_CANDIDATES`. |
+| Empty candidates after filtering | The zero-coverage person fails with `research_status=insufficient_evidence` while retaining `NO_ELIGIBLE_CANDIDATES`. |
 | Budget exhausted before advisor | No request is sent and the bounded budget outcome remains distinguishable from a zero-token provider attempt. |
 | OpenRouter 4xx/5xx | HTTP status, retry number, request/body flags, and safe terminal error code are retained. |
-| Valid discovery with no selected source | The person ends `completed` with `research_status=insufficient_evidence` and `NO_SELECTED_SOURCES`. |
+| Valid discovery with no selected source | The zero-coverage person fails with `research_status=insufficient_evidence` while retaining `NO_SELECTED_SOURCES`. |
 
 Schema fixtures also verify that strict OpenRouter schemas recursively omit Pydantic
 `default` annotations while retaining required fields and closed objects. Usage
@@ -141,7 +157,7 @@ offline and make no paid OpenRouter calls.
 
 ## Migration coverage
 
-The regression recovery adds no migration or schema change. Alembic logging setup
+The partial-failure salvage pass adds no migration or schema change. Alembic logging setup
 preserves application loggers; the single migration head remains `202609290001`.
 The source/display refinement uses existing profile/source JSON and adds no export
 columns. The shared file library adds migration `202609290001` with one independent

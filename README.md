@@ -31,10 +31,11 @@ Search uses existing OpenRouter credits and incurs tool charges in addition to m
 tokens; no separate search account or key is required. The
 [server-tool API is currently beta](https://openrouter.ai/docs/guides/features/server-tools/web-search).
 When search returns no usable citations, or filtering/advisor selection leaves no
-sources, the person finishes without human review and uses
-`research_status=insufficient_evidence` plus `NO_SEARCH_CITATIONS`,
-`NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES`. Provider and retrieval failures
-remain separate retry/research failures with their specific error codes.
+sources, the person ends with zero coverage and `research_status=insufficient_evidence`.
+The task is unsuccessful rather than an ordinary completed profile, while diagnostics
+retain `NO_SEARCH_CITATIONS`, `NO_ELIGIBLE_CANDIDATES`, or `NO_SELECTED_SOURCES`.
+Provider and genuine retrieval failures remain separate retry/research failures with
+their specific error codes.
 
 ## Core capabilities
 
@@ -74,6 +75,11 @@ remain separate retry/research failures with their specific error codes.
 - Field-level supporting URLs, claim IDs, conflicts, confidence, and review reasons.
   Distinct supported education credentials produce separate records while shared
   identity and current-employment decisions repeat safely.
+- Partial failures are contained at source, claim, or field scope. A failed page does
+  not erase claims from successful pages; a rejected claim does not invalidate its
+  grounded siblings; and a failed recovery attempt cannot remove evidence already
+  accumulated. Reaching `MAX_SOURCES` finalizes whatever valid evidence is available.
+  An unsupported extracted date is removed while the otherwise grounded claim remains.
 - Central deterministic normalization keeps literal claims for provenance while
   exporting `Bachelor's Degree`, `Master's Degree`, `Doctoral Degree`, `Medical Degree`,
   `Law Degree`, `Diploma`, `Postgraduate Diploma`, or `Postgraduate Degree`. Subjects
@@ -202,10 +208,11 @@ includes LinkedIn redirect/content hosts, Facebook, Instagram, X/Twitter, TikTok
 Threads, and Snapchat; Wikipedia remains permitted. The separately deployed static
 Worker must enforce the same deny policy before each redirect hop.
 
-Provider, transport, retrieval, and structured-response failures that leave zero
-coverage remain failed tasks. Their specific safe error code is stored on the terminal
-task instead of being collapsed to a generic research failure; a profile with partial
-evidence can still complete for review. Structured attempt records and logs include
+Zero-coverage results are failed tasks and retain the stage that actually prevented a
+usable profile: provider/extraction failure, genuine retrieval failure, grounding
+failure, unresolved identity, no eligible evidence, or insufficient evidence. A
+profile with one or more valid enrichment fields succeeds with limited coverage even
+when another source failed. Structured attempt records and logs include
 the operation, HTTP status when available, exception class, retry number, and whether
 a request, response, and response body were observed. Stage-boundary logs add
 candidate, citation, and selected-source counts. Credentials and raw model bodies are
@@ -285,11 +292,13 @@ ambiguity error; a missing-name error lists the observed headers. The optional l
 
 ## Status and limitations
 
-Status and result responses include `status_label`. A terminal job with successful
+Status and result responses include `status_label` and additive `outcome_counts` with
+terminal attempted, successful, and unsuccessful people. A terminal job with successful
 and failed records keeps its compatible `partial` code and displays **Completed with
 issues**; completed records and progress counts remain available. See the
-[quality recovery report](docs/quality-recovery.md) for the historical comparison,
-golden outcomes, confidence changes, and internal decision logs.
+[partial-failure salvage report](docs/partial-failure-salvage.md) and
+[quality recovery report](docs/quality-recovery.md) for the outcome rules, historical
+comparison, golden outcomes, confidence changes, and internal decision logs.
 
 Confidence is an evidence heuristic, not a calibrated probability; ambiguous identity
 and conflicting facts require review. Public source availability and coverage vary.

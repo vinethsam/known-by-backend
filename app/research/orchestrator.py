@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections import deque
+from collections import Counter, deque
 from contextlib import aclosing
 from time import monotonic
 
@@ -18,7 +18,7 @@ from app.providers.source_advisor import SourceAdvisor
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
 from app.research.concurrency import Outcome, ordered_window
-from app.research.decision_trace import log_result_decisions
+from app.research.decision_trace import log_decision, log_result_decisions
 from app.research.discovery import (
     build_fallback_queries,
     build_queries,
@@ -52,6 +52,49 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_PIPELINE_ERRORS = (
+    "SOURCE_ADVISOR_VALIDATION_ERROR",
+    "SOURCE_ADVISOR_PROVIDER_ERROR",
+    "EXTRACTION_PROVIDER_FAILED",
+    "OPENROUTER_HTTP_ERROR",
+    "OPENROUTER_PROVIDER_ERROR",
+    "OPENROUTER_TRANSPORT_ERROR",
+    "OPENROUTER_TIMEOUT",
+    "OPENROUTER_SCHEMA_ERROR",
+    "OPENROUTER_RESPONSE_TOO_LARGE",
+    "SEARCH_PROVIDER_FAILED",
+    "SOURCE_PROVIDER_FAILED",
+    "SOURCE_PLANNING_FAILED",
+)
+
+
+def _empty_profile_failure_reason(
+    metrics: ResearchMetrics,
+    sources: list[SourceRecord],
+    claims,
+    selection_eligible_source_ids: set[str],
+) -> str:
+    present = set(metrics.error_codes)
+    # RETRIEVAL_FAILED is reserved for runs in which no attempted page was
+    # successfully obtained. A later identity/grounding decision is not retrieval.
+    if sources and not any(200 <= source.fetch_status < 300 for source in sources):
+        if any(source.error_code == "RETRIEVAL_FAILED" for source in sources):
+            return "RETRIEVAL_FAILED"
+    if metrics.claims_extracted and not claims:
+        return "GROUNDING_FAILED"
+    if claims and not selection_eligible_source_ids:
+        return "IDENTITY_UNRESOLVED"
+    if claims:
+        return "NO_ELIGIBLE_EVIDENCE"
+    # Provider diagnostics describe the terminal cause only when the pipeline
+    # has no retained evidence that already explains the empty profile.
+    for code in _RETRYABLE_PIPELINE_ERRORS:
+        if code in present:
+            return code
+    if any(source.processing_status == "extraction_failed" for source in sources):
+        return "EXTRACTION_FAILED"
+    return "INSUFFICIENT_EVIDENCE"
 
 
 def _source_advisor_error_code(exc: OpenRouterError) -> str:
@@ -133,17 +176,30 @@ class ResearchOrchestrator:
             profile.started_at = started
             profile.completed_at = utcnow()
             profile.sources_considered = metrics.sources_discovered
-            if metrics.error_codes:
-                profile.research_status = "retryable_research_failure" if profile.coverage == 0 else "partial"
-            elif profile.coverage == 0 and metrics.stop_reason in {
-                "NO_SEARCH_CITATIONS",
-                "NO_ELIGIBLE_CANDIDATES",
-                "NO_SELECTED_SOURCES",
-            }:
-                profile.research_status = "insufficient_evidence"
+            allowed_source_map = {
+                source.source_id: source for source in sources if source_record_allowed(source)
+            }
+            selection_eligible = eligible_identity_source_ids(
+                seed, claims, allowed_source_map, settings.SCORING
+            )
+            if profile.coverage == 0:
+                metrics.failure_reason = _empty_profile_failure_reason(
+                    metrics, sources, claims, selection_eligible
+                )
+                profile.research_status = (
+                    "retryable_research_failure"
+                    if metrics.failure_reason
+                    in {*_RETRYABLE_PIPELINE_ERRORS, "RETRIEVAL_FAILED", "EXTRACTION_FAILED"}
+                    else "insufficient_evidence"
+                )
             elif profile.review_required:
+                metrics.failure_reason = None
                 profile.research_status = "needs_review"
+            elif profile.coverage < 100:
+                metrics.failure_reason = None
+                profile.research_status = "partial_coverage"
             else:
+                metrics.failure_reason = None
                 profile.research_status = "clean"
             allowed_sources = [source for source in sources if source_record_allowed(source)]
             allowed_ids = {source.source_id for source in allowed_sources}
@@ -254,18 +310,35 @@ class ResearchOrchestrator:
                     )
                 ) as extractions:
                     async for chunk, response in extractions:
+                        rejected_claims: Counter[str] = Counter()
+                        adjusted_claims: Counter[str] = Counter()
                         extracted, reasons = validate_claims(
                             response,
                             seed,
                             source,
                             chunk,
                             settings.OPENROUTER_EXTRACTION_MODEL or "configured",
+                            rejection_counts=rejected_claims,
+                            adjustment_counts=adjusted_claims,
                         )
+                        metrics.claims_extracted += len(response.claims)
+                        metrics.claims_rejected += sum(rejected_claims.values())
                         claims.extend(extracted)
                         evidence_changed = True
                         metrics.error_codes.extend(
                             code for code in reasons if code not in metrics.error_codes
                         )
+                        if rejected_claims or adjusted_claims:
+                            log_decision(
+                                "claim_validation",
+                                person_id=person_id,
+                                job_id=job_id,
+                                source_id=source.source_id,
+                                claims_extracted=len(response.claims),
+                                grounded_claims=len(extracted),
+                                rejected_by_reason=dict(rejected_claims),
+                                adjusted_by_reason=dict(adjusted_claims),
+                            )
                         await save()
                 claims = deduplicate_claims(claims)
                 source.processing_status = "extracted"

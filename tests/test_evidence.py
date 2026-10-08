@@ -512,7 +512,7 @@ def test_strict_claim_output_rejects_schema_mismatch():
         ExtractionResponse.model_validate({"claims": [], "biography": "unrequested"})
 
 
-def test_claim_dates_need_a_complete_date_in_the_excerpt():
+def test_unsupported_claim_date_is_removed_without_discarding_grounded_value():
     text = "Jane Doe joined Example in 2020."
     response = ExtractionResponse(
         claims=[
@@ -526,7 +526,10 @@ def test_claim_dates_need_a_complete_date_in_the_excerpt():
         ]
     )
     accepted, codes = validate_claims(response, PersonSeed(full_name="Jane Doe"), source(), text, "fake")
-    assert not accepted and "UNGROUNDED_CLAIM_DATE" in codes
+    assert len(accepted) == 1
+    assert accepted[0].raw_value == "Example"
+    assert accepted[0].as_of_date is None
+    assert "UNGROUNDED_CLAIM_DATE" in codes
 
 
 def test_independent_corroboration_monotone_and_duplicates_do_not_help():

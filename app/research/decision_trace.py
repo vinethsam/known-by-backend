@@ -63,7 +63,7 @@ def _compact(value, *, depth: int = 0, budget: list[int] | None = None):
             key = str(original_key)
             if _SENSITIVE_KEY.search(key):
                 continue
-            if len(result) >= 24 or budget[0] <= 0 or budget[1] <= 0:
+            if len(result) >= 32 or budget[0] <= 0 or budget[1] <= 0:
                 result["omitted"] = True
                 break
             safe_key = _text(key, 60)
@@ -151,6 +151,16 @@ def log_result_decisions(
     }
     selection_eligible = eligible_identity_source_ids(seed, result.claims, allowed_sources, policy)
     selection_rejected = {source.source_id for source in all_sources} - selection_eligible
+    selected_claim_ids = {
+        claim_id
+        for record_fields in [fields, *(record.fields for record in records)]
+        for decision in record_fields.values()
+        for claim_id in [decision.selected_claim_id, *decision.supporting_claim_ids]
+        if claim_id is not None
+    }
+    final_fields_selected = sum(
+        decision.value is not None for field, decision in fields.items() if field != ProfileField.full_name
+    )
     credential_count = sum(
         any(record.fields[field].value for field in _EDUCATION_FIELDS) for record in records
     )
@@ -172,11 +182,21 @@ def log_result_decisions(
             "seed_name": seed.full_name,
             "seed_context": _seed_context(seed),
             "candidate_count": candidate_count,
+            "sources_attempted": len(all_sources),
+            "sources_retrieved": sum(200 <= source.fetch_status < 300 for source in all_sources),
+            "sources_failed": sum(
+                source.processing_status in {"failed", "extraction_failed"} for source in all_sources
+            ),
             "accepted_source_count": profile.metrics.sources_accepted,
             "rejected_source_count": rejected_source_count,
             "selection_eligible_source_count": len(selection_eligible),
             "selection_rejected_source_count": len(selection_rejected),
             "extraction_claim_count": len(result.claims),
+            "claims_extracted": profile.metrics.claims_extracted,
+            "claims_grounded": len(result.claims),
+            "claims_rejected": profile.metrics.claims_rejected,
+            "claims_selected": len(selected_claim_ids),
+            "final_fields_selected": final_fields_selected,
             "selected_relationship": {"organisation": organisation.value, "job_title": role.value},
             "selected_confidence": {
                 "organisation": organisation.confidence,
@@ -187,6 +207,8 @@ def log_result_decisions(
             "profile_link": profile_link.value,
             "review_required": profile.review_required,
             "review_outcome": profile.research_status,
+            "person_outcome": profile.research_status,
+            "failure_reason": profile.metrics.failure_reason,
             "review_reasons": review_reasons,
             "stop_reason": profile.metrics.stop_reason,
         },
@@ -214,6 +236,7 @@ def log_result_decisions(
         )
     for source in all_sources[:20]:
         reasons = list(source.identity.reason_codes)
+        source_claims = [claim for claim in result.claims if claim.source_id == source.source_id]
         if source.source_id in selection_rejected:
             if not source_record_allowed(source):
                 reasons.append("SOURCE_POLICY_BLOCKED")
@@ -223,6 +246,14 @@ def log_result_decisions(
                 reasons.append("LOW_IDENTITY_CONFIDENCE")
             else:
                 reasons.append("IDENTITY_CONTEXT_NOT_CONNECTED")
+        elif source.identity.signals.get("seed_anchor_required") and not source.identity.signals.get(
+            "matched_seed_anchors"
+        ):
+            reasons.append("COHERENT_UNANCHORED_IDENTITY")
+        if source.processing_status == "failed" and source.error_code == "RETRIEVAL_FAILED":
+            reasons.append("SOURCE_RETRIEVAL_FAILED")
+        if source.processing_status in {"extracted", "extraction_failed"} and not source_claims:
+            reasons.append("NO_SELECTABLE_CLAIMS")
         log_decision(
             "identity",
             person_id=profile.person_id,

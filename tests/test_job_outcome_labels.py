@@ -21,6 +21,15 @@ def test_completed_with_issues_retains_successful_results_and_accurate_counts(tm
         assert view["status_label"] == results["status_label"] == "Completed with issues"
         assert view["completed_at"] is not None
         assert view["counts"]["completed"] == view["counts"]["failed"] == 1
+        assert (
+            view["outcome_counts"]
+            == results["outcome_counts"]
+            == {
+                "attempted": 2,
+                "successful": 1,
+                "unsuccessful": 1,
+            }
+        )
         assert results["people"][0]["result"] is not None
         assert results["people"][1]["error_code"] == "EXTRACTION_FAILED"
         assert client.get(f"/v1/jobs/{job.job_id}/export?format=csv").status_code == 200

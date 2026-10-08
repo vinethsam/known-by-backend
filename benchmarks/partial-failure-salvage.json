@@ -1,0 +1,62 @@
+{
+  "recorded_at": "2026-10-08",
+  "baseline_commit": "cb210c66ec4a8838151ce79f60c1e076e3f1b161",
+  "fixture_version": 1,
+  "normalization_version": 6,
+  "mock_latency_ms": 2.0,
+  "live_requests": false,
+  "batches": [
+    {
+      "people": 1,
+      "before_elapsed_ms": 551.63,
+      "after_elapsed_ms": 409.8,
+      "db_statements": 173,
+      "models": 4,
+      "searches": 1,
+      "extractions": 2,
+      "physical_fetches": 2,
+      "cache_hit_rate": 0.0,
+      "result_read_queries": 6,
+      "result_sha256": "05c367720c9fc46be77b0360cd6ecdb72a12eaefa6009ad833df5717e328280b"
+    },
+    {
+      "people": 5,
+      "before_elapsed_ms": 1955.11,
+      "after_elapsed_ms": 1575.75,
+      "db_statements": 749,
+      "models": 20,
+      "searches": 5,
+      "extractions": 10,
+      "physical_fetches": 2,
+      "cache_hit_rate": 0.8,
+      "result_read_queries": 6,
+      "result_sha256": "c028c2240e903fa5ce9965b744b213b39ab2bd26c5dc15bcabbc3582bfc8e396"
+    },
+    {
+      "people": 25,
+      "before_elapsed_ms": 9237.56,
+      "after_elapsed_ms": 7607.27,
+      "db_statements": 3629,
+      "models": 100,
+      "searches": 25,
+      "extractions": 50,
+      "physical_fetches": 2,
+      "cache_hit_rate": 0.96,
+      "result_read_queries": 6,
+      "result_sha256": "b59182a564b20b579bc524744c8608bc42fe92f2703098be087aec68158dec1c"
+    },
+    {
+      "people": 100,
+      "before_elapsed_ms": 61036.62,
+      "after_elapsed_ms": 60611.57,
+      "db_statements": 25028,
+      "models": 800,
+      "searches": 100,
+      "extractions": 600,
+      "physical_fetches": 2,
+      "cache_hit_rate": 0.99,
+      "result_read_queries": 6,
+      "result_sha256": "6cdcb939d14f66bcb137012aab0f31202e611e38dcc8f6d31138c793c6641400"
+    }
+  ]
+}

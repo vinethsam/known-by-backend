@@ -333,10 +333,12 @@ def eligible_identity_source_ids(
     anchors = seed_identity_anchors(seed)
     if not anchors:
         return _unseeded_identity_source_ids(claims, sources, policy, eligible)
+    claim_source_ids = {claim.source_id for claim in claims}
     direct = {
         source_id
         for source_id in eligible
-        if set(sources[source_id].identity.signals.get("matched_seed_anchors", [])) & set(anchors)
+        if source_id in claim_source_ids
+        and set(sources[source_id].identity.signals.get("matched_seed_anchors", [])) & set(anchors)
     }
     corrective_groups: dict[tuple[str, str], set[ProfileField]] = defaultdict(set)
     current_organisations: set[str] = set()
@@ -406,7 +408,84 @@ def eligible_identity_source_ids(
             if fields & {ProfileField.organisation, ProfileField.university_name} or len(fields) >= 2:
                 confirmed.add(source_id)
                 break
+    if not confirmed:
+        # Seed context is a hypothesis, not a permanent veto. When no page repeats
+        # it, salvage exactly one independently corroborated institution cluster.
+        # Disconnected same-name groups (the namesake case) remain ineligible.
+        confirmed.update(_coherent_unanchored_source_ids(claims, sources, policy, eligible))
     return confirmed
+
+
+def _coherent_unanchored_source_ids(
+    claims: list[EvidenceClaim],
+    sources: dict[str, SourceRecord],
+    policy: ScoringPolicy,
+    eligible: set[str],
+) -> set[str]:
+    institution_keys: dict[str, set[str]] = defaultdict(set)
+    minimum_authority = policy.authority[SourceType.directory]
+    generic = {
+        "agency",
+        "college",
+        "company",
+        "government",
+        "institution",
+        "ministry",
+        "office",
+        "organisation",
+        "organization",
+        "school",
+        "university",
+    }
+    for claim in claims:
+        source = sources.get(claim.source_id)
+        if (
+            source is None
+            or claim.source_id not in eligible
+            or source.authority_score < minimum_authority
+            or claim.identity_relevance < policy.identity_minimum
+            or claim.directness != "explicit"
+            or claim.field != ProfileField.organisation
+            or claim.is_current is not True
+            or claim.normalisation_certainty < 0.8
+        ):
+            continue
+        key = _clue_key(claim.field.value, claim.normalised_value).removeprefix("the ")
+        if key and key not in generic:
+            institution_keys[claim.source_id].add(key)
+
+    participants = set(institution_keys)
+    if len(participants) < 2:
+        return set()
+
+    def independent(left_id: str, right_id: str) -> bool:
+        left, right = sources[left_id], sources[right_id]
+        return left.domain != right.domain and not (
+            left.content_hash and right.content_hash and left.content_hash == right.content_hash
+        )
+
+    def connected(left_id: str, right_id: str) -> bool:
+        return independent(left_id, right_id) and bool(institution_keys[left_id] & institution_keys[right_id])
+
+    remaining = set(participants)
+    corroborated_components: list[set[str]] = []
+    while remaining:
+        component = {min(remaining)}
+        frontier = list(component)
+        remaining -= component
+        has_independent_edge = False
+        while frontier:
+            source_id = frontier.pop()
+            adjacent = {other for other in remaining if connected(source_id, other)}
+            if adjacent:
+                has_independent_edge = True
+            component.update(adjacent)
+            remaining -= adjacent
+            frontier.extend(sorted(adjacent))
+        if len(component) >= 2 and has_independent_edge:
+            corroborated_components.append(component)
+
+    return corroborated_components[0] if len(corroborated_components) == 1 else set()
 
 
 def _unseeded_identity_source_ids(

@@ -253,11 +253,14 @@ class ResearchMetrics(Contract):
     sources_discovered: int = 0
     sources_fetched: int = 0
     sources_accepted: int = 0
+    claims_extracted: int = 0
+    claims_rejected: int = 0
     llm_calls: int = 0
     tokens_used: int = 0
     tokens_budgeted: int = 0
     cost: float = 0
     stop_reason: str | None = None
+    failure_reason: str | None = None
     error_codes: list[str] = Field(default_factory=list)
 
 
@@ -328,6 +331,21 @@ class JobView(JobCreated):
     def status_label(self) -> str:
         return self.status.label
 
+    @computed_field
+    @property
+    def outcome_counts(self) -> dict[str, int]:
+        successful = self.counts.get(PersonStatus.completed.value, 0) + self.counts.get(
+            PersonStatus.review_required.value, 0
+        )
+        unsuccessful = self.counts.get(PersonStatus.failed.value, 0) + self.counts.get(
+            PersonStatus.cancelled.value, 0
+        )
+        return {
+            "attempted": successful + unsuccessful,
+            "successful": successful,
+            "unsuccessful": unsuccessful,
+        }
+
 
 class PersonResultView(Contract):
     person_id: str
@@ -347,3 +365,18 @@ class JobResults(Contract):
     @property
     def status_label(self) -> str:
         return self.status.label
+
+    @computed_field
+    @property
+    def outcome_counts(self) -> dict[str, int]:
+        successful = sum(
+            person.status in {PersonStatus.completed, PersonStatus.review_required} for person in self.people
+        )
+        unsuccessful = sum(
+            person.status in {PersonStatus.failed, PersonStatus.cancelled} for person in self.people
+        )
+        return {
+            "attempted": successful + unsuccessful,
+            "successful": successful,
+            "unsuccessful": unsuccessful,
+        }

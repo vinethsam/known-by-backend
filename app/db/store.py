@@ -274,7 +274,7 @@ class Store:
             self._replace_result(session, lease.job_id, lease.person_id, result, utcnow())
             return True
 
-    def fail_task(self, lease: Lease, error_code: str) -> bool:
+    def fail_task(self, lease: Lease, error_code: str, result: ResearchResult | None = None) -> bool:
         with self.session_factory.begin() as session:
             job = self._lock_job(session, lease.job_id)
             if not job or job.status == JobStatus.cancelled.value:
@@ -287,7 +287,10 @@ class Store:
             task.lease_token = None
             task.leased_by = None
             task.lease_expires_at = None
-            task.completed_at = utcnow()
+            now = utcnow()
+            task.completed_at = now
+            if result is not None:
+                self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
             return True
 
@@ -740,8 +743,13 @@ class Store:
             )
             result.profile = finalize_display(result.profile)
             result.profile.status = PersonStatus(task.status)
-            if task.status in {"queued", "researching", "failed", "cancelled"}:
+            if task.status in {"queued", "researching", "cancelled"}:
                 result.profile.research_status = task.status
+            elif task.status == "failed" and result.profile.research_status not in {
+                "insufficient_evidence",
+                "retryable_research_failure",
+            }:
+                result.profile.research_status = "failed"
         return PersonResultView(
             person_id=task.person_id,
             row_index=task.row_index,

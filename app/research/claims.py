@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import MutableMapping
 from datetime import date
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION
@@ -31,27 +32,46 @@ def date_is_grounded(value: date, evidence: str) -> bool:
 
 
 def validate_claims(
-    response: ExtractionResponse, seed: PersonSeed, source: SourceRecord, chunk: str, model: str
+    response: ExtractionResponse,
+    seed: PersonSeed,
+    source: SourceRecord,
+    chunk: str,
+    model: str,
+    *,
+    rejection_counts: MutableMapping[str, int] | None = None,
+    adjustment_counts: MutableMapping[str, int] | None = None,
 ) -> tuple[list[EvidenceClaim], list[str]]:
+    def rejected(reason: str) -> None:
+        reasons.append(reason)
+        if rejection_counts is not None:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+    def adjusted(reason: str) -> None:
+        reasons.append(reason)
+        if adjustment_counts is not None:
+            adjustment_counts[reason] = adjustment_counts.get(reason, 0) + 1
+
     if not source_record_allowed(source):
+        if rejection_counts is not None:
+            rejection_counts["SOURCE_POLICY_BLOCKED"] = len(response.claims)
         return [], ["SOURCE_POLICY_BLOCKED"]
     claims, reasons = [], []
     content = literal_key(chunk)
     for claim in response.claims:
         if name_key(claim.subject_name) != name_key(seed.full_name):
-            reasons.append("CLAIM_SUBJECT_MISMATCH")
+            rejected("CLAIM_SUBJECT_MISMATCH")
             continue
         if literal_key(claim.evidence) not in content:
-            reasons.append("UNGROUNDED_EVIDENCE")
+            rejected("UNGROUNDED_EVIDENCE")
             continue
         # Extraction values should be verbatim; normalisation is our responsibility.
         # A URL is additionally required to be an observed link, never model invention.
         if literal_key(claim.value) not in literal_key(claim.evidence):
-            reasons.append("UNGROUNDED_VALUE")
+            rejected("UNGROUNDED_VALUE")
             continue
         if claim.field == ProfileField.profile_link:
             if not source_policy_allows(claim.value):
-                reasons.append("SOURCE_POLICY_BLOCKED")
+                rejected("SOURCE_POLICY_BLOCKED")
                 continue
             from app.retrieval.urls import canonicalise_url
 
@@ -62,14 +82,21 @@ def validate_claims(
                 if canonicalise_url(claim.value) not in known_links:
                     raise ValueError("Unobserved link")
             except ValueError:
-                reasons.append("UNOBSERVED_PROFILE_LINK")
+                rejected("UNOBSERVED_PROFILE_LINK")
                 continue
-        if any(
-            value and not date_is_grounded(value, claim.evidence)
-            for value in (claim.as_of_date, claim.end_date)
-        ):
-            reasons.append("UNGROUNDED_CLAIM_DATE")
-            continue
+        # A model-supplied date is metadata on an otherwise literal claim. Strip
+        # only unsupported dates; do not discard a grounded role or credential.
+        as_of_date = claim.as_of_date
+        end_date = claim.end_date
+        unsupported_date = False
+        if as_of_date and not date_is_grounded(as_of_date, claim.evidence):
+            as_of_date = None
+            unsupported_date = True
+        if end_date and not date_is_grounded(end_date, claim.evidence):
+            end_date = None
+            unsupported_date = True
+        if unsupported_date:
+            adjusted("UNGROUNDED_CLAIM_DATE")
         normalisations = (
             normalise_degree_candidates(claim.value)
             if claim.field == ProfileField.degree_type
@@ -78,7 +105,7 @@ def validate_claims(
         compound_degree = claim.field == ProfileField.degree_type and len(normalisations) > 1
         for normalisation in normalisations:
             if not normalisation.value:
-                reasons.append("EMPTY_NORMALISED_VALUE")
+                rejected("EMPTY_NORMALISED_VALUE")
                 continue
             claims.append(
                 EvidenceClaim(
@@ -91,8 +118,8 @@ def validate_claims(
                     evidence_text=claim.evidence,
                     evidence_location=claim.evidence_location,
                     temporal_context=claim.temporal_context,
-                    as_of_date=claim.as_of_date,
-                    end_date=claim.end_date,
+                    as_of_date=as_of_date,
+                    end_date=end_date,
                     is_current=claim.is_current,
                     directness=claim.directness,
                     source_claim_type=claim.source_claim_type,
@@ -116,8 +143,8 @@ def validate_claims(
                         evidence_text=claim.evidence,
                         evidence_location=claim.evidence_location,
                         temporal_context=claim.temporal_context,
-                        as_of_date=claim.as_of_date,
-                        end_date=claim.end_date,
+                        as_of_date=as_of_date,
+                        end_date=end_date,
                         is_current=claim.is_current,
                         directness=claim.directness,
                         source_claim_type=(
