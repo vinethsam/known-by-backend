@@ -508,6 +508,15 @@ def test_needs_browser_for_recoverable_static_failures_and_unusable_content():
             "html": "<nav>" + " ".join(f"<a href='/{i}'>Directory item {i}</a>" for i in range(40)) + "</nav>"
         }
     )
+    placeholder = shell.model_copy(
+        update={"html": "<main><p>Loading biography details, please wait.</p></main>"}
+    )
+    longer_placeholder = shell.model_copy(
+        update={
+            "html": "<main><p>Loading biography details, please wait. "
+            "We are gathering details.</p></main>"
+        }
+    )
     forbidden = shell.model_copy(update={"status": 403, "html": "Forbidden"})
     limited = shell.model_copy(update={"status": 429, "html": "Try later"})
 
@@ -516,6 +525,8 @@ def test_needs_browser_for_recoverable_static_failures_and_unusable_content():
     assert needs_browser(empty, cfg)
     assert needs_browser(title_only, cfg)
     assert needs_browser(chrome_only, cfg)
+    assert needs_browser(placeholder, cfg)
+    assert needs_browser(longer_placeholder, cfg)
     assert needs_browser(forbidden, cfg)
     assert needs_browser(limited, cfg)
 
@@ -537,9 +548,16 @@ def test_needs_browser_leaves_useful_static_and_nonrenderable_content_alone():
     script_word = useful.model_copy(
         update={"html": f"<script>const captcha = 'widget';</script><main><p>{biography}</p></main>"}
     )
+    legitimate_loading = useful.model_copy(
+        update={
+            "html": "<main><p>Jane Doe directs loading operations at Example Foundation "
+            "and advises its executive board.</p></main>"
+        }
+    )
 
     assert not needs_browser(useful, cfg)
     assert not needs_browser(script_word, cfg)
+    assert not needs_browser(legitimate_loading, cfg)
     assert not needs_browser(missing, cfg)
     assert not needs_browser(structured, cfg)
     assert not needs_browser(useful, settings(PLAYWRIGHT_ENABLED=False))
@@ -564,6 +582,48 @@ async def test_browser_renderer_registers_context_routes_before_page(monkeypatch
     assert fake_browser.context_kwargs["service_workers"] == "block"
     assert fake_browser.context.route_registered_before_page
     assert fake_browser.context.websocket_route_registered_before_page
+
+
+@pytest.mark.asyncio
+async def test_browser_waits_for_biography_after_early_network_idle(monkeypatch):
+    public_dns(monkeypatch)
+    cfg = settings(PLAYWRIGHT_ENABLED=True, BROWSER_TIMEOUT_SECONDS=1)
+    browser = FakeBrowser()
+    content_reads = 0
+
+    class ShellStatic:
+        async def fetch(self, url):
+            return RetrievedPage(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="<div id='root'></div><script></script><script></script>",
+            )
+
+        async def close(self):
+            pass
+
+    async def ensure_browser():
+        return browser
+
+    async def delayed_content(self):
+        nonlocal content_reads
+        content_reads += 1
+        if content_reads == 1:
+            return "<div id='root'></div><script></script><script></script>"
+        return "<main><p>" + ("Jane Doe leads Example Foundation. " * 12) + "</p></main>"
+
+    monkeypatch.setattr(FakePage, "content", delayed_content)
+    service = RetrievalService(cfg, static_fetcher=ShellStatic())
+    service.renderer._ensure_browser = ensure_browser
+
+    page = await service.retrieve("https://example.com/biography")
+
+    assert page.retrieval_method == "browser"
+    assert "Jane Doe leads Example Foundation" in page.html
+    assert content_reads == 2
+    assert browser.context.closed
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from collections.abc import MutableMapping
 from datetime import date
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION
+from app.research.identity import claim_is_eligible_for_source
 from app.research.normalisation import (
     comparison_key,
     name_key,
@@ -68,6 +69,9 @@ def validate_claims(
         # A URL is additionally required to be an observed link, never model invention.
         if literal_key(claim.value) not in literal_key(claim.evidence):
             rejected("UNGROUNDED_VALUE")
+            continue
+        if not claim_is_eligible_for_source(seed, source, claim.field, claim.value, claim.evidence):
+            rejected("DISPUTED_CLAIM_IDENTITY_CONTEXT")
             continue
         if claim.field == ProfileField.profile_link:
             if not source_policy_allows(claim.value):

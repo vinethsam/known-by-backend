@@ -47,6 +47,13 @@ _CHALLENGE_PAGE_RE = re.compile(
     r"checking your browser|just a moment|enable javascript and cookies|cloudflare ray id)\b",
     re.IGNORECASE,
 )
+_PLACEHOLDER_CONTENT_RE = re.compile(
+    r"^(?:loading(?:\s+(?:page|profile|content|biography|details|information)){0,3}"
+    r"(?:,?\s*please\s+wait)?|please\s+wait|content\s+is\s+loading)"
+    r"(?:[\s.!…]*(?:we are gathering details|we are preparing the profile|"
+    r"content will be available shortly))?[\s.!…]*$",
+    re.IGNORECASE,
+)
 _TECHNICAL_PAGE_ELEMENTS = ("script", "style", "noscript", "template")
 _CHROME_SELECTORS = (
     "nav",
@@ -258,6 +265,8 @@ def _content_fallback_reason(page: RetrievedPage, settings: object) -> str | Non
     content_chars = _readable_characters(content_text)
     link_density = link_chars / max(1, visible_chars)
 
+    if content_chars < minimum_chars and _PLACEHOLDER_CONTENT_RE.fullmatch(content_text):
+        return "placeholder_content"
     if content_chars >= minimum_chars and not (link_density >= 0.75 and not has_substantive_content):
         return None
     if content_chars >= short_content_floor and has_substantive_content:
@@ -308,7 +317,14 @@ class RetrievalService:
         self.renderer = (
             renderer
             if renderer is not None
-            else (BrowserRenderer(settings) if getattr(settings, "PLAYWRIGHT_ENABLED", True) else None)
+            else (
+                BrowserRenderer(
+                    settings,
+                    content_ready=lambda page: _browser_result_error(page, settings) is None,
+                )
+                if getattr(settings, "PLAYWRIGHT_ENABLED", True)
+                else None
+            )
         )
         self.cache = cache
         self._global_fetch_sem = asyncio.Semaphore(int(getattr(settings, "MAX_CONCURRENT_FETCHES", 4)))

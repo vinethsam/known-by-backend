@@ -7,7 +7,15 @@ from collections import defaultdict
 
 from app.config import ScoringPolicy
 from app.research.normalisation import comparison_key, name_key
-from app.schemas import EvidenceClaim, IdentityMatch, PersonSeed, ProfileField, SourceRecord, SourceType
+from app.schemas import (
+    EvidenceClaim,
+    IdentityMatch,
+    PersonSeed,
+    ProfileField,
+    SourceCandidate,
+    SourceRecord,
+    SourceType,
+)
 
 _ROLE_ALIASES = {
     "ceo": "chief executive officer",
@@ -238,16 +246,66 @@ def contains_phrase(text: str, phrase: str) -> bool:
     return bool(phrase) and f" {phrase} " in f" {text} "
 
 
+def candidate_has_seed_identity_context(seed: PersonSeed, candidate: SourceCandidate) -> bool:
+    """Allow a disputed candidate to be fetched when its own metadata has direct context.
+
+    This is only a retrieval admission hint. The fetched body must independently
+    establish identity before extraction or final selection.
+    """
+
+    target = name_key(seed.full_name)
+    return any(
+        _clue_is_near_name(label, value, f"{candidate.title}\n{candidate.snippet}", target)
+        for label, value in seed_identity_anchors(seed).items()
+        if label in _INSTITUTION_FIELDS
+    )
+
+
+def claim_is_eligible_for_source(
+    seed: PersonSeed,
+    source: SourceRecord,
+    field: ProfileField,
+    value: str,
+    evidence: str,
+) -> bool:
+    """Do not let one valid quote admit another person's claim on a mixed page."""
+
+    if source.identity.signals.get("advisor_relevance") != "unrelated":
+        return True
+    target = name_key(seed.full_name)
+    target_tokens = target.split()
+    quote_tokens = comparison_key(evidence).split()
+    # A disputed page can mention the seeded person and a partial namesake in
+    # the same sentence. Do not use either mixed-name quote as identity evidence.
+    if len(target_tokens) > 1 and any(
+        quote_tokens[index - len(target_tokens) + 1 : index + 1] != target_tokens
+        for index, token in enumerate(quote_tokens)
+        if token == target_tokens[-1]
+    ):
+        return False
+    clauses = re.split(
+        r",\s*(?:and|but|while|whereas)\b|\b(?:but|while|whereas|meanwhile)\b",
+        evidence,
+        flags=re.IGNORECASE,
+    )
+    return any(_clue_is_near_name(field.value, value, clause, target) for clause in clauses)
+
+
 def assess_identity(
     seed: PersonSeed,
     text: str,
     policy: ScoringPolicy,
     subject_name: str | None = None,
     model_relevance: str | None = None,
+    source_type: SourceType | None = None,
 ) -> IdentityMatch:
     key = comparison_key(text)
     target = name_key(seed.full_name)
     exact = contains_phrase(key, target)
+    opening = re.split(r"[.!?;\r\n]+", text.strip(), maxsplit=1)[0]
+    named_biography_opening = len(opening.split()) <= 12 and contains_phrase(
+        comparison_key(opening), target
+    )
     subject_matches = subject_name is None or name_key(subject_name) == target
     anchors = seed_identity_anchors(seed)
     signals = {
@@ -260,6 +318,8 @@ def assess_identity(
         "seed_anchor_required": bool(anchors),
         "model_relevance": model_relevance,
     }
+    if named_biography_opening:
+        signals["named_biography_opening"] = True
     if not exact or not subject_matches:
         return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
     clues = _seed_clues(seed)
@@ -283,9 +343,23 @@ def assess_identity(
         # Retain provisional evidence for a later seed-linked source; absence itself
         # is not a rejection, but country/year matches must not make it certain.
         score = min(score, policy.identity_name_only)
-    # LLM judgement may constrain a match; it cannot raise same-name evidence to certainty.
+    # A retrieved official biography with direct name/institution agreement is
+    # stronger than an advisor's pre-retrieval dismissal. Preserve disagreement as
+    # ambiguity so the resulting fields remain reviewable.
     if model_relevance == "unrelated":
-        return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
+        official = source_type in {
+            SourceType.first_party,
+            SourceType.government,
+            SourceType.employer,
+            SourceType.university,
+            SourceType.professional_body,
+        }
+        institutional_match = bool(set(signals["matched_seed_anchors"]) & _INSTITUTION_FIELDS)
+        if not (official and institutional_match and not signals["contradicted_clues"]):
+            return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
+        signals["advisor_relevance"] = "unrelated"
+        signals["model_relevance"] = "ambiguous"
+        model_relevance = "ambiguous"
     if model_relevance == "ambiguous":
         score = min(score, policy.identity_review_threshold)
     seed_contradiction = bool(signals["contradicted_clues"])
@@ -330,15 +404,45 @@ def eligible_identity_source_ids(
         for source_id, source in sources.items()
         if not source.identity.rejected and source.identity.score >= policy.identity_minimum
     }
+    claims = [
+        claim
+        for claim in claims
+        if claim.source_id in sources
+        and claim_is_eligible_for_source(
+            seed, sources[claim.source_id], claim.field, claim.raw_value, claim.evidence_text
+        )
+    ]
     anchors = seed_identity_anchors(seed)
     if not anchors:
         return _unseeded_identity_source_ids(claims, sources, policy, eligible)
+
+    disputed_institutions = {
+        source_id: set(source.identity.signals.get("matched_seed_anchors", [])) & _INSTITUTION_FIELDS
+        for source_id, source in sources.items()
+        if source_id in eligible and source.identity.signals.get("advisor_relevance") == "unrelated"
+    }
+    # Candidate and page metadata justified checking these disputed sources, but
+    # cannot turn a related-search/footer mention into evidence about their claims.
+    locally_anchored_disputed = {
+        claim.source_id
+        for claim in claims
+        if claim.source_id in disputed_institutions
+        and any(
+            _clue_is_near_name(label, anchors[label], claim.evidence_text, name_key(seed.full_name))
+            for label in disputed_institutions[claim.source_id]
+        )
+    }
+
+    def disputed_source_has_anchored_claim(source_id: str) -> bool:
+        return source_id not in disputed_institutions or source_id in locally_anchored_disputed
+
     claim_source_ids = {claim.source_id for claim in claims}
     direct = {
         source_id
         for source_id in eligible
         if source_id in claim_source_ids
         and set(sources[source_id].identity.signals.get("matched_seed_anchors", [])) & set(anchors)
+        and disputed_source_has_anchored_claim(source_id)
     }
     corrective_groups: dict[tuple[str, str], set[ProfileField]] = defaultdict(set)
     current_organisations: set[str] = set()
@@ -387,7 +491,7 @@ def eligible_identity_source_ids(
             continue
         key = _clue_key(claim.field.value, claim.normalised_value)
         keys[claim.source_id].add((claim.field, key))
-        if claim.field.value in anchors and _matches_clue(
+        if disputed_source_has_anchored_claim(claim.source_id) and claim.field.value in anchors and _matches_clue(
             claim.field.value, anchors[claim.field.value], claim.raw_value
         ):
             direct.add(claim.source_id)
@@ -412,11 +516,12 @@ def eligible_identity_source_ids(
         # Seed context is a hypothesis, not a permanent veto. When no page repeats
         # it, salvage exactly one independently corroborated institution cluster.
         # Disconnected same-name groups (the namesake case) remain ineligible.
-        confirmed.update(_coherent_unanchored_source_ids(claims, sources, policy, eligible))
+        confirmed.update(_coherent_unanchored_source_ids(seed, claims, sources, policy, eligible))
     return confirmed
 
 
 def _coherent_unanchored_source_ids(
+    seed: PersonSeed,
     claims: list[EvidenceClaim],
     sources: dict[str, SourceRecord],
     policy: ScoringPolicy,
@@ -448,6 +553,19 @@ def _coherent_unanchored_source_ids(
             or claim.field != ProfileField.organisation
             or claim.is_current is not True
             or claim.normalisation_certainty < 0.8
+            # A full-name biography heading may introduce a following pronoun
+            # sentence; a partial name elsewhere on a mixed page cannot do so.
+            or not (
+                _clue_is_near_name(
+                    "organisation", claim.normalised_value, claim.evidence_text, name_key(seed.full_name)
+                )
+                or (
+                    source.identity.signals.get("named_biography_opening")
+                    and source.identity.signals.get("advisor_relevance") != "unrelated"
+                    and re.match(r"^\s*(?:he|she|they)\b", claim.evidence_text, re.IGNORECASE)
+                    and _matches_clue("organisation", claim.normalised_value, claim.evidence_text)
+                )
+            )
         ):
             continue
         key = _clue_key(claim.field.value, claim.normalised_value).removeprefix("the ")

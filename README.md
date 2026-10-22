@@ -124,6 +124,11 @@ allowlist restricts discovery. Automated tests replace external calls with fixtu
 The [quality recovery record](docs/quality-recovery.md) documents evidence-selection
 regressions and their offline golden fixtures. Compact decision summaries appear at
 INFO; DEBUG adds selection reasons that remain readable in plaintext Railway exports.
+The [targeted quality refinement](docs/quality-refinement.md) records the later
+identity, current-role, and dynamic-page corrections against observed Forbes/YALI
+exports and deterministic fixtures. The saved exports contain results and source URLs,
+but not the underlying claim ledger or decision traces; offline fixture results do
+not establish a live accuracy rate.
 
 ## Backend structure
 
@@ -304,7 +309,9 @@ Confidence is an evidence heuristic, not a calibrated probability; ambiguous ide
 and conflicting facts require review. Public source availability and coverage vary.
 Retrieval enforces public-network/redirect checks, byte limits, and timeouts.
 Playwright handles eligible transient HTTP failures, challenges, empty/thin pages,
-chrome-only pages, and JavaScript shells after static retrieval. It does not bypass
+chrome-only pages, placeholders, and JavaScript shells after static retrieval. For an
+unusable rendered DOM it checks again within the existing bounded settle window so
+content that arrives after network idle can be used. It does not bypass
 login or CAPTCHA controls and has no browser account state. The Cloudflare Worker
 remains separately managed.
 

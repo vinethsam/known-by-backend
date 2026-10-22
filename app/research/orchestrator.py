@@ -33,6 +33,7 @@ from app.research.discovery import (
 from app.research.extraction import extract_chunks
 from app.research.identity import (
     assess_identity,
+    candidate_has_seed_identity_context,
     effective_identity_scores,
     eligible_identity_source_ids,
 )
@@ -128,7 +129,13 @@ def _process_source(
         candidate.source_type, page.final_url, settings.SCORING
     )
     source.source_type = SourceType(source.authority_components["source_type"])
-    source.identity = assess_identity(seed, text, settings.SCORING, model_relevance=candidate.relevance)
+    source.identity = assess_identity(
+        seed,
+        text,
+        settings.SCORING,
+        model_relevance=candidate.relevance,
+        source_type=source.source_type,
+    )
     return chunks
 
 
@@ -464,7 +471,9 @@ class ResearchOrchestrator:
                     candidate = cached
                 else:
                     decision = by_id[candidate.candidate_id]
-                    if decision.relevance == "unrelated":
+                    if decision.relevance == "unrelated" and not candidate_has_seed_identity_context(
+                        seed, candidate
+                    ):
                         rejected_urls.add(candidate.url)
                         continue
                     # Duplicate suggestions remain advisory; equality removes evidence.

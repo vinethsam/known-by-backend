@@ -1,11 +1,29 @@
 # Validation record
 
-Validated locally after the partial-failure salvage pass on **2026-10-08**, Windows,
-Python **3.14.7**. Docker and CI target Python 3.13. Trial jobs use the production API,
-queue, worker, providers, and settings; fixtures replace external network responses
-without a second research pipeline or paid provider calls.
+Trial jobs use the production API, queue, worker, providers, and settings; offline
+fixtures replace external network responses without a second research pipeline or
+paid provider calls. Docker and CI target Python 3.13.
 
-## Current checks
+## Latest targeted quality refinement, 2026-10-22
+
+| Check | Result |
+| --- | --- |
+| Focused changed-area suite | **77 passed**; same fixtures at prior HEAD passed **67** |
+| Golden plus affected pipeline suite | **114 passed** |
+| Additional mixed-page identity controls | **2 passed** in the complete suite; not part of the controlled 77-case comparison |
+| Complete offline suite | **755 passed, 6 skipped, 2 warnings**; PostgreSQL runtime checks require `TEST_POSTGRES_URL` |
+| Offline production-pipeline benchmark | Prior vs modified at 1, 5, and 25 people: normalized output hashes and work counts match; browser fallback was not exercised |
+
+These are offline regression results, not measured live research accuracy. The
+[refinement record](quality-refinement.md) distinguishes observed Forbes/YALI export
+symptoms from synthetic same-fixture before/after tests and explains the remaining
+unverified cases. No live provider call was made.
+Benchmark timings are single non-gating local measurements; details are in the
+[benchmark record](../benchmarks/README.md#targeted-quality-refinement-measurement).
+
+## Prior partial-failure salvage checks, 2026-10-08
+
+The earlier pass was validated locally on Windows with Python **3.14.7**:
 
 | Check | Result |
 | --- | --- |

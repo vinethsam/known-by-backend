@@ -19,7 +19,11 @@ from app.research.confidence import (
     role_observation_date,
 )
 from app.research.decision_trace import log_decision
-from app.research.identity import effective_identity_scores, eligible_identity_source_ids
+from app.research.identity import (
+    claim_is_eligible_for_source,
+    effective_identity_scores,
+    eligible_identity_source_ids,
+)
 from app.research.normalisation import (
     BACHELORS_DEGREE,
     DIPLOMA,
@@ -944,7 +948,35 @@ def _employment_decisions(
             else:
                 freshness = 1
         completeness = len({claim.field for claim in cluster_claims} & VOLATILE_FIELDS)
-        relationship_priority = RELATIONSHIP_PRIORITY[relationship_type(cluster)]
+        kind = relationship_type(cluster)
+        relationship_priority = RELATIONSHIP_PRIORITY[kind]
+        # Unknown currentness earns this tier only from a recent institutional
+        # present-tense role statement. A new article about a former CEO must not
+        # displace an explicitly current employer merely because it is newer.
+        grounded_present_role = any(
+            claim.field == ProfileField.job_title
+            and claim.is_current is None
+            and claim.directness == "explicit"
+            and sources[claim.source_id].source_type
+            in {SourceType.first_party, SourceType.government, SourceType.employer, SourceType.university}
+            and re.search(r"\b(is|serves|works|leads|currently)\b", comparison_key(claim.evidence_text))
+            and not re.search(
+                r"\b(was|were|formerly|previously|former|until|left|resigned)\b",
+                comparison_key(claim.evidence_text),
+            )
+            for claim in cluster_claims
+        )
+        recent_primary = int(
+            freshness >= 3
+            and (explicitly_current or grounded_present_role)
+            and kind
+            in {
+                RelationshipType.current_government_office,
+                RelationshipType.current_executive_role,
+                RelationshipType.current_primary_employment,
+                RelationshipType.current_academic_role,
+            }
+        )
         primary_office = int(
             public_office_type(cluster)
             in {
@@ -965,7 +997,7 @@ def _employment_decisions(
             for claim in cluster_claims
         )
         ranked = (
-            int(bool(explicitly_current) and freshness >= 3),
+            recent_primary,
             relationship_priority,
             primary_office,
             institution_specificity(cluster),
@@ -1023,7 +1055,8 @@ def _employment_decisions(
         scores = rank(cluster)
         return {
             "values": sorted({claim.raw_value for claim in cluster.claims}),
-            "currentness": scores[0],
+            "recent_primary": scores[0],
+            "currentness": int(bool(scores[5]) and scores[4] >= 3),
             "relationship": relationship_type(cluster).value,
             "primary_office": scores[2],
             "specific_institution": scores[3],
@@ -1378,6 +1411,14 @@ def reconcile(
     from app.retrieval.urls import source_record_allowed
 
     sources = {source.source_id: source for source in source_records if source_record_allowed(source)}
+    claims = [
+        claim
+        for claim in claims
+        if claim.source_id not in sources
+        or claim_is_eligible_for_source(
+            seed, sources[claim.source_id], claim.field, claim.raw_value, claim.evidence_text
+        )
+    ]
     eligible_source_ids = eligible_identity_source_ids(seed, claims, sources, policy)
     accepted = [
         claim

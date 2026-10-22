@@ -883,9 +883,15 @@ def classify_relationship(
     source_types = source_types or set()
     if re.search(r"\b(political party|party|movement|coalition)\b", organisation_key):
         return RelationshipType.political_party_role
-    if re.search(
-        r"\b(board member|board chair|chair of the board|non executive director|trustee)\b", combined
-    ):
+    board_title = re.search(
+        r"\b(board member|board chair|chair(?:man|woman|person)? of (?:the )?board|"
+        r"president of (?:the )?board|member of (?:the )?board(?: of directors)?|"
+        r"(?:deputy|vice|independent)? ?president commissioner|"
+        r"(?:independent|non executive) commissioner|"
+        r"(?:non executive|independent|outside) director|trustee)\b",
+        combined,
+    ) or re.fullmatch(r"administrat(?:eur|rice)(?: independant(?:e)?)?", title_key)
+    if board_title:
         return RelationshipType.board_role
     if re.search(r"\b(adviser|advisor|advisory|council member)\b", title_key):
         return RelationshipType.advisory_role
@@ -894,7 +900,7 @@ def classify_relationship(
     if re.search(r"\b(professor|lecturer|dean|rector|academic|research fellow)\b", title_key):
         return RelationshipType.current_academic_role
     if re.search(
-        r"\b(chief .+ officer|ceo|cfo|cio|cto|managing director|executive director|"
+        r"\b(chief .+ officer|chief executive|ceo|cfo|cio|cto|managing director|executive director|"
         r"founder|co founder|president)\b",
         title_key,
     ):

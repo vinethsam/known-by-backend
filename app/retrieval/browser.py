@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -276,8 +276,13 @@ class BrowserRouteHTTPClient:
 class BrowserRenderer:
     """Playwright renderer with public-request guards for dynamic pages."""
 
-    def __init__(self, settings: object) -> None:
+    def __init__(
+        self,
+        settings: object,
+        content_ready: Callable[[RetrievedPage], bool] | None = None,
+    ) -> None:
         self.settings = settings
+        self._content_ready = content_ready
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._browser_lock = asyncio.Lock()
@@ -462,6 +467,7 @@ class BrowserRenderer:
 
         try:
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            settle_deadline = asyncio.get_running_loop().time() + min(timeout_ms, 5000) / 1000
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
             except self._timeout_error:
@@ -478,7 +484,7 @@ class BrowserRenderer:
             html = await page.content()
             if len(html.encode("utf-8")) > max_total_bytes:
                 raise FetchError("The rendered content exceeded the size limit")
-            return RetrievedPage(
+            result = RetrievedPage(
                 requested_url=target_url,
                 final_url=final_url,
                 status=int(state["document_status"] or response.status),
@@ -486,5 +492,22 @@ class BrowserRenderer:
                 html=html,
                 retrieval_method="browser",
             )
+            # Network idle can precede client-side biography hydration. Recheck
+            # only unusable DOM within the existing five-second settle window.
+            if self._content_ready is not None and 200 <= result.status < 300:
+                loop = asyncio.get_running_loop()
+                while not self._content_ready(result):
+                    remaining = settle_deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(0.1, remaining))
+                    if state["blocked"]:
+                        raise FetchError(str(state["blocked"]))
+                    result.html = await page.content()
+                    if len(result.html.encode("utf-8")) > max_total_bytes:
+                        raise FetchError("The rendered content exceeded the size limit")
+            if state["blocked"]:
+                raise FetchError(str(state["blocked"]))
+            return result
         except self._timeout_error as exc:
             raise FetchTimeoutError("The browser retrieval timed out") from exc

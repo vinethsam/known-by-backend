@@ -232,3 +232,25 @@ extraction, Playwright, or token work. Local elapsed measurements are single non
 samples and do not establish a general speedup. Compact counts and matching hashes are
 checked in at [`partial-failure-salvage.json`](partial-failure-salvage.json). No live
 request was made.
+
+## Targeted quality refinement measurement
+
+On 2026-10-22 the offline production pipeline compared an isolated archive of the
+pre-change `main` revision with the modified tree. Both used the same name-only
+static fixtures, normal production limits, 2 ms mocked HTTP latency, and no live
+provider calls. Normalized output SHA hashes matched at every size.
+
+| People | Before (s) | After (s) | SQL, both | Model attempts, both | Searches, both | Extractions, both |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.438 | 0.424 | 173 | 4 | 1 | 2 |
+| 5 | 1.559 | 1.548 | 749 | 20 | 5 | 10 |
+| 25 | 7.681 | 7.521 | 3,629 | 100 | 25 | 50 |
+
+Each size made two physical fetches and six completed-result read queries on both
+revisions. Browser fallback was not invoked, and these fixtures did not enter the
+disputed-advisor admission path. The matching work counts therefore establish
+unchanged behavior for ordinary static research, not the cost of a newly admitted
+official candidate or a slow dynamic page. The times are one local run per size,
+subject to disk and scheduling noise; no general speedup is claimed. The focused
+[quality refinement record](../docs/quality-refinement.md) measures the changed
+branches with deterministic fixtures.
