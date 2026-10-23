@@ -9,6 +9,8 @@ import math
 import random
 import time
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
+from functools import lru_cache
 from typing import Any, Self, TypeVar
 
 import httpx
@@ -378,7 +380,7 @@ class OpenRouterClient:
                 "json_schema": {
                     "name": schema.__name__,
                     "strict": True,
-                    "schema": strict_json_schema(schema),
+                    "schema": deepcopy(_strict_schema_template(schema)),
                 },
             }
             body["provider"] = {"require_parameters": True}
@@ -693,6 +695,13 @@ def _schema_error(
         response_received=response_received,
         response_body_received=response_body_received,
     )
+
+
+@lru_cache(maxsize=32)
+def _strict_schema_template(model: type[BaseModel]) -> dict[str, Any]:
+    # Static response contracts recur across people/chunks. Copy at the request
+    # boundary so callers cannot mutate the bounded shared schema templates.
+    return strict_json_schema(model)
 
 
 def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:

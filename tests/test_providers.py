@@ -4,11 +4,12 @@ import json
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, create_model
 
 from app.config import Settings
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
 from app.prompts.source_advisor import SOURCE_ADVISOR_SYSTEM_PROMPT
+from app.providers import openrouter as openrouter_module
 from app.providers.openrouter import (
     WEB_SEARCH_SYSTEM_PROMPT,
     OpenRouterClient,
@@ -274,6 +275,57 @@ def test_strict_json_schema_marks_nested_objects_strict() -> None:
 
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {"name", "optional_note"}
+
+
+def test_completion_bodies_reuse_schema_without_sharing_mutable_state(monkeypatch) -> None:
+    expected = strict_json_schema(TinyResponse)
+    builds = []
+
+    def build_schema(model):
+        builds.append(model)
+        return strict_json_schema(model)
+
+    monkeypatch.setattr(openrouter_module, "strict_json_schema", build_schema)
+    openrouter_module._strict_schema_template.cache_clear()
+    try:
+        client = OpenRouterClient(settings())
+        bodies = [
+            client._request_body(TinyResponse, "source-model", "JSON", {"index": index}, {})
+            for index in range(100)
+        ]
+        assert builds == [TinyResponse]
+        assert all(body["response_format"]["json_schema"]["schema"] == expected for body in bodies)
+        bodies[0]["response_format"]["json_schema"]["schema"]["properties"]["name"]["type"] = "number"
+        bodies[0]["response_format"]["json_schema"]["schema"]["required"].clear()
+        assert bodies[1]["response_format"]["json_schema"]["schema"] == expected
+        fresh = client._request_body(TinyResponse, "source-model", "JSON", {}, {})
+        assert fresh["response_format"]["json_schema"]["schema"] == expected
+        assert builds == [TinyResponse]
+    finally:
+        openrouter_module._strict_schema_template.cache_clear()
+
+
+def test_completion_schema_cache_evicts_old_contracts(monkeypatch) -> None:
+    builds = []
+
+    def build_schema(model):
+        builds.append(model)
+        return strict_json_schema(model)
+
+    monkeypatch.setattr(openrouter_module, "strict_json_schema", build_schema)
+    openrouter_module._strict_schema_template.cache_clear()
+    try:
+        client = OpenRouterClient(settings())
+        models = [create_model(f"TemporaryResponse{index}", value=(str, ...)) for index in range(33)]
+        for model in models:
+            client._request_body(model, "source-model", "JSON", {}, {})
+        assert openrouter_module._strict_schema_template.cache_info().currsize == 32
+        client._request_body(models[-1], "source-model", "JSON", {}, {})
+        assert len(builds) == 33
+        client._request_body(models[0], "source-model", "JSON", {}, {})
+        assert len(builds) == 34
+    finally:
+        openrouter_module._strict_schema_template.cache_clear()
 
 
 @pytest.mark.asyncio
