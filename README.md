@@ -45,12 +45,16 @@ their specific error codes.
   is required. A name-only row follows the normal broad but bounded research path.
 - Iterative public-source discovery, seed-aware identity gating, canonical URL
   deduplication, bounded static-to-browser recovery, and within-job content caching.
-- Seven output field decisions: the validated input name plus six evidence-derived
-  fields for current organisation, current job title, university, degree, subject,
-  and a representative profile link. The input name keeps its identity with display
-  casing normalized for output, carries
-  deterministic 100% input certainty, and is excluded from research confidence and
-  coverage; web identity assessment remains separate.
+- Eight output field decisions: the validated input name plus seven evidence-derived
+  fields for country of origin, current organisation, current job title, university,
+  degree, subject, and a representative profile link. Country of Origin requires an
+  explicit biographical statement that the person is from a recognized country;
+  residence, citizenship, employer location, and university location alone do not
+  establish it. Conflicting origins remain unselected for review. The input name keeps
+  its identity with display casing normalized for output, carries deterministic 100%
+  input certainty, and is excluded from research confidence and
+  coverage; web identity assessment remains separate. Each output record also exposes
+  `legacy_coverage` over the original six researched fields for historical comparison.
 - Spreadsheet organisation, title, country/location, university, subject, year, and
   known attributes narrow initial searches, rank candidates, and constrain identity
   resolution. They are hypotheses to verify and never become claims, provenance,
@@ -109,10 +113,15 @@ their specific error codes.
   so stronger official evidence wins conflicts.
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
-- Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. The
-  default export stays compact; an additive [field-provenance mode](docs/exports.md)
-  includes the supporting URLs for every selected field. XLSX marks only populated
-  fields below the configured review threshold, and their confidence cells, in pale yellow.
+- Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. Every
+  export starts with the same eight research columns in this order: `full_name`,
+  `country_of_origin`, `organisation`, `job_title`, `university_name`, `degree_type`,
+  `subject`, `profile_link`. Confidence, coverage, review, status, error, and aggregate
+  provenance follow in fixed positions; optional field URLs follow that standard
+  prefix, then original input metadata. The additive
+  [field-provenance mode](docs/exports.md) includes the supporting URLs for every
+  selected field. XLSX marks only populated fields below the configured review
+  threshold, and their confidence cells, in pale yellow.
 - Human-readable CSV/XLSX filenames use the first nonempty source-list value and the
   job start time in UTC, such as `Forbes-2000_2026-09-29_0241.xlsx`; repeated exports
   retain that filename. A shared internal [results library](docs/library.md) retains
@@ -172,8 +181,10 @@ Chromium sandbox support on the target runtime.
 
 The shared library adds migration `202609290001` for retained CSV/XLSX bytes and
 minimal file metadata. Run `alembic upgrade head` in the web pre-deploy step and
-redeploy web and worker from the same revision. Existing research tables and export
-columns are unchanged. Back up saved files with the PostgreSQL database.
+redeploy web and worker from the same revision. Country of Origin and
+`legacy_coverage` use existing profile JSON, so this refinement needs no new database
+migration; it does add columns to normal and saved-file exports. Back up saved files
+with the PostgreSQL database.
 
 ## Configuration
 

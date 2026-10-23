@@ -169,7 +169,17 @@ Field quality is relationship-aware:
 - education fields can support a record only from the credential cluster assigned to
   that record.
 
-The code does not use a large organisation, role or country dictionary.
+The role and organisation classifiers do not use a broad country-to-office mapping.
+Country of Origin instead uses exact, deterministic recognition of full country names
+from the ISO 3166 catalogue; it does not infer origin from nationality adjectives,
+country codes, a name, or an institution's location. A model-supplied origin claim must
+also contain a literal origin relationship in retrieved biographical text, such as
+“is from Kenya” or “country of origin is Kenya”. Citizenship, nationality, residence,
+and birthplace alone are not enough. The source still passes ordinary grounding and
+identity checks, and seed country remains an unverified identity clue. The selected
+country name is normalized for display while the literal quote and source provenance
+remain intact. Distinct supported origin countries cause the person-level decision to
+remain null with `CONFLICTING_ORIGIN_EVIDENCE` review rather than choosing one by score.
 
 ## Field formula
 
@@ -240,9 +250,10 @@ Record review is separate and intentionally rare. A record is escalated only for
 identity ambiguity, an unresolved current-role conflict or incomplete role
 relationship, education-grouping ambiguity, a descriptive job title, a critical field
 or representative link suppressed below the selection floor, a material critical-field
-conflict, no reliable representative source for otherwise substantive enrichment, or
-at least two populated critical fields below the review threshold. The guaranteed seed
-name is excluded from these research-quality checks.
+conflict or conflicting origin countries, no reliable representative source for
+otherwise substantive enrichment, or at least two populated critical fields below
+the review threshold. The guaranteed seed name is excluded from these
+research-quality checks.
 One weak optional subject, a suppressed optional subject, one fetch failure, a weak
 non-material conflict, or incomplete coverage does not escalate the record.
 Usable incomplete profiles use `research_status=partial_coverage` unless their evidence
@@ -291,10 +302,9 @@ one qualification remains one record until positive evidence establishes another
   reviewable without manufacturing a credential.
 
 Each confirmed credential or reliable partial institution becomes a `ProfileRecord`.
-The immutable seed name and
-selected current-role decisions are copied into every record; university, degree and
-subject decisions are scoped to that credential. No confirmed education produces one
-general record.
+The immutable seed name, selected Country of Origin, and current-role decisions are
+copied into every record; university, degree, and subject decisions are scoped to that
+credential. No confirmed education produces one general record.
 `PersonProfile.fields` remains the deterministic primary-record projection for older
 clients, while `PersonProfile.records` is the complete additive result.
 
@@ -346,8 +356,8 @@ grounding, pairing, source-authority, and conflict rules.
 
 ## Representative profile link
 
-The representative link is derived after the other six fields for each record. For
-every eligible source, reconciliation counts distinct selected fields that source
+The representative link is derived after the other researched fields for each record.
+For every eligible source, reconciliation counts distinct selected fields that source
 supports. Social and other source-policy exclusions cannot win or provide a fallback.
 Source identity must clear the existing identity minimum, and each contributing
 claim must clear the selected-value floor. Composite claim strength is not itself
@@ -384,18 +394,23 @@ claims, quoted evidence, URLs, confidence, review flags, and provenance are unch
 For each output record:
 
 ```text
-research_fields = organisation, job_title, university_name, degree_type,
-                  subject, profile_link
+research_fields = country_of_origin, organisation, job_title, university_name,
+                  degree_type, subject, profile_link
 present = research_fields whose selected value is not null
 profile_confidence = weighted mean(field_confidence for present research_fields)
-coverage = 100 * number_of_present_research_fields / 6
+coverage = 100 * number_of_present_research_fields / 7
+legacy_coverage = 100 * number_of_present_original_six_fields / 6
 ```
 
-The immutable `full_name` decision is deliberately absent from both formulas, so its
+The immutable `full_name` decision is deliberately absent from these formulas, so its
 100 input-certainty score cannot inflate research quality or turn a no-evidence result
 into partial coverage. Coverage measures evidence-derived completeness and never
 changes a field's confidence. The legacy profile exposes the primary record's
-confidence and coverage; every `ProfileRecord` has its own values.
+confidence and coverage; every `ProfileRecord` has its own values. `legacy_coverage`
+keeps the original six researched fields comparable across revisions. Older stored
+profiles lacking Country of Origin load with an explicit missing decision and derive
+both the seven-field `coverage` and six-field `legacy_coverage` from their selected
+fields, without adding web evidence or changing their old field decisions.
 
 All tunable numeric weights remain in `ScoringPolicy`. Partial nested environment
 overrides merge with defaults, for example `SCORING__SELECTION_THRESHOLD=10` and

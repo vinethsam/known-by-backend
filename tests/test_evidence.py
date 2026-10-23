@@ -582,7 +582,7 @@ def test_profile_confidence_is_separate_from_coverage():
     confidence, coverage = profile_scores(fields, ScoringPolicy())
     assert confidence == coverage == 0
     fields[ProfileField.organisation] = FieldDecision(value="Example", confidence=45)
-    assert profile_scores(fields, ScoringPolicy()) == (45, 16.67)
+    assert profile_scores(fields, ScoringPolicy()) == (45, 14.29)
 
 
 def test_reconciliation_preserves_conflicts_and_missing_fields():

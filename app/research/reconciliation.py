@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from app.config import ScoringPolicy
+from app.research.claims import origin_is_explicit
 from app.research.confidence import (
     EDUCATION_FIELDS,
     VOLATILE_FIELDS,
@@ -45,6 +46,7 @@ from app.research.normalisation import (
     is_non_organisation_place,
     is_probable_country_context,
     name_key,
+    normalise_country_name,
     normalise_degree_candidates,
     normalise_display,
 )
@@ -740,7 +742,7 @@ def _decision(
     source_ids = list(dict.fromkeys(claim.source_id for claim in support))
     display = (
         selected.normalised_value
-        if field_name == ProfileField.degree_type
+        if field_name in {ProfileField.degree_type, ProfileField.country_of_origin}
         else normalise_display(
             field_name,
             selected.normalised_value if field_name == ProfileField.subject else selected.raw_value,
@@ -1323,11 +1325,14 @@ def _record_review(
         reasons.append("IDENTITY_AMBIGUITY")
     if "CURRENT_ROLE_CONFLICT" in all_reasons:
         reasons.append("CURRENT_ROLE_CONFLICT")
+    if "CONFLICTING_ORIGIN_EVIDENCE" in all_reasons:
+        reasons.append("CONFLICTING_ORIGIN_EVIDENCE")
     if "EDUCATION_GROUPING_AMBIGUITY" in all_reasons:
         reasons.append("EDUCATION_GROUPING_AMBIGUITY")
     if "DESCRIPTIVE_JOB_TITLE" in all_reasons:
         reasons.append("DESCRIPTIVE_JOB_TITLE")
     selection_floor_fields = {
+        ProfileField.country_of_origin,
         ProfileField.organisation,
         ProfileField.job_title,
         ProfileField.university_name,
@@ -1342,6 +1347,7 @@ def _record_review(
     critical_decisions = [
         fields[field_name]
         for field_name in {
+            ProfileField.country_of_origin,
             ProfileField.organisation,
             ProfileField.job_title,
             ProfileField.university_name,
@@ -1371,6 +1377,7 @@ def _record_review(
     ):
         reasons.append("NO_RELIABLE_REPRESENTATIVE_SOURCE")
     critical_fields = {
+        ProfileField.country_of_origin,
         ProfileField.organisation,
         ProfileField.job_title,
         ProfileField.university_name,
@@ -1427,6 +1434,13 @@ def reconcile(
         and claim.source_id in eligible_source_ids
         and not sources[claim.source_id].identity.rejected
         and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
+        and (
+            claim.field != ProfileField.country_of_origin
+            or (
+                normalise_country_name(claim.raw_value) == claim.normalised_value
+                and origin_is_explicit(claim.raw_value, claim.evidence_text, seed.full_name)
+            )
+        )
     ]
     unconfirmed = [
         claim
@@ -1463,6 +1477,27 @@ def reconcile(
             "formula_version": "seed-input-v1",
         },
     )
+    origin_claims = [claim for claim in accepted if claim.field == ProfileField.country_of_origin]
+    distinct_origins = {claim.normalised_value for claim in origin_claims}
+    if len(distinct_origins) > 1:
+        origin = FieldDecision(
+            alternative_claim_ids=[claim.claim_id for claim in origin_claims],
+            conflicting_claim_ids=[claim.claim_id for claim in origin_claims],
+            review_required=True,
+            review_reason_codes=["CONFLICTING_ORIGIN_EVIDENCE"],
+            scoring_components={"candidate_values": sorted(distinct_origins)},
+        )
+    else:
+        origin = _decision(
+            ProfileField.country_of_origin,
+            origin_claims,
+            sources,
+            policy,
+            today,
+            identities,
+            qualities,
+            quality_reasons,
+        )
     employment = _employment_decisions(
         accepted,
         seed,
@@ -1481,6 +1516,7 @@ def reconcile(
     for scope_index, cluster in enumerate(education_scopes):
         fields = {
             ProfileField.full_name: full_name.model_copy(deep=True),
+            ProfileField.country_of_origin: origin.model_copy(deep=True),
             ProfileField.organisation: employment[ProfileField.organisation].model_copy(deep=True),
             ProfileField.job_title: employment[ProfileField.job_title].model_copy(deep=True),
         }

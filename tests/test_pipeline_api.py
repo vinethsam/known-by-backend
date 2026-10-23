@@ -271,7 +271,9 @@ async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, m
     assert person.status in {"completed", "review_required"}, person.error_code
     assert person.result.profile.fields[ProfileField.organisation].value == "Example Foundation"
     assert person.result.profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
-    assert person.result.profile.coverage == 100
+    assert person.result.profile.coverage == 85.71
+    assert person.result.profile.legacy_coverage == 100
+    assert person.result.profile.fields[ProfileField.country_of_origin].value is None
     assert len(person.result.sources) == 2
     assert all(c.source_id in {s.source_id for s in person.result.sources} for c in person.result.claims)
     assert {"test/source", "test/extraction"} == set(calls["models"])
@@ -635,7 +637,10 @@ async def test_batch_worker_reuses_retrieval_and_stops(tmp_path, monkeypatch):
         await worker
     assert store.get_job(job.job_id).status == "completed"
     assert len(calls["fetched"]) == 2
-    assert all(p.result.profile.coverage == 100 for p in store.get_results(job.job_id).people)
+    assert all(
+        p.result.profile.coverage == 85.71 and p.result.profile.legacy_coverage == 100
+        for p in store.get_results(job.job_id).people
+    )
 
 
 @pytest.mark.asyncio
@@ -818,7 +823,8 @@ async def test_discovered_backlog_is_used_before_searching_and_classification_is
     assert calls["plans"] == 0
     assert sorted(calls["fetched"]) == sorted(urls)
     assert sorted(calls["validated"]) == sorted(urls)
-    assert result.profile.coverage == 100
+    assert result.profile.coverage == 85.71
+    assert result.profile.legacy_coverage == 100
 
 
 @pytest.mark.asyncio
@@ -834,7 +840,8 @@ async def test_discovery_and_extraction_can_use_same_model(tmp_path, monkeypatch
         PersonSeed(full_name="Jane Doe", organisation="Example Foundation", country="Ghana"),
     )
     assert set(calls["models"]) == {"test/shared"}
-    assert result.profile.coverage == 100
+    assert result.profile.coverage == 85.71
+    assert result.profile.legacy_coverage == 100
 
 
 @pytest.mark.asyncio
@@ -944,14 +951,17 @@ def test_api_batch_and_export_contracts(tmp_path, kind):
             assert export.status_code == 200
             if output == "xlsx":
                 sheet = load_workbook(io.BytesIO(export.content)).active
-                assert sheet.cell(2, 1).value == "Jane Doe"
+                headers = [cell.value for cell in sheet[1]]
+                assert headers[:2] == ["full_name", "country_of_origin"]
+                assert sheet.cell(2, headers.index("Person") + 1).value == "Jane Doe"
             else:
                 assert "Department" in export.text and "Jane Doe" in export.text
         rich_export = client.get(f"/v1/jobs/{job_id}/export?format=csv&provenance=field", headers=AUTH)
         assert rich_export.status_code == 200
         rich_headers = next(csv.reader(io.StringIO(rich_export.content.decode("utf-8-sig"))))
         assert "full_name_source_urls" in rich_headers
-        assert rich_headers.index("full_name_source_urls") == rich_headers.index("full_name_confidence") + 1
+        assert rich_headers[:2] == ["full_name", "country_of_origin"]
+        assert rich_headers.index("full_name_source_urls") > rich_headers.index("source_urls")
         assert client.get(f"/v1/jobs/{job_id}/export?provenance=claims", headers=AUTH).status_code == 422
 
 

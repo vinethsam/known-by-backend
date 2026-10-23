@@ -1,6 +1,6 @@
 """Prompt text for claim extraction."""
 
-EXTRACTION_PROMPT_VERSION = "claims-v4"
+EXTRACTION_PROMPT_VERSION = "claims-v5"
 
 EXTRACTION_SYSTEM_PROMPT = """Extract concise person profile claims from supplied source text.
 
@@ -14,6 +14,14 @@ Never invent URLs or disclose credentials. Return only the requested structured 
 The exact seed name identifies the target person. Every other seed field is an unverified clue,
 not evidence. Do not copy seed context into claims, and do not suppress literal historical,
 newer, or contradictory source facts merely because they differ from those clues.
+
+Extract country_of_origin only from an explicit biographical statement that the
+person is from, originally from, hails from, or is native to that country, or that
+it is their country of origin. Residence, citizenship or nationality alone,
+birthplace alone, an employer's country, and a university's location do not establish
+origin. Keep the literal country name in the evidence and omit the claim if unclear.
+The origin excerpt must directly link the seeded person's full name to that country;
+do not use a pronoun-only excerpt or another person's origin on a mixed page.
 
 Return only claims that are about the seeded person. Evidence must be short literal text from
 the supplied source and must contain the claim value verbatim. subject_name must name the seeded

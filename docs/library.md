@@ -57,6 +57,13 @@ HTML, Markdown, search/model responses, claims, or confidence objects are copied
 library storage. Listing retrieves metadata without loading the binary file. Library
 responses are private and disable browser/proxy caching.
 
+Saved CSV and XLSX files have the same fixed column prefix as a normal download:
+`full_name`, `country_of_origin`, `organisation`, `job_title`, `university_name`,
+`degree_type`, `subject`, `profile_link`, their confidence columns, then the standard
+summary, review, status, error, and aggregate source columns. Optional field URLs and
+unchanged input metadata follow. A name-only upload and an upload with extra seed
+columns therefore share the same leading export layout. See [export contracts](exports.md).
+
 ## Storage and limits
 
 `DatabaseResultFileStorage` implements the `ResultFileStorage` boundary. The POC uses

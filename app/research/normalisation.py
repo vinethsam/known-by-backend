@@ -6,6 +6,9 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
+
+import pycountry
 
 from app.input_validation import repair_mojibake
 from app.schemas import PersonProfile, ProfileField, SourceType
@@ -293,6 +296,29 @@ def comparison_key(value: str) -> str:
 def name_key(value: str) -> str:
     key = comparison_key(value)
     return re.sub(r"^(dr|prof|professor|mr|mrs|ms)\s+", "", key)
+
+
+@lru_cache(maxsize=1)
+def _country_name_map() -> dict[str, str]:
+    """Use ISO country names without fuzzy or nationality-word inference."""
+
+    names: dict[str, str] = {}
+    for country in pycountry.countries:
+        display = getattr(country, "common_name", country.name)
+        for label in (
+            country.name,
+            getattr(country, "common_name", ""),
+            getattr(country, "official_name", ""),
+        ):
+            if label:
+                names[comparison_key(label)] = display
+    return names
+
+
+def normalise_country_name(value: str) -> str | None:
+    """Return a canonical full country name or None for unsupported terms/codes."""
+
+    return _country_name_map().get(comparison_key(value))
 
 
 def _accentless_key(value: str) -> str:
@@ -699,6 +725,11 @@ def normalise_degree_candidates(value: str) -> list[NormalisationResult]:
 def normalise_value(field: ProfileField, value: str) -> NormalisationResult:
     display = _clean_display(value)
     key = comparison_key(display)
+    if field == ProfileField.country_of_origin:
+        country = normalise_country_name(display)
+        return NormalisationResult(
+            country or "", 1 if country else 0, None if country else "UNRECOGNIZED_COUNTRY"
+        )
     if field == ProfileField.degree_type:
         return normalise_degree_candidates(display)[0]
     if field == ProfileField.subject:
@@ -718,6 +749,8 @@ def normalise_display(field: ProfileField, value: str) -> str:
     if field == ProfileField.profile_link:
         return value
     display = _clean_display(value)
+    if field == ProfileField.country_of_origin:
+        return normalise_country_name(display) or display
     if field == ProfileField.degree_type:
         return normalise_value(field, display).value
     if field == ProfileField.full_name:

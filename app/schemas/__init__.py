@@ -7,7 +7,15 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from app.input_validation import MAX_INPUT_URL_CHARS, normalized_input_text, validate_input_text
 
@@ -28,6 +36,7 @@ class Contract(BaseModel):
 
 class ProfileField(StrEnum):
     full_name = "full_name"
+    country_of_origin = "country_of_origin"
     organisation = "organisation"
     job_title = "job_title"
     university_name = "university_name"
@@ -232,6 +241,43 @@ class FieldDecision(Contract):
     scoring_components: dict[str, Any] = Field(default_factory=dict)
 
 
+LEGACY_RESEARCH_FIELDS = (
+    ProfileField.organisation,
+    ProfileField.job_title,
+    ProfileField.university_name,
+    ProfileField.degree_type,
+    ProfileField.subject,
+    ProfileField.profile_link,
+)
+
+
+def legacy_research_coverage(fields: dict[ProfileField, FieldDecision]) -> float:
+    """Keep the original six-researched-field measure comparable across revisions."""
+
+    return round(
+        100
+        * sum(bool(fields.get(field) and fields[field].value is not None) for field in LEGACY_RESEARCH_FIELDS)
+        / len(LEGACY_RESEARCH_FIELDS),
+        2,
+    )
+
+
+def _fill_profile_origin_and_coverage(profile: ProfileRecord | PersonProfile) -> None:
+    """Adapt stored pre-origin profiles without changing their source decisions."""
+
+    missing_origin = ProfileField.country_of_origin not in profile.fields
+    profile.fields.setdefault(ProfileField.country_of_origin, FieldDecision())
+    if profile.legacy_coverage is None:
+        profile.legacy_coverage = legacy_research_coverage(profile.fields)
+    if missing_origin:
+        researched = (field for field in ProfileField if field != ProfileField.full_name)
+        present = sum(
+            bool(profile.fields.get(field) and profile.fields[field].value is not None)
+            for field in researched
+        )
+        profile.coverage = round(100 * present / (len(ProfileField) - 1), 2)
+
+
 class ProfileRecord(Contract):
     """One exportable record for a person, scoped to one education credential."""
 
@@ -243,6 +289,12 @@ class ProfileRecord(Contract):
     status: PersonStatus = PersonStatus.review_required
     sources_used: int = 0
     review_reason_codes: list[str] = Field(default_factory=list)
+    legacy_coverage: float | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def fill_legacy_field(self):
+        _fill_profile_origin_and_coverage(self)
+        return self
 
 
 class ResearchMetrics(Contract):
@@ -280,6 +332,12 @@ class PersonProfile(Contract):
     started_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime = Field(default_factory=utcnow)
     metrics: ResearchMetrics = Field(default_factory=ResearchMetrics)
+    legacy_coverage: float | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def fill_legacy_field(self):
+        _fill_profile_origin_and_coverage(self)
+        return self
 
 
 class UsageRecord(Contract):

@@ -4,6 +4,27 @@ Trial jobs use the production API, queue, worker, providers, and settings; offli
 fixtures replace external network responses without a second research pipeline or
 paid provider calls. Docker and CI target Python 3.13.
 
+## Eight-field export and Country of Origin, 2026-10-23
+
+| Check | Result |
+| --- | --- |
+| Full offline suite | **792 passed, 6 skipped, 2 warnings**; six PostgreSQL runtime cases require `TEST_POSTGRES_URL` |
+| Origin-specific regressions | **35 passed**, including grounded/rejected origin, mixed-page exclusion, conflicts, multi-record propagation, older JSON, and unchanged provider/search call counts |
+| Ruff lint | `ruff check app tests` passed |
+| Ruff formatting | All 14 changed Python files passed `ruff format --check` |
+| Compile/import | Application modules compiled and API, schema, research, and export imports passed |
+| Alembic | Single head `202609290001`; full-suite fresh SQLite upgrade, schema-drift check, downgrade, and PostgreSQL SQL compilation passed |
+| Git diff whitespace check | Passed |
+
+The export checks compare the fixed standard prefix across CSV/XLSX, name-only and
+context-rich input, provenance modes, and Shared Library saves. Country of Origin
+uses externally grounded source claims; an input country alone remains unverified.
+Missing origin is a null decision. Older JSON profiles load with recalculated
+seven-researched-field `coverage` and comparable six-field `legacy_coverage`.
+This addition uses existing JSON persistence, so no database migration was added.
+The offline pipeline comparison confirms no additional provider or search calls.
+No live or paid provider request was made.
+
 ## Latest targeted quality refinement, 2026-10-22
 
 | Check | Result |

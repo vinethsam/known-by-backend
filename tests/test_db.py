@@ -57,6 +57,7 @@ def _store(tmp_path, **overrides):
 def _result(person_id: str, status: PersonStatus = PersonStatus.completed) -> ResearchResult:
     values = {
         ProfileField.full_name: "Ada Lovelace",
+        ProfileField.country_of_origin: "United Kingdom",
         ProfileField.organisation: "Example Company",
         ProfileField.job_title: "Director",
         ProfileField.university_name: "Example University",

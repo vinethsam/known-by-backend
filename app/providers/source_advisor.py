@@ -12,7 +12,7 @@ from app.prompts.source_advisor import (
 )
 from app.providers.openrouter import AttemptCallback, OpenRouterClient, UsageCallback
 from app.research.identity import research_seed_payload
-from app.schemas import Contract, PersonSeed, SourceCandidate, SourceType, UsageRecord
+from app.schemas import Contract, PersonSeed, ProfileField, SourceCandidate, SourceType, UsageRecord
 
 MAX_USAGE_RECORDS = 100
 
@@ -86,7 +86,9 @@ class SourceAdvisor:
                 "task": "plan_search_queries",
                 "seed": research_seed_payload(seed),
                 "known_clues": known_clues[:12],
-                "unresolved_fields": [str(field)[:80] for field in context.get("unresolved_fields", [])[:7]],
+                "unresolved_fields": [
+                    str(field)[:80] for field in context.get("unresolved_fields", [])[: len(ProfileField)]
+                ],
             },
             context,
             self.prompt_version,

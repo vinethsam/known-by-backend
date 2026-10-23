@@ -243,7 +243,8 @@ class ResearchOrchestrator:
                         decision.value is not None
                         and decision.confidence >= settings.TARGET_FIELD_CONFIDENCE
                         and not decision.review_required
-                        for decision in fields.values()
+                        for field_name, decision in fields.items()
+                        if field_name != ProfileField.country_of_origin
                     )
                     for fields in record_fields
                 ):

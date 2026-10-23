@@ -10,6 +10,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
+from app.export.schema import RESEARCH_FIELDS, provenance_columns, standard_columns
 from app.research.normalisation import finalize_display
 from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
@@ -29,7 +30,7 @@ def export_results(
     if provenance not in {"none", "field"}:
         raise ValueError("Unsupported provenance mode")
     rows, output_columns = _flatten_results(results, columns, provenance=provenance)
-    field_columns = _field_column_pairs(output_columns, len(columns), provenance)
+    field_columns = _field_column_pairs()
     normalized = format.lower()
     if normalized == "csv":
         return _export_csv(rows, output_columns)
@@ -50,15 +51,12 @@ def _flatten_results(
     provenance: ProvenanceMode = "none",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     original_columns = list(columns)
-    enrichments = ["status", "error_code"]
-    for field in ProfileField:
-        enrichments.extend([field.value, f"{field.value}_confidence"])
-        if provenance == "field":
-            enrichments.append(f"{field.value}_source_urls")
-    enrichments.extend(["profile_confidence", "coverage", "review_required", "source_urls"])
-    used_columns = list(original_columns)
-    output_columns = original_columns + [_unique_column(name, used_columns) for name in enrichments]
-    enrichment_map = dict(zip(enrichments, output_columns[len(original_columns) :], strict=True))
+    standard = list(standard_columns())
+    if provenance == "field":
+        standard.extend(provenance_columns())
+    used_columns = list(standard)
+    metadata_map = {name: _unique_column(name, used_columns) for name in original_columns}
+    output_columns = used_columns
 
     rows: list[dict[str, Any]] = []
     for person in results.people:
@@ -68,8 +66,8 @@ def _flatten_results(
             # one record with the same columns and final selected-value normalization.
             records = list(getattr(profile, "records", ()) or (profile,))
             for record in records:
-                row = _base_row(person, original_columns, enrichment_map, status=record.status)
-                for field in ProfileField:
+                row = _base_row(person, metadata_map, status=record.status)
+                for field in RESEARCH_FIELDS:
                     decision = record.fields.get(field)
                     if (
                         field == ProfileField.profile_link
@@ -78,51 +76,44 @@ def _flatten_results(
                         and not source_policy_allows(decision.value)
                     ):
                         decision = None
-                    row[enrichment_map[field.value]] = (
-                        decision.value if decision and decision.value is not None else ""
-                    )
-                    row[enrichment_map[f"{field.value}_confidence"]] = decision.confidence if decision else 0
+                    row[field.value] = decision.value if decision and decision.value is not None else ""
+                    row[f"{field.value}_confidence"] = decision.confidence if decision else 0
                     if provenance == "field":
-                        row[enrichment_map[f"{field.value}_source_urls"]] = _compact_urls(
+                        row[f"{field.value}_source_urls"] = _compact_urls(
                             decision.sources if decision else ()
                         )
-                row[enrichment_map["profile_confidence"]] = record.profile_confidence
-                row[enrichment_map["coverage"]] = record.coverage
-                row[enrichment_map["review_required"]] = record.review_required
-                row[enrichment_map["source_urls"]] = _compact_source_urls(person.result)
+                row["profile_confidence"] = record.profile_confidence
+                row["coverage"] = record.coverage
+                row["legacy_coverage"] = record.legacy_coverage
+                row["review_required"] = record.review_required
+                row["source_urls"] = _compact_source_urls(person.result)
                 rows.append(row)
         else:
-            row = _base_row(person, original_columns, enrichment_map)
-            for field in ProfileField:
-                row[enrichment_map[field.value]] = ""
-                row[enrichment_map[f"{field.value}_confidence"]] = ""
+            row = _base_row(person, metadata_map)
+            for field in RESEARCH_FIELDS:
+                row[field.value] = ""
+                row[f"{field.value}_confidence"] = ""
                 if provenance == "field":
-                    row[enrichment_map[f"{field.value}_source_urls"]] = ""
-            row[enrichment_map["profile_confidence"]] = ""
-            row[enrichment_map["coverage"]] = ""
-            row[enrichment_map["review_required"]] = ""
-            row[enrichment_map["source_urls"]] = ""
+                    row[f"{field.value}_source_urls"] = ""
+            row["profile_confidence"] = ""
+            row["coverage"] = ""
+            row["legacy_coverage"] = ""
+            row["review_required"] = ""
+            row["source_urls"] = ""
             rows.append(row)
     return rows, output_columns
 
 
-def _base_row(person, original_columns, enrichment_map, *, status=None) -> dict[str, Any]:
-    row = {column: person.original_row.get(column, "") for column in original_columns}
+def _base_row(person, metadata_map, *, status=None) -> dict[str, Any]:
+    row = {output: person.original_row.get(source, "") for source, output in metadata_map.items()}
     effective_status = status or person.status
-    row[enrichment_map["status"]] = getattr(effective_status, "value", effective_status)
-    row[enrichment_map["error_code"]] = person.error_code or ""
+    row["status"] = getattr(effective_status, "value", effective_status)
+    row["error_code"] = person.error_code or ""
     return row
 
 
-def _field_column_pairs(
-    output_columns: list[str], original_count: int, provenance: ProvenanceMode
-) -> list[tuple[str, str]]:
-    cursor = original_count + 2  # status and error_code
-    pairs = []
-    for _ in ProfileField:
-        pairs.append((output_columns[cursor], output_columns[cursor + 1]))
-        cursor += 3 if provenance == "field" else 2
-    return pairs
+def _field_column_pairs() -> list[tuple[str, str]]:
+    return [(field.value, f"{field.value}_confidence") for field in RESEARCH_FIELDS]
 
 
 def _unique_column(name: str, existing: list[str]) -> str:

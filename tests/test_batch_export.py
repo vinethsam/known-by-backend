@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from app.config import Settings
 from app.export.batch import BatchParseError, normalize_header, parse_batch
 from app.export.formats import export_results
+from app.export.schema import provenance_columns, standard_columns
 from app.research.discovery import build_query
 from app.schemas import (
     FieldDecision,
@@ -321,10 +322,11 @@ def test_export_csv_is_formula_safe_and_collision_safe():
     data = export_results(_results(), ["name", "status"], "csv")
     rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
     assert rows[0]["name"] == "'+Ada Lovelace"
-    assert rows[0]["status"] == "original"
-    assert rows[0]["status (2)"] == "completed"
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["status (2)"] == "original"
     assert rows[0]["full_name"] == "'=Ada"
     assert rows[0]["source_urls"] == "https://example.com"
+    assert list(rows[0])[: len(standard_columns())] == list(standard_columns())
 
 
 def test_export_xlsx_is_readable_and_formula_safe():
@@ -334,8 +336,10 @@ def test_export_xlsx_is_readable_and_formula_safe():
     headers = [cell.value for cell in sheet[1]]
     row = [cell.value for cell in sheet[2]]
     workbook.close()
-    assert headers[:3] == ["name", "status", "status (2)"]
-    assert row[0] == "'+Ada Lovelace"
+    assert headers[: len(standard_columns())] == list(standard_columns())
+    assert row[headers.index("name")] == "'+Ada Lovelace"
+    assert row[headers.index("status")] == "completed"
+    assert row[headers.index("status (2)")] == "original"
     assert row[headers.index("full_name")] == "'=Ada"
 
 
@@ -361,8 +365,9 @@ def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
     def cell(column):
         return sheet.cell(2, headers.index(column) + 1)
 
-    assert cell("subject (2)").fill.fgColor.rgb.endswith("FFF2CC")
-    assert cell("subject_confidence (2)").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("subject").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("subject_confidence").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("subject (2)").fill.fill_type is None
     assert cell("degree_type").fill.fill_type is None
     assert cell("degree_type_confidence").fill.fill_type is None
     assert cell("university_name").fill.fill_type is None
@@ -448,7 +453,10 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
         rows = [dict(zip(headers, values[index], strict=True)) for index in range(1, len(values))]
 
     assert len(rows) == 2
-    assert headers.index("degree_type_source_urls") == headers.index("degree_type_confidence") + 1
+    assert headers[: len(standard_columns())] == list(standard_columns())
+    assert headers[len(standard_columns()) : len(standard_columns()) + len(provenance_columns())] == list(
+        provenance_columns()
+    )
     assert [row["degree_type"] for row in rows] == ["Bachelor's Degree", "Master's Degree"]
     assert [row["name"] for row in rows] == ["'+Ada Lovelace", "'+Ada Lovelace"]
     assert rows[0]["degree_type_source_urls"] == bachelor_url
@@ -545,7 +553,7 @@ def test_batch_without_source_list_metadata_keeps_existing_parse_and_export_shap
         csv.DictReader(io.StringIO(export_results(results, batch.columns, "csv").decode("utf-8-sig")))
     )
     assert exported[0]["name"] == "Jane Doe"
-    assert exported[0]["organisation"] == "Example Ltd"
+    assert exported[0]["organisation (2)"] == "Example Ltd"
     assert not ({"LIST_NAME", "source_list", "source_dataset", "cohort"} & set(exported[0]))
 
 
@@ -580,11 +588,38 @@ def test_export_rejects_unknown_provenance_mode():
 def test_export_has_each_enrichment_once_and_keeps_input_columns_unchanged():
     columns = ["name", "status", "status (2)", "full_name"]
     rows = list(csv.reader(io.StringIO(export_results(_results(), columns, "csv").decode("utf-8-sig"))))
-    assert len(rows[0]) == len(columns) + 20
+    assert len(rows[0]) == len(columns) + len(standard_columns())
     assert len(set(rows[0])) == len(rows[0])
-    assert rows[0][:4] == columns
-    assert "status (3)" in rows[0] and "full_name (2)" in rows[0]
+    assert rows[0][: len(standard_columns())] == list(standard_columns())
+    assert rows[0][len(standard_columns()) :] == [
+        "name",
+        "status (2)",
+        "status (2) (2)",
+        "full_name (2)",
+    ]
     assert columns == ["name", "status", "status (2)", "full_name"]
+
+
+@pytest.mark.parametrize("provenance", ["none", "field"])
+def test_standard_layout_is_identical_for_name_only_and_contextual_csv_xlsx(provenance):
+    results = _results()
+    standard = list(standard_columns())
+    optional = list(provenance_columns()) if provenance == "field" else []
+    for input_row in (
+        {"name": "Ada Lovelace"},
+        {"name": "Ada Lovelace", "company": "Example Ltd", "LIST_NAME": "Alumni"},
+    ):
+        results.people[0].original_row = input_row
+        columns = list(input_row)
+        for format in ("csv", "xlsx"):
+            data = export_results(results, columns, format, provenance=provenance)
+            if format == "csv":
+                headers = next(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
+            else:
+                workbook = load_workbook(io.BytesIO(data), read_only=True)
+                headers = [cell.value for cell in next(workbook.active.rows)]
+                workbook.close()
+            assert headers == [*standard, *optional, *columns]
 
 
 @pytest.mark.parametrize("format", ["csv", "xlsx"])
@@ -598,8 +633,8 @@ def test_export_escapes_headers_and_whitespace_prefixed_formulas(format):
         workbook = load_workbook(io.BytesIO(data), data_only=False)
         rows = list(workbook.active.values)
         workbook.close()
-    assert rows[0][0] == "' =header"
-    assert rows[1][0].startswith("' \t=")
+    assert rows[0][-1] == "' =header"
+    assert rows[1][-1].startswith("' \t=")
 
 
 @pytest.mark.parametrize("hidden_cell", ["Z2", "A10000"])
@@ -627,5 +662,5 @@ def test_xlsx_replaces_xml_invalid_input_without_losing_other_text():
     results.people[0].original_row["name"] = "Jane\x00 Doe"
     data = export_results(results, ["name"], "xlsx")
     workbook = load_workbook(io.BytesIO(data))
-    assert workbook.active.cell(2, 1).value == "Jane\ufffd Doe"
+    assert workbook.active.cell(2, len(standard_columns()) + 1).value == "Jane\ufffd Doe"
     workbook.close()

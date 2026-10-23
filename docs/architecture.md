@@ -25,23 +25,28 @@ or final enriched facts by themselves.
 ## Data and persistence
 
 Shared contracts live in `app/schemas/__init__.py`. IDs are UUID strings, timestamps
-are UTC, and JSON payloads use `model_dump(mode="json")`. Every profile has seven
+are UTC, and JSON payloads use `model_dump(mode="json")`. Every new profile has eight
 field decisions, including explicit missing values: one immutable input-name decision
-and six evidence-derived decisions. Raw claims and source provenance survive flat
-field selection. Web identity is assessed separately from both the name's input
-certainty and source authority. Final enriched-field/profile confidence is
-deterministic, with evidence-derived coverage reported separately.
+and seven evidence-derived decisions, including Country of Origin. Raw claims and
+source provenance survive flat field selection. Web identity is assessed separately
+from both the name's input certainty and source authority. Final profile confidence
+is deterministic, with evidence-derived coverage reported separately.
 
 Reconciliation is multi-source. A field decision can cite supporting claims and URLs
 from several independent sources. Distinct supported education credentials become
 separate `ProfileRecord` objects; the display-normalized seed name and selected
-current-employment decisions repeat on each record, while education claims stay scoped to their
-credential. Export projection starts from the complete original row, so passive
-source-list metadata repeats unchanged on every derived record. Identical people from
-different input rows or source lists remain separate tasks and results. The existing
-flat `PersonProfile.fields` is the deterministic primary-record projection.
+current-employment and Country of Origin decisions repeat on each record, while
+education claims stay scoped to their credential. Export projection places the fixed
+eight research fields first, then confidence, status, error, and provenance fields;
+the complete original row follows as metadata, repeating unchanged on every derived
+record. Identical people from different input rows or source lists remain separate
+tasks and results. The existing flat `PersonProfile.fields` is the deterministic
+primary-record projection.
 This additive record list is stored in the existing profile JSON, so old profile rows
-remain readable and no database migration is required.
+remain readable and no database migration is required. A historical profile without
+Country of Origin loads with an explicit missing decision. Its new seven-researched-field
+coverage is calculated from the selected fields, while `legacy_coverage` preserves the
+original six-field measure for comparison.
 
 PostgreSQL is the production database; SQLite supports development. SQLAlchemy
 transactions are short and synchronous, dispatched through thread pools during async
@@ -67,7 +72,13 @@ development; the existing single-token model grants the authorized team shared l
 download, save, and delete permissions. Saving adds no research or provider call.
 See [library API and limits](library.md).
 
-Normal downloads and saved artifacts use the same export renderer and filename helper.
+Normal downloads and saved artifacts use the same export renderer, centralized column
+registry, and filename helper. CSV and XLSX both start with `full_name`,
+`country_of_origin`, `organisation`, `job_title`, `university_name`, `degree_type`,
+`subject`, and `profile_link`; standard confidence, coverage, review, status, error,
+and provenance columns follow in fixed positions. Optional per-field URLs and original
+input columns follow without shifting that standard prefix. A colliding input header
+receives a numbered suffix in the metadata tail.
 The filename is `<List-Name>_<YYYY-MM-DD>_<HHmm>.<csv|xlsx>`, using the first nonempty
 source-list value in original input order and the job start in UTC (creation time for
 an unstarted job). Missing list names use `KnownBy`; safe Unicode names and encoded
@@ -216,6 +227,16 @@ The extraction role receives bounded processed text and returns schema-validated
 claims with literal evidence. Deterministic grounding and identity checks run before
 reconciliation. Search citations identify acquisition targets; they do not replace
 retrieved evidence for extracted profile claims.
+
+Country of Origin is extracted through that same path from existing retrieved text;
+its absence alone does not trigger extra discovery or provider calls. A claim needs an
+explicit biographical origin relationship and a recognizable full country name.
+Residence, citizenship or nationality alone, birthplace alone, employer geography,
+and university geography do not establish origin. Seed country is an identity clue,
+never evidence by itself. Reconciliation selects a single supported normalized
+country for the person, copies it to each credential record, and leaves conflicting
+supported countries null with a review reason. Literal evidence and source URLs remain
+attached to eligible claims; this adds no research budget or new model role.
 
 Source-local `fact_group` values link education and employment components but are not
 global identifiers. Before grouping, centralized deterministic normalization maps common

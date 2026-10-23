@@ -12,6 +12,7 @@ alembic>=1.14,<2
 psycopg[binary]>=3.2,<4
 python-multipart>=0.0.20,<1
 openpyxl>=3.1.5,<4
+pycountry==26.2.16
 pytest>=8.3,<10
 pytest-asyncio>=0.25,<2
 ruff>=0.9,<1
