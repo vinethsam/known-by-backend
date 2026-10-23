@@ -343,6 +343,63 @@ def test_export_xlsx_is_readable_and_formula_safe():
     assert row[headers.index("full_name")] == "'=Ada"
 
 
+def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
+    results = _results()
+    first = results.people[0]
+    first.original_row.update(note="+" + "x" * 49, wide_note="x" * 80)
+    second = first.model_copy(deep=True)
+    second.original_row.update(note="short", wide_note="short")
+    results.people.append(second)
+
+    data = export_results(results, ["note", "wide_note"], "xlsx")
+    workbook = load_workbook(io.BytesIO(data), data_only=False)
+    try:
+        sheet = workbook.active
+        headers = [cell.value for cell in sheet[1]]
+        note = sheet.cell(2, headers.index("note") + 1)
+        wide_note = sheet.cell(2, headers.index("wide_note") + 1)
+        assert note.value == "'" + first.original_row["note"]
+        # Preserve the existing widths based on raw input, before formula escaping.
+        assert sheet.column_dimensions[note.column_letter].width == 52
+        assert sheet.column_dimensions[wide_note.column_letter].width == 60
+        assert sheet.freeze_panes == "A2"
+        assert sheet.auto_filter.ref == sheet.dimensions
+        assert all(cell.font.bold and cell.fill.fgColor.rgb.endswith("D9EAF7") for cell in sheet[1])
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_export_source_urls_keep_first_ten_allowed_unique_urls(format):
+    results = _results()
+    person = results.people[0]
+    urls = [f"https://example.com/source/{index}" for index in range(12)]
+    person.result.sources = [
+        SourceRecord(
+            person_id=person.person_id,
+            requested_url=url,
+            final_url=url,
+            canonical_url=url,
+            domain=url.split("/")[2],
+        )
+        for url in [urls[0], "https://linkedin.com/blocked", *urls]
+    ]
+
+    data = export_results(results, [], format)
+    if format == "csv":
+        row = next(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+        source_urls = row["source_urls"]
+    else:
+        workbook = load_workbook(io.BytesIO(data))
+        try:
+            sheet = workbook.active
+            headers = [cell.value for cell in sheet[1]]
+            source_urls = sheet.cell(2, headers.index("source_urls") + 1).value
+        finally:
+            workbook.close()
+    assert source_urls == "; ".join(urls[:10])
+
+
 def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
     results = _results()
     fields = results.people[0].result.profile.fields

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 
 from openpyxl import Workbook
@@ -30,7 +31,6 @@ def export_results(
     if provenance not in {"none", "field"}:
         raise ValueError("Unsupported provenance mode")
     rows, output_columns = _flatten_results(results, columns, provenance=provenance)
-    field_columns = _field_column_pairs()
     normalized = format.lower()
     if normalized == "csv":
         return _export_csv(rows, output_columns)
@@ -38,7 +38,7 @@ def export_results(
         return _export_xlsx(
             rows,
             output_columns,
-            field_columns=field_columns,
+            field_columns=_field_column_pairs(),
             low_confidence_threshold=low_confidence_threshold,
         )
     raise ValueError("Unsupported export format")
@@ -49,22 +49,29 @@ def _flatten_results(
     columns: list[str],
     *,
     provenance: ProvenanceMode = "none",
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[Iterator[dict[str, Any]], list[str]]:
     original_columns = list(columns)
     standard = list(standard_columns())
     if provenance == "field":
         standard.extend(provenance_columns())
     used_columns = list(standard)
     metadata_map = {name: _unique_column(name, used_columns) for name in original_columns}
-    output_columns = used_columns
+    return _iter_rows(results, metadata_map, provenance=provenance), used_columns
 
-    rows: list[dict[str, Any]] = []
+
+def _iter_rows(
+    results: JobResults,
+    metadata_map: dict[str, str],
+    *,
+    provenance: ProvenanceMode,
+) -> Iterator[dict[str, Any]]:
     for person in results.people:
         if person.result:
             profile = finalize_display(person.result.profile)
             # Historical profiles have no records. Treat their flat decision set as
             # one record with the same columns and final selected-value normalization.
-            records = list(getattr(profile, "records", ()) or (profile,))
+            records = getattr(profile, "records", ()) or (profile,)
+            source_urls = _compact_source_urls(person.result)
             for record in records:
                 row = _base_row(person, metadata_map, status=record.status)
                 for field in RESEARCH_FIELDS:
@@ -86,8 +93,8 @@ def _flatten_results(
                 row["coverage"] = record.coverage
                 row["legacy_coverage"] = record.legacy_coverage
                 row["review_required"] = record.review_required
-                row["source_urls"] = _compact_source_urls(person.result)
-                rows.append(row)
+                row["source_urls"] = source_urls
+                yield row
         else:
             row = _base_row(person, metadata_map)
             for field in RESEARCH_FIELDS:
@@ -100,8 +107,7 @@ def _flatten_results(
             row["legacy_coverage"] = ""
             row["review_required"] = ""
             row["source_urls"] = ""
-            rows.append(row)
-    return rows, output_columns
+            yield row
 
 
 def _base_row(person, metadata_map, *, status=None) -> dict[str, Any]:
@@ -144,10 +150,16 @@ def _compact_source_urls(result) -> str:
 
 def _compact_urls(values, *, limit: int | None = None) -> str:
     urls: list[str] = []
+    seen: set[str] = set()
     for value in values:
         url = str(value)
-        if url and url not in urls and source_policy_allows(url):
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if source_policy_allows(url):
             urls.append(url)
+            if limit is not None and limit > 0 and len(urls) >= limit:
+                break
     return "; ".join(urls if limit is None else urls[:limit])
 
 
@@ -157,7 +169,7 @@ def _safe_cell(value: Any) -> Any:
     return value
 
 
-def _export_csv(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
+def _export_csv(rows: Iterable[dict[str, Any]], columns: list[str]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
     writer.writerow({column: _safe_cell(column) for column in columns})
@@ -167,7 +179,7 @@ def _export_csv(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
 
 
 def _export_xlsx(
-    rows: list[dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     columns: list[str],
     *,
     field_columns: list[tuple[str, str]] = (),
@@ -179,16 +191,19 @@ def _export_xlsx(
     sheet = workbook.active
     sheet.title = "Results"
     header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    header_font = Font(bold=True)
     for index, column in enumerate(columns, start=1):
         cell = sheet.cell(row=1, column=index, value=_xlsx_cell(column))
-        cell.font = Font(bold=True)
+        cell.font = header_font
         cell.fill = header_fill
-    for row_index, row in enumerate(rows, start=2):
-        for column_index, column in enumerate(columns, start=1):
-            sheet.cell(row=row_index, column=column_index, value=_xlsx_cell(row.get(column, "")))
     pale_yellow = PatternFill(fill_type="solid", fgColor="FFF2CC")
     column_indexes = {column: index for index, column in enumerate(columns, start=1)}
+    widths = [len(str(column)) for column in columns]
     for row_index, row in enumerate(rows, start=2):
+        for column_index, column in enumerate(columns, start=1):
+            value = row.get(column, "")
+            sheet.cell(row=row_index, column=column_index, value=_xlsx_cell(value))
+            widths[column_index - 1] = max(widths[column_index - 1], len(str(value)))
         for value_column, confidence_column in field_columns:
             value = row.get(value_column)
             confidence = row.get(confidence_column)
@@ -202,8 +217,7 @@ def _export_xlsx(
                 sheet.cell(row=row_index, column=column_indexes[confidence_column]).fill = pale_yellow
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    for index, column in enumerate(columns, start=1):
-        width = max([len(str(column)), *[len(str(row.get(column, ""))) for row in rows]])
+    for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = min(max(width + 2, 12), 60)
     buffer = io.BytesIO()
     workbook.save(buffer)
