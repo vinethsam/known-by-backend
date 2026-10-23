@@ -303,9 +303,7 @@ def assess_identity(
     target = name_key(seed.full_name)
     exact = contains_phrase(key, target)
     opening = re.split(r"[.!?;\r\n]+", text.strip(), maxsplit=1)[0]
-    named_biography_opening = len(opening.split()) <= 12 and contains_phrase(
-        comparison_key(opening), target
-    )
+    named_biography_opening = len(opening.split()) <= 12 and contains_phrase(comparison_key(opening), target)
     subject_matches = subject_name is None or name_key(subject_name) == target
     anchors = seed_identity_anchors(seed)
     signals = {
@@ -491,8 +489,10 @@ def eligible_identity_source_ids(
             continue
         key = _clue_key(claim.field.value, claim.normalised_value)
         keys[claim.source_id].add((claim.field, key))
-        if disputed_source_has_anchored_claim(claim.source_id) and claim.field.value in anchors and _matches_clue(
-            claim.field.value, anchors[claim.field.value], claim.raw_value
+        if (
+            disputed_source_has_anchored_claim(claim.source_id)
+            and claim.field.value in anchors
+            and _matches_clue(claim.field.value, anchors[claim.field.value], claim.raw_value)
         ):
             direct.add(claim.source_id)
     confirmed = set(direct)

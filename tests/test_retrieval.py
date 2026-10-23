@@ -513,8 +513,7 @@ def test_needs_browser_for_recoverable_static_failures_and_unusable_content():
     )
     longer_placeholder = shell.model_copy(
         update={
-            "html": "<main><p>Loading biography details, please wait. "
-            "We are gathering details.</p></main>"
+            "html": "<main><p>Loading biography details, please wait. We are gathering details.</p></main>"
         }
     )
     forbidden = shell.model_copy(update={"status": 403, "html": "Forbidden"})

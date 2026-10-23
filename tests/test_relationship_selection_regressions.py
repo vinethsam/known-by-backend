@@ -81,7 +81,9 @@ def test_newer_primary_employer_beats_stale_explicit_executive_label():
     seed = PersonSeed(full_name="Ajei Gopal")
     old, recent = _source("older-employer"), _source("recent-employer")
     claims = [
-        *_role(seed, old, "Legacy Systems", "Chief Executive Officer", current=True, observed=date(2018, 1, 1)),
+        *_role(
+            seed, old, "Legacy Systems", "Chief Executive Officer", current=True, observed=date(2018, 1, 1)
+        ),
         *_role(seed, recent, "New Systems", "Head of Operations", current=None, observed=date(2026, 9, 1)),
     ]
 
@@ -91,7 +93,9 @@ def test_newer_primary_employer_beats_stale_explicit_executive_label():
     assert record.fields[ProfileField.job_title].value == "Head of Operations"
     assert record.fields[ProfileField.organisation].selected_claim_id == "recent-employer-role-organisation"
     assert record.fields[ProfileField.job_title].selected_claim_id == "recent-employer-role-job_title"
-    assert "older-employer-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    assert (
+        "older-employer-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    )
     assert "older-employer-role-job_title" in record.fields[ProfileField.job_title].alternative_claim_ids
 
 
@@ -103,7 +107,9 @@ def test_new_publication_about_former_ceo_cannot_displace_explicit_current_emplo
     for claim in old_role:
         claim.evidence_text = "Jane Doe was Chief Executive Officer at Former Company."
     claims = [
-        *_role(seed, current, "Current Company", "Head of Operations", current=True, observed=date(2026, 8, 1)),
+        *_role(
+            seed, current, "Current Company", "Head of Operations", current=True, observed=date(2026, 8, 1)
+        ),
         *old_role,
     ]
 
@@ -111,7 +117,9 @@ def test_new_publication_about_former_ceo_cannot_displace_explicit_current_emplo
 
     assert record.fields[ProfileField.organisation].value == "Current Company"
     assert record.fields[ProfileField.job_title].value == "Head of Operations"
-    assert "new-publication-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    assert (
+        "new-publication-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    )
 
 
 @pytest.mark.parametrize(
@@ -136,7 +144,10 @@ def test_current_primary_employment_beats_newer_secondary_board_role(name, prima
     assert classify_relationship("Example Trust", board_title) is RelationshipType.board_role
     assert record.fields[ProfileField.organisation].selected_claim_id == "primary-employer-role-organisation"
     assert record.fields[ProfileField.job_title].selected_claim_id == "primary-employer-role-job_title"
-    assert "board-affiliation-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    assert (
+        "board-affiliation-role-organisation"
+        in record.fields[ProfileField.organisation].alternative_claim_ids
+    )
     assert "board-affiliation-role-job_title" in record.fields[ProfileField.job_title].alternative_claim_ids
 
 
@@ -144,7 +155,9 @@ def test_explicitly_historical_role_remains_an_alternative():
     seed = PersonSeed(full_name="Andrew Horton")
     old, recent = _source("historical-employer"), _source("current-employer")
     claims = [
-        *_role(seed, old, "Former Company", "Chief Executive Officer", current=False, observed=date(2018, 1, 1)),
+        *_role(
+            seed, old, "Former Company", "Chief Executive Officer", current=False, observed=date(2018, 1, 1)
+        ),
         *_role(seed, recent, "Current Company", "Managing Director", current=True, observed=date(2026, 9, 1)),
     ]
 
@@ -152,5 +165,8 @@ def test_explicitly_historical_role_remains_an_alternative():
 
     assert record.fields[ProfileField.organisation].value == "Current Company"
     assert record.fields[ProfileField.job_title].value == "Managing Director"
-    assert "historical-employer-role-organisation" in record.fields[ProfileField.organisation].alternative_claim_ids
+    assert (
+        "historical-employer-role-organisation"
+        in record.fields[ProfileField.organisation].alternative_claim_ids
+    )
     assert "historical-employer-role-job_title" in record.fields[ProfileField.job_title].alternative_claim_ids

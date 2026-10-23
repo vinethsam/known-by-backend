@@ -65,9 +65,7 @@ def _claim(source: SourceRecord, seed: PersonSeed, field: ProfileField, value: s
 def test_official_seed_anchored_biography_survives_advisor_false_negative():
     seed = PersonSeed(full_name="Alexander Karp", organisation="Example Analytics")
     text = "Alexander Karp is Chief Executive Officer of Example Analytics."
-    match = assess_identity(
-        seed, text, POLICY, model_relevance="unrelated", source_type=SourceType.employer
-    )
+    match = assess_identity(seed, text, POLICY, model_relevance="unrelated", source_type=SourceType.employer)
 
     assert not match.rejected
     assert match.signals["matched_seed_anchors"] == ["organisation"]
@@ -117,9 +115,7 @@ def test_candidate_metadata_only_opens_retrieval_when_name_and_seed_institution_
     split_metadata = candidate.model_copy(
         update={"title": "Alexander Karp", "snippet": "Chief Executive Officer at Example Analytics"}
     )
-    unrelated = candidate.model_copy(
-        update={"title": "Alexander Karp | Other Company", "snippet": ""}
-    )
+    unrelated = candidate.model_copy(update={"title": "Alexander Karp | Other Company", "snippet": ""})
     partial = candidate.model_copy(update={"title": "Alex Karp | Example Analytics", "snippet": ""})
 
     assert candidate_has_seed_identity_context(seed, candidate)
@@ -148,10 +144,7 @@ def test_disputed_candidate_metadata_cannot_validate_a_different_fetched_person(
 
 def test_unanchored_claims_about_partial_namesake_do_not_gain_identity_from_footer():
     seed = PersonSeed(full_name="Bassel Mohamed Ali", organisation="Seed Organisation")
-    page = (
-        "Bassel Ali leads Other Company. This is his current role. "
-        "Related search: Bassel Mohamed Ali."
-    )
+    page = "Bassel Ali leads Other Company. This is his current role. Related search: Bassel Mohamed Ali."
     sources = [_source(key, seed, page) for key in ("first", "second")]
     claims = [
         _claim(source, seed, ProfileField.organisation, "Other Company", "Bassel Ali leads Other Company.")
@@ -169,10 +162,7 @@ def test_unanchored_claims_about_partial_namesake_do_not_gain_identity_from_foot
 
 def test_disputed_footer_anchor_cannot_admit_partial_namesake_claims():
     seed = PersonSeed(full_name="Bassel Mohamed Ali", organisation="Seed Organisation")
-    page = (
-        "Bassel Ali leads Other Company. "
-        "Related search: Bassel Mohamed Ali at Seed Organisation."
-    )
+    page = "Bassel Ali leads Other Company. Related search: Bassel Mohamed Ali at Seed Organisation."
     sources = [_source(key, seed, page, relevance="unrelated") for key in ("first", "second")]
     for source in sources:
         source.identity = assess_identity(
@@ -241,10 +231,7 @@ def test_disputed_mixed_page_rejects_partial_namesake_claim_even_with_valid_anch
 
 def test_disputed_same_sentence_namesakes_cannot_cross_validate_claims():
     seed = PersonSeed(full_name="Alexander Karp", organisation="Example Analytics")
-    page = (
-        "Alexander Karp is CEO at Example Analytics, while Alex Karp is CEO at "
-        "Aardvark Company."
-    )
+    page = "Alexander Karp is CEO at Example Analytics, while Alex Karp is CEO at Aardvark Company."
     source = _source("mixed-clause", seed, page, relevance="unrelated")
     source.identity = assess_identity(
         seed, page, POLICY, model_relevance="unrelated", source_type=SourceType.employer
@@ -277,10 +264,7 @@ def test_current_corrective_cluster_with_full_seed_name_remains_eligible():
     seed = PersonSeed(full_name="Hellen Munyasa", organisation="Old Organisation")
     text = "Hellen Munyasa is now Director at New Organisation."
     sources = [_source(key, seed, text) for key in ("first", "second")]
-    claims = [
-        _claim(source, seed, ProfileField.organisation, "New Organisation", text)
-        for source in sources
-    ]
+    claims = [_claim(source, seed, ProfileField.organisation, "New Organisation", text) for source in sources]
 
     assert eligible_identity_source_ids(
         seed, claims, {source.source_id: source for source in sources}, POLICY
@@ -293,8 +277,7 @@ def test_full_name_biography_heading_can_ground_a_following_pronoun_role():
     quote = "She is Director at New Organisation."
     sources = [_source(key, seed, page) for key in ("first", "second")]
     claims = [
-        _claim(source, seed, ProfileField.organisation, "New Organisation", quote)
-        for source in sources
+        _claim(source, seed, ProfileField.organisation, "New Organisation", quote) for source in sources
     ]
 
     assert eligible_identity_source_ids(
