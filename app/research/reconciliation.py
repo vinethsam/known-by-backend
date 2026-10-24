@@ -50,6 +50,7 @@ from app.research.normalisation import (
     normalise_degree_candidates,
     normalise_display,
 )
+from app.research.seed_provenance import attach_seed_provenance, supplied_attributes
 from app.schemas import (
     EvidenceClaim,
     FieldDecision,
@@ -1451,6 +1452,7 @@ def reconcile(
         and min(claim.identity_relevance, sources[claim.source_id].identity.score) >= policy.identity_minimum
     ]
     identities = effective_identity_scores(accepted, sources, policy, seed=seed)
+    seed_attributes = supplied_attributes(seed, accepted, sources)
     relation_fields = _relation_fields_by_claim(accepted)
     quality_pairs = {claim.claim_id: _quality_for_claim(claim, seed, relation_fields) for claim in accepted}
     qualities = {claim_id: quality for claim_id, (quality, _) in quality_pairs.items()}
@@ -1573,6 +1575,7 @@ def reconcile(
                     )
         profile_confidence, coverage = profile_scores(fields, policy)
         review, record_reasons = _record_review(fields, policy, web_identity)
+        attach_seed_provenance(fields, seed, seed_attributes, web_identity)
         records.append(
             ProfileRecord(
                 record_id=_record_id(fields),
@@ -1634,5 +1637,6 @@ def reconcile(
                 }
             ),
             records=records,
+            seed_attributes=seed_attributes,
         )
     )

@@ -41,4 +41,12 @@ def standard_columns() -> tuple[str, ...]:
 def provenance_columns() -> tuple[str, ...]:
     """Optional field URLs follow the stable prefix without moving its columns."""
 
-    return tuple(f"{field.value}_source_urls" for field in RESEARCH_FIELDS)
+    return (
+        *(f"{field.value}_source_urls" for field in RESEARCH_FIELDS),
+        *(
+            f"{field.value}_{detail}"
+            for field in RESEARCH_FIELDS
+            for detail in ("supplied_values", "input_confidence", "research_confidence", "provenance_status")
+        ),
+        "seed_input_metadata",
+    )

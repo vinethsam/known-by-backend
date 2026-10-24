@@ -397,3 +397,18 @@ async def test_pipeline_emits_one_final_summary_after_checkpoints_and_counts_rej
     assert summary["selected_relationship"] == {"organisation": None, "job_title": None}
     assert calls == ["validate_candidates"]
     assert not result.claims
+
+
+def test_sensitive_typed_seed_context_is_not_logged(caplog):
+    seed = PersonSeed(
+        full_name="Jane Doe",
+        location="123 Private Road",
+        organisation="Example Foundation",
+        known_attributes={"private_id": "secret-record", "email": "private@example.com"},
+    )
+    with caplog.at_level(logging.INFO, logger=TRACE_LOGGER):
+        log_result_decisions(seed, fixture_result(), job_id="job", candidate_count=1, rejected_source_count=0)
+    assert "Example Foundation" in caplog.text
+    assert all(
+        value not in caplog.text for value in ["123 Private Road", "secret-record", "private@example.com"]
+    )

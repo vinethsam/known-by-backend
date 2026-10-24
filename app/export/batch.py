@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -23,383 +22,8 @@ from app.input_validation import (
     validate_input_text,
 )
 from app.schemas import PersonSeed
-
-
-@dataclass(frozen=True)
-class _TokenPattern:
-    required: frozenset[str]
-    any_of: frozenset[str] = frozenset()
-    excluded: frozenset[str] = frozenset()
-
-
-_PERSON_QUALIFIERS = frozenset(
-    {
-        "alumni",
-        "candidate",
-        "delegate",
-        "employee",
-        "individual",
-        "member",
-        "official",
-        "participant",
-        "person",
-        "speaker",
-        "staff",
-    }
-)
-_NON_PERSON_NAME_TOKENS = frozenset(
-    {
-        "affiliation",
-        "agency",
-        "city",
-        "code",
-        "college",
-        "company",
-        "country",
-        "department",
-        "designation",
-        "education",
-        "email",
-        "employer",
-        "government",
-        "id",
-        "institution",
-        "job",
-        "location",
-        "ministry",
-        "number",
-        "occupation",
-        "office",
-        "org",
-        "organisation",
-        "organization",
-        "phone",
-        "position",
-        "region",
-        "role",
-        "school",
-        "title",
-        "university",
-        "url",
-        "website",
-    }
-)
-_PASSIVE_SOURCE_METADATA_HEADERS = frozenset(
-    {
-        "cohort",
-        "dataset name",
-        "list name",
-        "source cohort",
-        "source dataset",
-        "source list",
-    }
-)
-
-# Central, deliberately small schema vocabulary. Strong aliases are preferred over
-# constrained token patterns, which are preferred over generic one-word aliases.
-COLUMN_ALIASES: dict[str, dict[str, frozenset[str]]] = {
-    "full_name": {
-        "strong": frozenset(
-            {
-                "alumni full name",
-                "alumni name",
-                "candidate name",
-                "delegate name",
-                "employee name",
-                "full name",
-                "individual name",
-                "member name",
-                "official name",
-                "participant name",
-                "person name",
-                "speaker name",
-                "staff name",
-            }
-        ),
-        "generic": frozenset({"candidate", "name", "person"}),
-    },
-    "organisation": {
-        "strong": frozenset(
-            {
-                "company name",
-                "employer name",
-                "institution name",
-                "organisation name",
-                "organization name",
-            }
-        ),
-        "generic": frozenset(
-            {
-                "affiliation",
-                "agency",
-                "company",
-                "department",
-                "employer",
-                "institution",
-                "office",
-                "org",
-                "organisation",
-                "organization",
-            }
-        ),
-    },
-    "current_employer": {
-        "strong": frozenset(
-            {
-                "current company",
-                "current company name",
-                "current employer",
-                "current employer name",
-                "current organisation",
-                "current organisation name",
-                "current organization",
-                "current organization name",
-            }
-        ),
-        "generic": frozenset(),
-    },
-    "alumni_organisation": {
-        "strong": frozenset(
-            {
-                "alumni company",
-                "alumni company name",
-                "alumni employer",
-                "alumni employer name",
-                "alumni organisation",
-                "alumni organisation name",
-                "alumni organization",
-                "alumni organization name",
-            }
-        ),
-        "generic": frozenset(),
-    },
-    "historical_employer": {
-        "strong": frozenset(
-            {
-                "former company",
-                "former company name",
-                "former employer",
-                "former employer name",
-                "former organisation",
-                "former organisation name",
-                "former organization",
-                "former organization name",
-                "historical employer",
-                "historical organisation",
-                "historical organisation name",
-                "historical organization",
-                "historical organization name",
-                "past employer",
-                "past organisation",
-                "past organisation name",
-                "past organization",
-                "past organization name",
-                "previous company",
-                "previous company name",
-                "previous employer",
-                "previous employer name",
-                "previous organisation",
-                "previous organisation name",
-                "previous organization",
-                "previous organization name",
-            }
-        ),
-        "generic": frozenset(),
-    },
-    "government_office": {
-        "strong": frozenset(
-            {
-                "government agency",
-                "government agency name",
-                "government body",
-                "government body name",
-                "government department",
-                "government department name",
-                "government ministry",
-                "government ministry name",
-                "government office",
-                "government office name",
-                "ministry name",
-            }
-        ),
-        "generic": frozenset({"ministry"}),
-    },
-    "job_title": {
-        "strong": frozenset({"current job title", "current role", "job title"}),
-        "generic": frozenset({"designation", "occupation", "position", "role", "title"}),
-    },
-    "country": {
-        "strong": frozenset({"country name", "country of origin", "home country", "nationality"}),
-        "generic": frozenset({"country"}),
-    },
-    "location": {
-        "strong": frozenset({"city name", "current location", "home location", "region name"}),
-        "generic": frozenset({"city", "location", "region"}),
-    },
-    "university_name": {
-        "strong": frozenset(
-            {
-                "alma mater",
-                "college name",
-                "education institution",
-                "educational institution",
-                "institution attended",
-                "school name",
-                "university name",
-            }
-        ),
-        "generic": frozenset({"college", "school", "university"}),
-    },
-    "subject": {
-        "strong": frozenset({"academic subject", "course of study", "degree subject", "field of study"}),
-        "generic": frozenset({"major", "subject"}),
-    },
-    "program_year": {
-        "strong": frozenset(
-            {
-                "class year",
-                "cohort year",
-                "graduation year",
-                "program year",
-                "programme year",
-                "year of graduation",
-            }
-        ),
-        "generic": frozenset(),
-    },
-}
-
-_COLLAPSED_ALIASES = {
-    alias.replace(" ", ""): alias
-    for groups in COLUMN_ALIASES.values()
-    for alias in groups["strong"]
-    if " " in alias
-}
-
-COLUMN_PATTERNS: dict[str, tuple[_TokenPattern, ...]] = {
-    "full_name": (
-        _TokenPattern(required=frozenset({"full", "name"}), excluded=_NON_PERSON_NAME_TOKENS),
-        _TokenPattern(
-            required=frozenset({"name"}),
-            any_of=_PERSON_QUALIFIERS,
-            excluded=_NON_PERSON_NAME_TOKENS,
-        ),
-    ),
-    "organisation": (
-        _TokenPattern(
-            required=frozenset({"name"}),
-            any_of=frozenset(
-                {
-                    "agency",
-                    "company",
-                    "department",
-                    "employer",
-                    "institution",
-                    "ministry",
-                    "office",
-                    "org",
-                    "organisation",
-                    "organization",
-                }
-            ),
-            excluded=frozenset({"college", "education", "school", "university"}),
-        ),
-    ),
-    "current_employer": (
-        _TokenPattern(
-            required=frozenset({"current"}),
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-        ),
-    ),
-    "alumni_organisation": (
-        _TokenPattern(
-            required=frozenset({"alumni"}),
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-        ),
-    ),
-    "historical_employer": (
-        _TokenPattern(
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-            required=frozenset({"former"}),
-        ),
-        _TokenPattern(
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-            required=frozenset({"previous"}),
-        ),
-        _TokenPattern(
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-            required=frozenset({"historical"}),
-        ),
-        _TokenPattern(
-            any_of=frozenset({"company", "employer", "institution", "organisation", "organization"}),
-            required=frozenset({"past"}),
-        ),
-    ),
-    "government_office": (
-        _TokenPattern(
-            required=frozenset({"government"}),
-            any_of=frozenset({"agency", "body", "department", "ministry", "office"}),
-        ),
-    ),
-    "job_title": (
-        _TokenPattern(required=frozenset({"job", "title"})),
-        _TokenPattern(required=frozenset({"current"}), any_of=frozenset({"position", "role", "title"})),
-    ),
-    "country": (
-        _TokenPattern(
-            required=frozenset({"country"}),
-            excluded=frozenset({"code", "id", "number"}),
-        ),
-    ),
-    "location": (
-        _TokenPattern(
-            required=frozenset({"location"}),
-            excluded=frozenset({"code", "id", "number"}),
-        ),
-    ),
-    "university_name": (
-        _TokenPattern(
-            required=frozenset({"name"}),
-            any_of=frozenset({"college", "school", "university"}),
-        ),
-        _TokenPattern(required=frozenset({"education", "institution"})),
-        _TokenPattern(required=frozenset({"institution", "attended"})),
-    ),
-    "subject": (
-        _TokenPattern(required=frozenset({"field", "study"})),
-        _TokenPattern(required=frozenset({"degree", "subject"})),
-    ),
-    "program_year": (
-        _TokenPattern(
-            required=frozenset({"year"}),
-            any_of=frozenset({"class", "cohort", "graduation", "program", "programme"}),
-            excluded=frozenset({"birth"}),
-        ),
-    ),
-}
-
-_STRONG_ALIAS_SCORE = 300
-_TOKEN_PATTERN_SCORE = 200
-_GENERIC_ALIAS_SCORE = 100
-_OBVIOUS_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-def normalize_header(value: str) -> str:
-    """Return the Unicode-safe comparison form used only for column headers."""
-
-    normalized = unicodedata.normalize("NFKC", value).strip()
-    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
-    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", normalized)
-    separated = "".join(character if character.isalnum() else " " for character in normalized)
-    comparison = " ".join(separated.casefold().split())
-    return _COLLAPSED_ALIASES.get(comparison, comparison)
-
-
-@dataclass(frozen=True)
-class _HeaderMatch:
-    column: str
-    field: str
-    score: int
+from app.seed_context import _OBVIOUS_EMAIL, COLUMN_ALIASES, _classify_header, safe_context_value
+from app.seed_context import normalize_header as normalize_header
 
 
 @dataclass(frozen=True)
@@ -558,7 +182,7 @@ def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Set
     header = []
     for value in rows[0]:
         _validate_text(value, MAX_INPUT_HEADER_CHARS)
-        header.append(value.strip())
+        header.append(value)
     _validate_headers(header, settings)
 
     prepared_rows: list[tuple[int, list[str]]] = []
@@ -586,7 +210,7 @@ def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Set
             raise BatchParseError(f"Missing name in row {row_number}")
         if _obviously_not_person_name(name):
             raise BatchParseError(f"Invalid person name in row {row_number}")
-        seed = _seed_from_row(row, name, inference.seed_columns)
+        seed = _seed_from_row(row, name, inference.seed_columns, name_column=inference.name_column)
         output_rows.append(row)
         seeds.append(seed)
     if not seeds:
@@ -599,46 +223,11 @@ def _validate_headers(header: list[str], settings: Settings) -> None:
         raise BatchParseError("Batch file is missing a header row")
     if len(header) > settings.MAX_INPUT_COLUMNS:
         raise BatchParseError("Batch file contains too many columns")
-    if any(not column for column in header):
+    if any(not column.strip() for column in header):
         raise BatchParseError("Batch file contains a blank header")
-    normalized = [unicodedata.normalize("NFC", column).casefold() for column in header]
+    normalized = [unicodedata.normalize("NFC", column).strip().casefold() for column in header]
     if len(set(normalized)) != len(normalized):
         raise BatchParseError("Batch file contains duplicate headers")
-
-
-def _classify_header(column: str) -> _HeaderMatch | None:
-    normalized = normalize_header(column)
-    # These labels identify the originating dataset. They stay on original_row and
-    # must never be inferred into PersonSeed, even if aliases expand in the future.
-    if normalized in _PASSIVE_SOURCE_METADATA_HEADERS:
-        return None
-    tokens = frozenset(normalized.split())
-    scores: list[tuple[int, str]] = []
-    for field_name, aliases in COLUMN_ALIASES.items():
-        score = 0
-        if normalized in aliases["strong"]:
-            score = _STRONG_ALIAS_SCORE + len(tokens)
-        elif normalized in aliases["generic"]:
-            score = _GENERIC_ALIAS_SCORE
-        for pattern in COLUMN_PATTERNS.get(field_name, ()):
-            if (
-                pattern.required <= tokens
-                and (not pattern.any_of or bool(pattern.any_of & tokens))
-                and not pattern.excluded.intersection(tokens)
-            ):
-                score = max(
-                    score,
-                    _TOKEN_PATTERN_SCORE + len(pattern.required) + bool(pattern.any_of),
-                )
-        if score:
-            scores.append((score, field_name))
-    if not scores:
-        return None
-    best_score = max(score for score, _ in scores)
-    winners = [field_name for score, field_name in scores if score == best_score]
-    if len(winners) != 1:
-        return None
-    return _HeaderMatch(column=column, field=winners[0], score=best_score)
 
 
 def _infer_columns(
@@ -713,20 +302,34 @@ def _obviously_not_person_name(value: str) -> bool:
     return not compact or compact.isdecimal() or not any(character.isalpha() for character in compact)
 
 
-def _seed_from_row(row: dict[str, str], full_name: str, seed_columns: dict[str, str]) -> PersonSeed:
+def _seed_from_row(
+    row: dict[str, str], full_name: str, seed_columns: dict[str, str], *, name_column: str | None = None
+) -> PersonSeed:
     values = {
-        field_name: row[column].strip() for field_name, column in seed_columns.items() if row[column].strip()
+        field_name: row[column].strip()
+        for field_name, column in seed_columns.items()
+        if row[column].strip()
+        and (field_name == "profile_link" or safe_context_value(row[column]))
+        and len(row[column].strip())
+        <= {"country": 100, "country_of_origin": 100, "program_year": 20, "profile_link": 2048}.get(
+            field_name, 200
+        )
     }
     semantic_fields = {
         "current_employer",
         "alumni_organisation",
-        "historical_employer",
         "government_office",
     }
     payload: dict[str, Any] = {
         "full_name": full_name,
+        "input_metadata": dict(row),
+        "input_field_map": {
+            column: match.field for column in row if (match := _classify_header(column)) is not None
+        },
         **{field_name: value for field_name, value in values.items() if field_name not in semantic_fields},
     }
+    if name_column:
+        payload["input_field_map"][name_column] = "full_name"
 
     # Header semantics are retained inside the existing PersonSeed context. These
     # values guide research only; they never create evidence claims or provenance.

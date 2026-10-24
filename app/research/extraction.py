@@ -26,7 +26,7 @@ async def extract_chunks(
         return
     payloads = [
         {
-            "person": research_seed_payload(seed),
+            "person": research_seed_payload(seed, purpose="extraction"),
             "source_url": source_url,
             "chunk_index": index,
             "content": chunk,

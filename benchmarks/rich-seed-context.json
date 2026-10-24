@@ -1,0 +1,177 @@
+{
+  "baseline_commit": "5379a79",
+  "fixture_version": 1,
+  "normalization_version": 6,
+  "mock_latency_ms": 2,
+  "batches": [
+    {
+      "people": 1,
+      "before_elapsed_ms": 438.82,
+      "after_elapsed_ms": 466.49,
+      "before_counts": {
+        "db_statements": 173,
+        "db_insert": 76,
+        "db_select": 57,
+        "db_update": 23,
+        "people": 1,
+        "db_delete": 17,
+        "models": 4,
+        "searches": 1,
+        "validations": 1,
+        "cache_misses": 2,
+        "fetches": 2,
+        "extractions": 2
+      },
+      "after_counts": {
+        "db_statements": 173,
+        "db_insert": 76,
+        "db_select": 57,
+        "db_update": 23,
+        "people": 1,
+        "db_delete": 17,
+        "models": 4,
+        "searches": 1,
+        "validations": 1,
+        "cache_misses": 2,
+        "fetches": 2,
+        "extractions": 2
+      },
+      "before_peak_concurrency": {
+        "people": 1,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      },
+      "after_peak_concurrency": {
+        "people": 1,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.0,
+      "research_outputs_equivalent_excluding_additive_seed_provenance": true,
+      "before_sha256": "c49f3caddd9d6ba290e8ef363c5115b40c1f6aa1d783335652f0ff5c87137c96",
+      "after_sha256": "338703c9c9a852bb0f188dacb4ffc4c549ff125ff802b64348545a511bc45b16",
+      "playwright_fallbacks": 0
+    },
+    {
+      "people": 5,
+      "before_elapsed_ms": 1549.6,
+      "after_elapsed_ms": 1824.74,
+      "before_counts": {
+        "db_statements": 749,
+        "db_insert": 352,
+        "db_select": 217,
+        "db_update": 99,
+        "people": 5,
+        "db_delete": 81,
+        "models": 20,
+        "searches": 5,
+        "validations": 5,
+        "cache_misses": 2,
+        "fetches": 2,
+        "extractions": 10,
+        "cache_hits": 8
+      },
+      "after_counts": {
+        "db_statements": 749,
+        "db_insert": 352,
+        "db_select": 217,
+        "db_update": 99,
+        "people": 5,
+        "db_delete": 81,
+        "models": 20,
+        "searches": 5,
+        "validations": 5,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 8,
+        "extractions": 10
+      },
+      "before_peak_concurrency": {
+        "people": 3,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      },
+      "after_peak_concurrency": {
+        "people": 3,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 1,
+        "extractions": 1
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.8,
+      "research_outputs_equivalent_excluding_additive_seed_provenance": true,
+      "before_sha256": "7c5944aef4c86fb5a507f1cd33a8310f504f1a19f81a3f0a4ea1b96c46c5a7ba",
+      "after_sha256": "33915abd6596ad4b1c4fc081dc9b96a7877bd93de6c185e3f47f401157f8926e",
+      "playwright_fallbacks": 0
+    },
+    {
+      "people": 25,
+      "before_elapsed_ms": 7734.34,
+      "after_elapsed_ms": 8436.86,
+      "before_counts": {
+        "db_statements": 3629,
+        "db_insert": 1732,
+        "db_select": 1017,
+        "db_update": 479,
+        "people": 25,
+        "db_delete": 401,
+        "models": 100,
+        "searches": 25,
+        "validations": 25,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 48,
+        "extractions": 50
+      },
+      "after_counts": {
+        "db_statements": 3629,
+        "db_insert": 1732,
+        "db_select": 1017,
+        "db_update": 479,
+        "people": 25,
+        "db_delete": 401,
+        "models": 100,
+        "searches": 25,
+        "validations": 25,
+        "cache_misses": 2,
+        "fetches": 2,
+        "cache_hits": 48,
+        "extractions": 50
+      },
+      "before_peak_concurrency": {
+        "people": 3,
+        "models": 1,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 2,
+        "extractions": 1
+      },
+      "after_peak_concurrency": {
+        "people": 3,
+        "models": 2,
+        "searches": 1,
+        "validations": 1,
+        "fetches": 1,
+        "extractions": 2
+      },
+      "result_read_queries": 6,
+      "cache_hit_rate": 0.96,
+      "research_outputs_equivalent_excluding_additive_seed_provenance": true,
+      "before_sha256": "28773e94d8af83014167ba2af26671396914c5b4831f34bba40221ca8ddb8d19",
+      "after_sha256": "f9ac63e5f86dbbb89516d404c15e7970c5ee03e8dd610cf197f680aea2c2d572",
+      "playwright_fallbacks": 0
+    }
+  ]
+}

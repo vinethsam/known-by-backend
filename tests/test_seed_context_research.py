@@ -4,7 +4,7 @@ import pytest
 
 from app.config import ScoringPolicy, Settings
 from app.export.batch import parse_batch
-from app.research.discovery import build_query, candidate_score
+from app.research.discovery import build_fallback_queries, build_query, candidate_score
 from app.research.identity import assess_identity, research_seed_payload, seed_identity_anchors
 from app.research.normalisation import normalise
 from app.research.reconciliation import reconcile
@@ -80,7 +80,7 @@ def test_batch_headers_preserve_current_alumni_historical_and_government_semanti
     }
     query = build_query(seed)
     assert all(
-        value in query
+        any(value in item for item in [query, *build_fallback_queries(seed)])
         for value in (
             "Current Company",
             "Industry Association",

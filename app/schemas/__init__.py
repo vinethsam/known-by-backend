@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from pydantic import (
@@ -12,12 +12,19 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StringConstraints,
     computed_field,
     field_validator,
     model_validator,
 )
 
-from app.input_validation import MAX_INPUT_URL_CHARS, normalized_input_text, validate_input_text
+from app.input_validation import (
+    MAX_INPUT_CELL_CHARS,
+    MAX_INPUT_HEADER_CHARS,
+    MAX_INPUT_URL_CHARS,
+    normalized_input_text,
+    validate_input_text,
+)
 
 
 def new_id() -> str:
@@ -86,22 +93,112 @@ class PersonSeed(Contract):
     full_name: str = Field(min_length=2, max_length=200)
     organisation: str | None = Field(default=None, max_length=200)
     country: str | None = Field(default=None, max_length=100)
+    country_of_origin: str | None = Field(default=None, max_length=100)
     location: str | None = Field(default=None, max_length=200)
     university_name: str | None = Field(default=None, max_length=200)
     job_title: str | None = Field(default=None, max_length=200)
     subject: str | None = Field(default=None, max_length=200)
+    degree_type: str | None = Field(default=None, max_length=200)
+    industry: str | None = Field(default=None, max_length=200)
+    historical_employer: str | None = Field(default=None, max_length=200)
+    historical_job_title: str | None = Field(default=None, max_length=200)
+    profile_link: str | None = Field(default=None, max_length=MAX_INPUT_URL_CHARS)
     program_year: str | None = Field(default=None, max_length=20)
-    known_attributes: dict[str, str] = Field(default_factory=dict, max_length=10)
+    known_attributes: dict[str, str] = Field(default_factory=dict, max_length=100)
+    # Exact supplied text is separate from normalized, bounded research context.
+    input_metadata: dict[
+        Annotated[str, StringConstraints(strip_whitespace=False)],
+        Annotated[str, StringConstraints(strip_whitespace=False)],
+    ] = Field(default_factory=dict, max_length=1000)
+    input_field_map: dict[Annotated[str, StringConstraints(strip_whitespace=False)], str] = Field(
+        default_factory=dict, max_length=1000
+    )
     preferred_urls: list[AnyHttpUrl] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="before")
+    @classmethod
+    def capture_supplied_values(cls, value):
+        if isinstance(value, dict) and isinstance(value.get("input_metadata", {}), dict):
+            from app.seed_context import classify_seed_label
+
+            value = dict(value)
+            supplied = dict(value.get("input_metadata", {}))
+            field_map = value.get("input_field_map", {})
+            field_map = field_map if isinstance(field_map, dict) else {}
+
+            def represented(key, item):
+                meaning = classify_seed_label(key)
+                aliases = {meaning} if meaning else set()
+                if meaning == "organisation":
+                    aliases.update({"current_employer", "government_office", "organisation_affiliation"})
+                for label, raw in supplied.items():
+                    if not isinstance(label, str) or not isinstance(raw, str):
+                        continue
+                    original_meaning = field_map.get(label, classify_seed_label(label))
+                    if (
+                        label == key or (isinstance(original_meaning, str) and original_meaning in aliases)
+                    ) and raw.strip() == item.strip():
+                        return True
+                return False
+
+            def retain(key, item):
+                if represented(key, item):
+                    return
+                target = key
+                while target in supplied:
+                    target = "known:" + target
+                supplied[target] = item
+
+            for key, item in value.items():
+                if (
+                    key in cls.model_fields
+                    and isinstance(item, str)
+                    and key not in {"input_metadata", "input_field_map"}
+                ):
+                    retain(key, item)
+            known = value.get("known_attributes")
+            for key, item in known.items() if isinstance(known, dict) else ():
+                if isinstance(key, str) and isinstance(item, str):
+                    retain(key, item)
+            if isinstance(value.get("preferred_urls"), (list, tuple)):
+                for index, url in enumerate(value["preferred_urls"], start=1):
+                    key = f"preferred_url_{index}"
+                    raw_url = str(url)
+                    # Persisted URLs are normalized by AnyHttpUrl. Match them
+                    # back to their original text rather than replacing that
+                    # text (or adding a new value on every model round trip).
+                    matched = False
+                    for label, raw in supplied.items():
+                        if not isinstance(label, str) or not isinstance(raw, str):
+                            continue
+                        while label.startswith("known:"):
+                            label = label.removeprefix("known:")
+                        if label != key:
+                            continue
+                        try:
+                            if AnyHttpUrl(raw) == AnyHttpUrl(raw_url):
+                                matched = True
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                    if not matched:
+                        retain(key, raw_url)
+            value["input_metadata"] = supplied
+        return value
 
     @field_validator(
         "full_name",
         "organisation",
         "country",
+        "country_of_origin",
         "location",
         "university_name",
         "job_title",
         "subject",
+        "degree_type",
+        "industry",
+        "historical_employer",
+        "historical_job_title",
         "program_year",
         mode="before",
     )
@@ -126,6 +223,24 @@ class PersonSeed(Contract):
                 raise ValueError("Identity attribute keys must be distinct after Unicode normalization")
             result[key] = attribute
         return result
+
+    @field_validator("input_metadata", "input_field_map", mode="before")
+    @classmethod
+    def preserve_input_metadata(cls, value):
+        if isinstance(value, dict):
+            for key, attribute in value.items():
+                if isinstance(key, str):
+                    validate_input_text(key, max_length=MAX_INPUT_HEADER_CHARS)
+                if isinstance(attribute, str):
+                    validate_input_text(attribute, max_length=MAX_INPUT_CELL_CHARS, multiline=True)
+        return value
+
+    @field_validator("profile_link")
+    @classmethod
+    def safe_profile_link(cls, value):
+        if value:
+            validate_input_text(value, max_length=MAX_INPUT_URL_CHARS)
+        return value
 
     @field_validator("preferred_urls", mode="before")
     @classmethod
@@ -239,6 +354,10 @@ class FieldDecision(Contract):
     review_required: bool = True
     review_reason_codes: list[str] = Field(default_factory=list)
     scoring_components: dict[str, Any] = Field(default_factory=dict)
+    supplied_values: list[str] = Field(default_factory=list)
+    input_confidence: float | None = Field(default=None, ge=0, le=100)
+    research_confidence: float | None = Field(default=None, ge=0, le=100)
+    provenance_status: str | None = None
 
 
 LEGACY_RESEARCH_FIELDS = (
@@ -333,6 +452,7 @@ class PersonProfile(Contract):
     completed_at: datetime = Field(default_factory=utcnow)
     metrics: ResearchMetrics = Field(default_factory=ResearchMetrics)
     legacy_coverage: float | None = Field(default=None, ge=0, le=100)
+    seed_attributes: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def fill_legacy_field(self):

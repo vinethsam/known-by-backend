@@ -20,6 +20,7 @@ from app.research.claims import deduplicate_claims, validate_claims
 from app.research.concurrency import Outcome, ordered_window
 from app.research.decision_trace import log_decision, log_result_decisions
 from app.research.discovery import (
+    build_context_queries,
     build_fallback_queries,
     build_queries,
     build_query,
@@ -51,6 +52,7 @@ from app.schemas import (
     SourceType,
     utcnow,
 )
+from app.seed_context import seed_context_values
 
 logger = logging.getLogger(__name__)
 
@@ -710,6 +712,33 @@ class ResearchOrchestrator:
                                 for fields in record_fields
                             )
                         ]
+                        seed_context = seed_context_values(seed)
+                        if set(seed_context) & {
+                            "university_name",
+                            "degree_type",
+                            "subject",
+                            "historical_employer",
+                            "historical_job_title",
+                            "industry",
+                            "job_title",
+                        }:
+                            # Use a new supplied objective before paying for optional
+                            # model planning. Previously completed searches and the
+                            # existing stop/source/tool budgets still apply.
+                            observed = {}
+                            for field_name, decision in profile.fields.items():
+                                if decision.selected_claim_id and decision.value:
+                                    observed[field_name.value] = [decision.value]
+                            targeted = [
+                                query
+                                for query in build_context_queries(
+                                    seed, unresolved, evidence_context=observed
+                                )
+                                if query_key(query) not in queries_done
+                            ]
+                            if targeted and remaining_search_call_capacity() > 0:
+                                queue.append(targeted[0])
+                                continue
                         primary_fields = record_fields[0]
                         role = primary_fields[ProfileField.job_title]
                         organisation = primary_fields[ProfileField.organisation]

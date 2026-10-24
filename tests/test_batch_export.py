@@ -13,6 +13,7 @@ from app.export.batch import BatchParseError, normalize_header, parse_batch
 from app.export.formats import export_results
 from app.export.schema import provenance_columns, standard_columns
 from app.research.discovery import build_query
+from app.research.identity import research_seed_payload
 from app.schemas import (
     FieldDecision,
     JobResults,
@@ -94,7 +95,7 @@ def test_flexible_person_name_aliases_create_seeds(header):
         ("university_name", "Example University", "university_name"),
         ("government_office", "Ministry of Science", "organisation"),
         ("job_title", "Director", "job_title"),
-        ("country_of_origin", "Kenya", "country"),
+        ("country_of_origin", "Kenya", "country_of_origin"),
         ("currentLocation", "Nairobi", "location"),
         ("field_of_study", "Economics", "subject"),
         ("graduation_year", "2020", "program_year"),
@@ -152,7 +153,8 @@ def test_source_list_metadata_is_preserved_but_excluded_from_research_context(me
     assert batch.rows == [{"name": "Jane Doe", metadata_header: "Prime Ministers"}]
     assert seed.full_name == "Jane Doe"
     assert seed.known_attributes == {}
-    assert "Prime Ministers" not in seed.model_dump_json()
+    assert seed.input_metadata[metadata_header] == "Prime Ministers"
+    assert "Prime Ministers" not in str(research_seed_payload(seed))
     assert build_query(seed) == '"Jane Doe"'
 
 
@@ -175,7 +177,7 @@ def test_mixed_source_lists_and_duplicate_people_remain_separate_input_rows():
         "second occurrence",
     ]
     assert all(seed.known_attributes == {} for seed in batch.seeds)
-    assert all("LIST_NAME" not in seed.model_dump_json() for seed in batch.seeds)
+    assert all("LIST_NAME" not in str(research_seed_payload(seed)) for seed in batch.seeds)
 
 
 def test_more_specific_person_name_alias_beats_generic_name():

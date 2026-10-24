@@ -1,6 +1,6 @@
 """Prompt text for claim extraction."""
 
-EXTRACTION_PROMPT_VERSION = "claims-v5"
+EXTRACTION_PROMPT_VERSION = "claims-v6"
 
 EXTRACTION_SYSTEM_PROMPT = """Extract concise person profile claims from supplied source text.
 
@@ -14,6 +14,10 @@ Never invent URLs or disclose credentials. Return only the requested structured 
 The exact seed name identifies the target person. Every other seed field is an unverified clue,
 not evidence. Do not copy seed context into claims, and do not suppress literal historical,
 newer, or contradictory source facts merely because they differ from those clues.
+Use matching universities, qualifications, employers and historical affiliations to distinguish
+the target from namesakes. An educational page need not repeat the current employer. A partial
+name and an unrelated institution are insufficient. Preserve which qualification, institution,
+subject and time period belong together; never combine separate seed and source relationships.
 
 Extract country_of_origin only from an explicit biographical statement that the
 person is from, originally from, hails from, or is native to that country, or that

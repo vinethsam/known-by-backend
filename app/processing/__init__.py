@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-from app.research.identity import is_passive_seed_attribute
+from app.seed_context import seed_context_values
 
 _TECHNICAL_ELEMENTS = ("script", "style", "noscript", "template")
 _EXCESS_BLANK_LINES = re.compile(r"\n(?:[ \t]*\n){2,}")
@@ -52,24 +52,8 @@ _PRESERVED_STRUCTURES = ("h1", "h2", "h3", "h4", "h5", "h6", "table", "dl", "art
 
 
 def _identity_terms(seed: object) -> list[str]:
-    values = [
-        _seed_value(seed, key)
-        for key in (
-            "full_name",
-            "organisation",
-            "country",
-            "location",
-            "university_name",
-            "job_title",
-            "subject",
-            "program_year",
-        )
-    ]
-    attributes = _seed_value(seed, "known_attributes")
-    if isinstance(attributes, Mapping):
-        values.extend(
-            value for label, value in attributes.items() if not is_passive_seed_attribute(str(label))
-        )
+    values = [_seed_value(seed, "full_name")]
+    values.extend(value for items in seed_context_values(seed).values() for value in items)
     return [" ".join(str(value).casefold().split()) for value in values if value]
 
 
@@ -156,11 +140,20 @@ def _primary_terms(seed: object) -> list[str]:
 
 
 def _secondary_terms(seed: object) -> list[str]:
+    context = seed_context_values(seed)
     values = [
-        _seed_value(seed, "organisation"),
-        _seed_value(seed, "university_name"),
-        _seed_value(seed, "job_title"),
-        _seed_value(seed, "subject"),
+        value
+        for key in (
+            "organisation",
+            "historical_employer",
+            "job_title",
+            "historical_job_title",
+            "university_name",
+            "degree_type",
+            "subject",
+            "industry",
+        )
+        for value in context.get(key, [])
     ]
     terms: list[str] = []
     for value in values:

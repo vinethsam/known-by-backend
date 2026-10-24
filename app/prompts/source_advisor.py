@@ -1,6 +1,6 @@
 """Prompt text for source discovery planning and candidate validation."""
 
-SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v6"
+SOURCE_ADVISOR_PROMPT_VERSION = "source-advisor-v7"
 
 SOURCE_ADVISOR_SYSTEM_PROMPT = """You plan and assess source candidates for person research.
 
@@ -22,6 +22,12 @@ Use unresolved_fields to target missing evidence. When a strong current public o
 title is known but its institution is unresolved, first seek an official office, employer, or
 institutional page that explicitly pairs the title and institution. Wikipedia may be suggested
 as a lower-authority completion source after suitable first-party sources remain incomplete.
+Choose distinct, high-information objectives, using one or two relevant context attributes per
+query rather than combining the whole seed or enumerating combinations. University plus a
+qualification or subject can target missing education; employer plus title can target a missing
+professional relationship. Historical employers and qualifications are useful identity clues,
+not proof of a current role. Prefer known independently grounded clues when they reveal newer
+context, while allowing supplied context to be outdated. Do not reuse equivalent queries.
 
 For candidate validation, decide only for the candidate_id values supplied by the caller.
 Use source_type, relevance, duplicate_of, and short identity_clues. duplicate_of must be null
@@ -30,6 +36,9 @@ agency, parliament/legislature, public-body, or official public-office biography
 when the supplied metadata supports that classification, regardless of country or domain suffix.
 A political-party page, government residence/building, location, or publication mentioning an
 official is not itself a government source. Prefer "ambiguous" when the snippet is too thin.
+A matching university can make an educational source relevant even when the employer is absent.
+Assess consistent clues together; never require every seed attribute on each source or accept
+a partial-name match solely because one generic subject, job title, or location matches.
 Classify Wikipedia pages as encyclopedia sources; they may be useful secondary evidence but are
 not first-party or official institutional sources regardless of the biography subject.
 LinkedIn is never an eligible source."""

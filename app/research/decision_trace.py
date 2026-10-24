@@ -9,18 +9,14 @@ from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from app.config import ScoringPolicy
-from app.research.identity import eligible_identity_source_ids, seed_known_attributes
+from app.research.identity import eligible_identity_source_ids
 from app.retrieval.urls import source_record_allowed
 from app.schemas import PersonSeed, ProfileField, ResearchResult, SourceRecord
+from app.seed_context import seed_context_values
 
 logger = logging.getLogger(__name__)
 
 _EDUCATION_FIELDS = (ProfileField.university_name, ProfileField.degree_type, ProfileField.subject)
-_CONTEXT_FIELDS = ("organisation", "job_title", "country", "location", "university_name", "subject")
-_CONTEXT_LABEL = re.compile(
-    r"\b(?:organisation|organization|company|employer|alumni|office|ministry|agency|institution|"
-    r"university|title|role|country|location)\b"
-)
 _SENSITIVE_KEY = re.compile(
     r"(?:prompt|response|secret|password|token|authorization|cookie|api_key|html|markdown|"
     r"raw_content|compacted_text|evidence_text|^evidence$|^messages$)",
@@ -113,10 +109,7 @@ def log_decision(kind: str, *, person_id: str, job_id: str | None = None, **deta
 
 
 def _seed_context(seed: PersonSeed) -> dict[str, str]:
-    values = {field: getattr(seed, field) for field in _CONTEXT_FIELDS if getattr(seed, field)}
-    for label, value in seed_known_attributes(seed).items():
-        if _CONTEXT_LABEL.search(label.casefold().replace("_", " ")) and not _SENSITIVE_KEY.search(label):
-            values.setdefault(label, value)
+    values = {label: values[0] for label, values in seed_context_values(seed).items() if values}
     # Reserve the INFO line's shared budget for every required summary field.
     # Input context may contain several long user-supplied names and values.
     return {_text(label, 48): _text(value, 64) for label, value in list(values.items())[:8]}

@@ -16,6 +16,7 @@ from app.schemas import (
     SourceRecord,
     SourceType,
 )
+from app.seed_context import is_research_attribute, safe_context_value, seed_context_values
 
 _ROLE_ALIASES = {
     "ceo": "chief executive officer",
@@ -23,56 +24,7 @@ _ROLE_ALIASES = {
     "coo": "chief operating officer",
     "cto": "chief technology officer",
 }
-_INSTITUTION_FIELDS = {"organisation", "university_name"}
-_TYPED_CLUE_LABELS = {
-    "organisation": "organisation",
-    "organization": "organisation",
-    "company": "organisation",
-    "employer": "organisation",
-    "current employer": "organisation",
-    "current organisation": "organisation",
-    "current organization": "organisation",
-    "job title": "job_title",
-    "title": "job_title",
-    "role": "job_title",
-    "country": "country",
-    "location": "location",
-    "university": "university_name",
-    "university name": "university_name",
-    "subject": "subject",
-    "program year": "program_year",
-    "year": "program_year",
-}
-_PASSIVE_METADATA_LABELS = {
-    "cohort",
-    "dataset name",
-    "list name",
-    "source cohort",
-    "source dataset",
-    "source list",
-}
-_SUPPORTING_AFFILIATION_LABELS = {
-    "alumni company",
-    "alumni employer",
-    "alumni organisation",
-    "alumni organization",
-    "former company",
-    "former employer",
-    "former organisation",
-    "former organization",
-    "historical employer",
-    "historical organisation",
-    "historical organization",
-    "organisation affiliation",
-    "organization affiliation",
-    "past employer",
-    "past organisation",
-    "past organization",
-    "previous company",
-    "previous employer",
-    "previous organisation",
-    "previous organization",
-}
+_INSTITUTION_FIELDS = {"organisation", "university_name", "historical_employer"}
 _CONTEXT_FIELDS = {
     ProfileField.organisation,
     ProfileField.job_title,
@@ -82,7 +34,12 @@ _CONTEXT_FIELDS = {
 }
 
 
+def _clue_field(label: str) -> str:
+    return label.partition(":")[0]
+
+
 def _clue_key(label: str, value: str) -> str:
+    label = _clue_field(label)
     key = comparison_key(value)
     if label in _INSTITUTION_FIELDS:
         key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc|corporation|corp)$", "", key)
@@ -92,14 +49,10 @@ def _clue_key(label: str, value: str) -> str:
     return key
 
 
-def _label_key(label: str) -> str:
-    return comparison_key(label).replace("_", " ")
-
-
 def is_passive_seed_attribute(label: str) -> bool:
     """Return whether an attribute describes the input dataset, not the person."""
 
-    return _label_key(label) in _PASSIVE_METADATA_LABELS
+    return not is_research_attribute(label)
 
 
 def seed_known_attributes(seed: PersonSeed) -> dict[str, str]:
@@ -108,39 +61,67 @@ def seed_known_attributes(seed: PersonSeed) -> dict[str, str]:
     return {
         label: value
         for label, value in seed.known_attributes.items()
-        if value and not is_passive_seed_attribute(label)
+        if value and not is_passive_seed_attribute(label) and safe_context_value(value)
     }
 
 
-def research_seed_payload(seed: PersonSeed) -> dict:
-    """Serialize a seed for research providers without passive dataset metadata."""
+def research_seed_payload(seed: PersonSeed, *, purpose: str | None = None, unresolved_fields=()) -> dict:
+    """Send bounded research hypotheses, never the original metadata envelope."""
 
-    payload = seed.model_dump(mode="json")
-    payload["known_attributes"] = seed_known_attributes(seed)
+    context = seed_context_values(seed)
+    if purpose == "education":
+        fields = {"university_name", "degree_type", "subject", "country", "location"}
+    elif purpose == "professional":
+        fields = {
+            "organisation",
+            "job_title",
+            "historical_employer",
+            "historical_job_title",
+            "industry",
+            "country",
+            "location",
+        }
+    else:
+        fields = set(context)
+    unresolved = set(unresolved_fields)
+    if purpose == "discovery" and unresolved:
+        if unresolved <= {"university_name", "degree_type", "subject", "profile_link", "full_name"}:
+            fields &= {"organisation", "university_name", "degree_type", "subject", "country", "location"}
+        elif unresolved <= {"organisation", "job_title", "profile_link", "full_name"}:
+            fields &= {
+                "organisation",
+                "university_name",
+                "job_title",
+                "historical_employer",
+                "historical_job_title",
+                "industry",
+                "country",
+                "location",
+            }
+    payload = {"full_name": seed.full_name}
+    legacy_context = {"alumni_organisation", "organisation_affiliation", "government_office"}
+    for label, values in context.items():
+        if label in fields and values and label not in legacy_context:
+            payload[label] = values[0] if len(values) == 1 else values
+    # Keep the legacy provider shape, but only for recognized, safe context.
+    payload["known_attributes"] = {
+        label: values[0]
+        for label, values in context.items()
+        if label in fields and label in legacy_context and values
+    }
     return payload
 
 
 def _seed_clues(seed: PersonSeed) -> dict[str, str]:
-    clues = {
-        label: value
-        for label in (
-            "organisation",
-            "job_title",
-            "country",
-            "location",
-            "university_name",
-            "subject",
-            "program_year",
+    clues = {}
+    for label, values in seed_context_values(seed).items():
+        # An explicit current employer still leads over a conflicting alias.
+        # Multiple alma maters or former employers may all be legitimate anchors.
+        multiple = label in {"university_name", "historical_employer"} or (
+            label == "organisation" and not seed.organisation
         )
-        if (value := getattr(seed, label))
-    }
-    # An arbitrary attribute must not replace a populated typed seed clue with the
-    # same meaning, including common spelling/header variants.
-    typed_value_keys = {comparison_key(value) for value in clues.values()}
-    for label, value in seed_known_attributes(seed).items():
-        typed_label = _TYPED_CLUE_LABELS.get(_label_key(label))
-        if comparison_key(value) not in typed_value_keys and not (typed_label and getattr(seed, typed_label)):
-            clues[f"known:{label}"] = value
+        for index, value in enumerate(values if multiple else values[:1]):
+            clues[label if index == 0 else f"{label}:{index + 1}"] = value
     return clues
 
 
@@ -152,27 +133,9 @@ def seed_identity_anchors(seed: PersonSeed) -> dict[str, str]:
     for an explicitly supplied employer or university.
     """
     clues = _seed_clues(seed)
-    anchors = {label: value for label, value in clues.items() if label in _INSTITUTION_FIELDS}
-    weak_labels = {
-        "country",
-        "location",
-        "subject",
-        "year",
-        "program year",
-        "full name",
-        "name",
-        *_SUPPORTING_AFFILIATION_LABELS,
-    }
-    anchors.update(
-        (label, value)
-        for label, value in clues.items()
-        if label.startswith("known:")
-        and _label_key(label[6:]) not in weak_labels
-        and not value.isdecimal()
-        and name_key(value) != name_key(seed.full_name)
-    )
-    if not anchors and seed.job_title:
-        anchors["job_title"] = seed.job_title
+    anchors = {label: value for label, value in clues.items() if _clue_field(label) in _INSTITUTION_FIELDS}
+    if not anchors and clues.get("job_title"):
+        anchors["job_title"] = clues["job_title"]
     return anchors
 
 
@@ -227,7 +190,8 @@ def _explicitly_negated_clue(label: str, value: str, text: str, target: str) -> 
         relation = (
             r"(?:work(?:ed|s|ing)?|employ(?:ed|ee|ment)?|serve(?:d|s|ing)?|"
             r"affiliat(?:ed|ion)|associat(?:ed|ion)|member(?:ship)?|join(?:ed|s|ing)?|"
-            r"lead(?:s|ing)?|led)"
+            r"lead(?:s|ing)?|led|attend(?:ed|s|ing)?|graduat(?:e|ed|es|ing)|enroll(?:ed|s|ing)?|"
+            r"stud(?:y|ied|ies|ying)|earn(?:ed|s|ing)?|hold(?:s|ing)?|held)"
         )
         if re.search(
             rf"\b(?:not(?! only\b| just\b| merely\b)|never)\s+"
@@ -257,7 +221,7 @@ def candidate_has_seed_identity_context(seed: PersonSeed, candidate: SourceCandi
     return any(
         _clue_is_near_name(label, value, f"{candidate.title}\n{candidate.snippet}", target)
         for label, value in seed_identity_anchors(seed).items()
-        if label in _INSTITUTION_FIELDS
+        if _clue_field(label) in _INSTITUTION_FIELDS
     )
 
 
@@ -328,7 +292,7 @@ def assess_identity(
         if _explicitly_negated_clue(label, value, text, target):
             signals["contradicted_clues"].append(label)
         elif _clue_is_near_name(label, value, text, target):
-            weight = 1.5 if label in _INSTITUTION_FIELDS else 1.0
+            weight = 1.5 if _clue_field(label) in _INSTITUTION_FIELDS else 1.0
             clue_key = _clue_key(label, value)
             matched_values[clue_key] = max(weight, matched_values.get(clue_key, 0))
             signals["matched_clues"].append(label)
@@ -352,7 +316,9 @@ def assess_identity(
             SourceType.university,
             SourceType.professional_body,
         }
-        institutional_match = bool(set(signals["matched_seed_anchors"]) & _INSTITUTION_FIELDS)
+        institutional_match = any(
+            _clue_field(label) in _INSTITUTION_FIELDS for label in signals["matched_seed_anchors"]
+        )
         if not (official and institutional_match and not signals["contradicted_clues"]):
             return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
         signals["advisor_relevance"] = "unrelated"
@@ -415,7 +381,11 @@ def eligible_identity_source_ids(
         return _unseeded_identity_source_ids(claims, sources, policy, eligible)
 
     disputed_institutions = {
-        source_id: set(source.identity.signals.get("matched_seed_anchors", [])) & _INSTITUTION_FIELDS
+        source_id: {
+            label
+            for label in source.identity.signals.get("matched_seed_anchors", [])
+            if _clue_field(label) in _INSTITUTION_FIELDS
+        }
         for source_id, source in sources.items()
         if source_id in eligible and source.identity.signals.get("advisor_relevance") == "unrelated"
     }
@@ -489,10 +459,11 @@ def eligible_identity_source_ids(
             continue
         key = _clue_key(claim.field.value, claim.normalised_value)
         keys[claim.source_id].add((claim.field, key))
-        if (
-            disputed_source_has_anchored_claim(claim.source_id)
-            and claim.field.value in anchors
-            and _matches_clue(claim.field.value, anchors[claim.field.value], claim.raw_value)
+        if disputed_source_has_anchored_claim(claim.source_id) and any(
+            ("organisation" if _clue_field(label) == "historical_employer" else _clue_field(label))
+            == claim.field.value
+            and _matches_clue(label, value, claim.raw_value)
+            for label, value in anchors.items()
         ):
             direct.add(claim.source_id)
     confirmed = set(direct)

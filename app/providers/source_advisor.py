@@ -84,7 +84,9 @@ class SourceAdvisor:
             self.prompt,
             {
                 "task": "plan_search_queries",
-                "seed": research_seed_payload(seed),
+                "seed": research_seed_payload(
+                    seed, purpose="discovery", unresolved_fields=context.get("unresolved_fields", [])
+                ),
                 "known_clues": known_clues[:12],
                 "unresolved_fields": [
                     str(field)[:80] for field in context.get("unresolved_fields", [])[: len(ProfileField)]
@@ -118,7 +120,7 @@ class SourceAdvisor:
             self.prompt,
             {
                 "task": "validate_candidates",
-                "seed": research_seed_payload(seed),
+                "seed": research_seed_payload(seed, purpose="identity"),
                 "candidates": [
                     {
                         "candidate_id": candidate.candidate_id,

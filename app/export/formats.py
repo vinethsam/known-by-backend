@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 from collections.abc import Iterable, Iterator
 from typing import Any, Literal
@@ -15,9 +16,38 @@ from app.export.schema import RESEARCH_FIELDS, provenance_columns, standard_colu
 from app.research.normalisation import finalize_display
 from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
+from app.seed_context import seed_input_attributes
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 ProvenanceMode = Literal["none", "field"]
+_PROVENANCE_CHUNK_CHARS = 30000
+_JSON_FORMULA_ESCAPES = str.maketrans({char: f"\\u{ord(char):04x}" for char in "=+-@"})
+
+
+def _provenance_json(value, *, compact=False):
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":") if compact else None)
+    # Keep JSON fragments safe as spreadsheet cells without changing decoded input.
+    # Otherwise a split inside a string can expose a formula prefix, causing the
+    # ordinary cell sanitizer to insert an apostrophe into the original value.
+    return re.sub(
+        r'"(?:[^"\\]|\\.)*"',
+        lambda match: match.group().translate(_JSON_FORMULA_ESCAPES),
+        payload,
+    )
+
+
+def _provenance_chunks(payload):
+    chunks = []
+    start = 0
+    while start < len(payload):
+        end = min(start + _PROVENANCE_CHUNK_CHARS, len(payload))
+        # String punctuation is escaped above; a numeric minus outside a string
+        # may still need the preceding JSON delimiter at the next cell's start.
+        while end < len(payload) and payload[end:].lstrip().startswith(FORMULA_PREFIXES):
+            end -= 1
+        chunks.append(payload[start:end])
+        start = end
+    return chunks
 
 
 def export_results(
@@ -56,7 +86,51 @@ def _flatten_results(
         standard.extend(provenance_columns())
     used_columns = list(standard)
     metadata_map = {name: _unique_column(name, used_columns) for name in original_columns}
-    return _iter_rows(results, metadata_map, provenance=provenance), used_columns
+    rows = _iter_rows(results, metadata_map, provenance=provenance)
+    if provenance == "field":
+        # JSON quoting/metadata can exceed Excel's cell limit even when every
+        # original input cell is legal. Use the same lossless parts in both formats
+        # while leaving the existing prefix and original columns in place.
+        parts: dict[str, list[str]] = {}
+        for person in results.people:
+            if not person.result:
+                payloads = [
+                    (column, payload)
+                    for column, payload in _unresearched_provenance(person).items()
+                    if column == "seed_input_metadata" or column.endswith("_supplied_values")
+                ]
+            else:
+                profile = person.result.profile
+                payloads = [
+                    (
+                        "seed_input_metadata",
+                        _provenance_json(profile.seed_attributes, compact=True),
+                    )
+                ]
+                payloads.extend(
+                    (
+                        f"{field.value}_supplied_values",
+                        _provenance_json(decision.supplied_values),
+                    )
+                    for record in profile.records or [profile]
+                    for field, decision in record.fields.items()
+                )
+            for column, payload in payloads:
+                count = len(_provenance_chunks(payload))
+                names = parts.setdefault(column, [column])
+                while len(names) < count:
+                    names.append(_unique_column(f"{column}__part_{len(names) + 1}", used_columns))
+        rows = _split_provenance(rows, parts)
+    return rows, used_columns
+
+
+def _split_provenance(rows, parts):
+    for row in rows:
+        for column, names in parts.items():
+            fragments = _provenance_chunks(row.get(column, ""))
+            for index, name in enumerate(names):
+                row[name] = fragments[index] if index < len(fragments) else ""
+        yield row
 
 
 def _iter_rows(
@@ -72,8 +146,13 @@ def _iter_rows(
             # one record with the same columns and final selected-value normalization.
             records = getattr(profile, "records", ()) or (profile,)
             source_urls = _compact_source_urls(person.result)
+            seed_metadata = (
+                _provenance_json(profile.seed_attributes, compact=True) if provenance == "field" else ""
+            )
             for record in records:
                 row = _base_row(person, metadata_map, status=record.status)
+                if provenance == "field":
+                    row["seed_input_metadata"] = seed_metadata
                 for field in RESEARCH_FIELDS:
                     decision = record.fields.get(field)
                     if (
@@ -89,6 +168,24 @@ def _iter_rows(
                         row[f"{field.value}_source_urls"] = _compact_urls(
                             decision.sources if decision else ()
                         )
+                        row[f"{field.value}_supplied_values"] = _provenance_json(
+                            decision.supplied_values if decision else []
+                        )
+                        row[f"{field.value}_input_confidence"] = (
+                            decision.input_confidence
+                            if decision and decision.input_confidence is not None
+                            else ""
+                        )
+                        row[f"{field.value}_research_confidence"] = (
+                            decision.research_confidence
+                            if decision and decision.research_confidence is not None
+                            else decision.confidence
+                            if decision
+                            else 0
+                        )
+                        row[f"{field.value}_provenance_status"] = (
+                            decision.provenance_status or "" if decision else ""
+                        )
                 row["profile_confidence"] = record.profile_confidence
                 row["coverage"] = record.coverage
                 row["legacy_coverage"] = record.legacy_coverage
@@ -97,6 +194,8 @@ def _iter_rows(
                 yield row
         else:
             row = _base_row(person, metadata_map)
+            if provenance == "field":
+                row.update(_unresearched_provenance(person))
             for field in RESEARCH_FIELDS:
                 row[field.value] = ""
                 row[f"{field.value}_confidence"] = ""
@@ -108,6 +207,27 @@ def _iter_rows(
             row["review_required"] = ""
             row["source_urls"] = ""
             yield row
+
+
+def _unresearched_provenance(person) -> dict[str, Any]:
+    """A failed/cancelled run still preserves its supplied input, without evidence."""
+    attributes = seed_input_attributes({"input_metadata": person.original_row})
+    row = {
+        "seed_input_metadata": _provenance_json(attributes, compact=True),
+    }
+    core_aliases = {"current_employer": "organisation", "government_office": "organisation"}
+    for field in RESEARCH_FIELDS:
+        supplied = []
+        for attribute in attributes:
+            label = core_aliases.get(attribute["field"], attribute["field"])
+            value = attribute["value"]
+            if label == field.value and value not in (None, "") and value not in supplied:
+                supplied.append(value)
+        row[f"{field.value}_supplied_values"] = _provenance_json(supplied)
+        row[f"{field.value}_input_confidence"] = 100 if supplied else ""
+        row[f"{field.value}_research_confidence"] = ""
+        row[f"{field.value}_provenance_status"] = "supplied" if supplied else ""
+    return row
 
 
 def _base_row(person, metadata_map, *, status=None) -> dict[str, Any]:

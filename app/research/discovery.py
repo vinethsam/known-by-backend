@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy, Settings, get_settings
-from app.research.identity import seed_known_attributes
 from app.retrieval.urls import canonicalise_url, domain_key, is_blocked_source_host, source_policy_allows
 from app.schemas import PersonSeed, SourceCandidate, SourceType
+from app.seed_context import seed_context_values
 
 
 @dataclass(frozen=True)
@@ -117,32 +117,77 @@ def rank_candidates(
 
 
 def build_query(seed: PersonSeed) -> str:
-    terms = [f'"{seed.full_name}"', *_seed_context_values(seed)]
-    return " ".join(terms)[:600]
+    """Start with one useful relationship rather than every supplied attribute."""
+
+    queries = build_context_queries(seed)
+    return queries[0] if queries else f'"{seed.full_name}"'
+
+
+def build_context_queries(
+    seed: PersonSeed,
+    unresolved_fields: Iterable[str] | None = None,
+    *,
+    evidence_context: dict[str, list[str]] | None = None,
+) -> list[str]:
+    """Diversify within the caller's existing budget, revisiting missing objectives.
+
+    Evidence context must come from identity-eligible claims. It can provide a newer
+    anchor, while the original seed remains available as a historical hypothesis.
+    Each query uses at most two context values; there is no combination expansion.
+    """
+
+    fields = set(unresolved_fields) if unresolved_fields is not None else None
+    supplied = seed_context_values(seed)
+    observed = seed_context_values(evidence_context or {})
+    context = {
+        key: list(dict.fromkeys([*observed.get(key, []), *supplied.get(key, [])]))
+        for key in dict.fromkeys([*observed, *supplied])
+    }
+    queries: list[str] = []
+
+    def values(*keys: str) -> list[str]:
+        return list(dict.fromkeys(value for key in keys for value in context.get(key, [])))
+
+    def add(anchors: list[str], detail: list[str] = (), suffix: str = "") -> None:
+        if not anchors:
+            return
+        # One best anchor per objective keeps wide seed rows from using every slot.
+        terms = [f'"{seed.full_name}"', anchors[0]]
+        if detail and detail[0].casefold() != anchors[0].casefold():
+            terms.append(detail[0])
+        if suffix:
+            terms.append(suffix)
+        queries.append(" ".join(terms)[:600])
+
+    professional = fields is None or bool(fields & {"organisation", "job_title"})
+    education = fields is None or bool(fields & {"university_name", "degree_type", "subject"})
+    if professional:
+        employers = values("organisation", "current_employer", "government_office")
+        titles = values("job_title")
+        add(employers or titles, titles if employers else [])
+    if education:
+        universities = values("university_name")
+        degrees = values("degree_type") if fields is None or "degree_type" in fields else []
+        subjects = values("subject") if fields is None or "subject" in fields else []
+        add(
+            universities or degrees or subjects,
+            (degrees or subjects) if universities else [],
+            "" if universities else "education",
+        )
+    if professional:
+        add(values("historical_employer"), values("historical_job_title"), "career")
+        add(values("organisation_affiliation", "alumni_organisation"), suffix="biography")
+        if not values("organisation", "job_title"):
+            add(values("industry"), suffix="career")
+    if fields is None and not queries:
+        add(values("country", "location", "program_year"), suffix="biography")
+    if fields is not None and "country_of_origin" in fields:
+        add(values("country_of_origin", "country", "location"), suffix="origin biography")
+    return _unique(queries)
 
 
 def _seed_context_values(seed: PersonSeed) -> list[str]:
-    values = [
-        seed.organisation,
-        seed.university_name,
-        seed.job_title,
-        seed.subject,
-        seed.program_year,
-        seed.country,
-        seed.location,
-        *seed_known_attributes(seed).values(),
-    ]
-    context: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not value:
-            continue
-        text = " ".join(str(value).split())
-        key = text.casefold()
-        if key and key not in seen:
-            context.append(text)
-            seen.add(key)
-    return context
+    return list(dict.fromkeys(value for values in seed_context_values(seed).values() for value in values))
 
 
 def build_fallback_queries(seed: PersonSeed) -> list[str]:
@@ -150,7 +195,7 @@ def build_fallback_queries(seed: PersonSeed) -> list[str]:
 
     name = f'"{seed.full_name}"'
     clues = _seed_context_values(seed)
-    queries = [f"{name} {value}"[:600] for value in clues if value]
+    queries = [*build_context_queries(seed), *(f"{name} {value}"[:600] for value in clues if value)]
     queries.append(f"{name} biography education career")
     base_key = query_key(build_query(seed))
     return [query for query in _unique(queries) if query_key(query) != base_key]
@@ -160,7 +205,8 @@ def build_role_institution_query(seed: PersonSeed, job_title: str) -> str:
     """Build one bounded completion query for a strongly evidenced unpaired role."""
 
     terms = [f'"{seed.full_name}"', f'"{job_title}"']
-    terms.extend(str(value) for value in (seed.country, seed.location) if value)
+    context = seed_context_values(seed)
+    terms.extend(value for key in ("country", "location") for value in context.get(key, [])[:1])
     terms.append("official")
     return " ".join(terms)[:600]
 
@@ -188,15 +234,13 @@ def build_queries(
 
 def _identity_signal(candidate: SourceCandidate, seed: PersonSeed, weights: dict[str, float]) -> float:
     haystack = f"{candidate.title} {candidate.snippet} {candidate.url}".casefold()
-    checks = [
-        (seed.full_name, weights["full_name"]),
-        (seed.organisation, weights["organisation"]),
-        (seed.university_name, weights["university_name"]),
-        (seed.job_title, weights["job_title"]),
-        (seed.subject, weights["subject"]),
-        (seed.country, weights["country"]),
-        (seed.location, weights["location"]),
-    ]
+    context = seed_context_values(seed)
+    checks = [(seed.full_name, weights["full_name"])]
+    checks.extend(
+        (value, weights[key])
+        for key in ("organisation", "university_name", "job_title", "subject", "country", "location")
+        for value in context.get(key, [])[:1]
+    )
     score = 0.0
     matched_values: set[str] = set()
     for value, weight in checks:
@@ -204,10 +248,10 @@ def _identity_signal(candidate: SourceCandidate, seed: PersonSeed, weights: dict
         if key and key not in matched_values and key in haystack:
             score += weight
             matched_values.add(key)
-    known_attributes = seed_known_attributes(seed)
+    known_attributes = _seed_context_values(seed)
     if known_attributes:
         matched = 0
-        for value in known_attributes.values():
+        for value in known_attributes:
             key = " ".join(value.casefold().split())
             if key and key not in matched_values and key in haystack:
                 matched += 1

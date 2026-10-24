@@ -55,20 +55,16 @@ their specific error codes.
   input certainty, and is excluded from research confidence and
   coverage; web identity assessment remains separate. Each output record also exposes
   `legacy_coverage` over the original six researched fields for historical comparison.
-- Spreadsheet organisation, title, country/location, university, subject, year, and
-  known attributes narrow initial searches, rank candidates, and constrain identity
-  resolution. They are hypotheses to verify and never become claims, provenance,
-  confidence, or final facts without retrieved evidence. Current-employer and
-  government-office headers carry a stronger current-role hypothesis; alumni and
-  former-employer headers remain useful identity/history clues without being assumed
-  current. When the seed supplies an identity anchor, same-name sources that do not
-  connect to it remain provisional. An explicit contradiction also remains provisional
-  so reliable current evidence can correct a stale or inaccurate seed; it
-  becomes field-eligible only through the bounded identity-corroboration rules.
-- Source-list metadata such as `LIST_NAME`, `source_list`, `source_dataset`,
-  `dataset_name`, `cohort`, and `source_cohort` stays passive. It is preserved exactly
-  on every derived output row, including separate education records, but never enters
-  queries, prompts, identity scoring, evidence selection, provenance, or confidence.
+- [Rich seed context](docs/rich-seed-context.md) recognizes employer and historical
+  roles, universities, qualifications, subjects, industries, and geographic context.
+  Original labels and raw values retain 100% input certainty in separate supplied-input
+  provenance. Targeted searches, source relevance, and namesake checks use bounded,
+  approved context. Seed data never becomes an independent source or fills researched
+  fields without external evidence; coverage and confidence remain evidence-based.
+- Administrative, unknown, and private/contact columns remain preserved input metadata.
+  They do not enter public searches, provider seed payloads, or identity scoring.
+  Optional provenance exports and the existing field drawer distinguish supplied,
+  corroborated, conflicting, superseded, and independently researched information.
 - Organisation and title stay paired. Freshness bands and a compact public-office
   taxonomy prioritize current primary, executive, academic, and government roles over
   stale employment, board/advisory work, parties, countries, and official buildings.
