@@ -238,3 +238,27 @@ def test_library_quota_is_atomic_across_independent_storage_instances(store):
     assert adapter.get(rows[0].file_id).content == artifact.content
     assert adapter.delete(rows[0].file_id)
     assert adapter.save(artifact).filename == artifact.filename
+
+
+def test_raw_control_metadata_round_trips_json_and_library_labels_are_safe(store):
+    original = {"full_name": "Jane\x00 Doe", "LIST_NAME": "\u00c3\u0081lumni\x00", "note": "one\vnext\fpage"}
+    seed = PersonSeed(full_name=original["full_name"], input_metadata=original)
+    created = store.create_job([seed], [original], list(original))
+    lease = store.claim_task("offline-input-test")
+    assert lease.seed.full_name == "Jane Doe"
+    assert lease.seed.input_metadata == original
+    assert store.get_results(created.job_id).people[0].original_row == original
+    assert store.finish_task(lease, result_for(lease))
+    artifact = build_export_artifact(
+        store.get_results(created.job_id),
+        list(original),
+        store.get_job(created.job_id),
+        "xlsx",
+        provenance="field",
+    )
+    assert artifact.list_name == "Álumni"
+    assert artifact.filename.startswith("Álumni_")
+    adapter = DatabaseResultFileStorage(store.session_factory, store.settings)
+    saved = adapter.save(artifact)
+    assert adapter.get(saved.file_id).metadata.list_name == "Álumni"
+    assert store.get_results(created.job_id).people[0].original_row == original

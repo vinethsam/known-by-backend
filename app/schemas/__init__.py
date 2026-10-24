@@ -23,6 +23,7 @@ from app.input_validation import (
     MAX_INPUT_HEADER_CHARS,
     MAX_INPUT_URL_CHARS,
     normalized_input_text,
+    sanitize_input_text,
     validate_input_text,
 )
 
@@ -137,7 +138,7 @@ class PersonSeed(Contract):
                     original_meaning = field_map.get(label, classify_seed_label(label))
                     if (
                         label == key or (isinstance(original_meaning, str) and original_meaning in aliases)
-                    ) and raw.strip() == item.strip():
+                    ) and sanitize_input_text(raw).strip() == sanitize_input_text(item).strip():
                         return True
                 return False
 
@@ -230,9 +231,13 @@ class PersonSeed(Contract):
         if isinstance(value, dict):
             for key, attribute in value.items():
                 if isinstance(key, str):
-                    validate_input_text(key, max_length=MAX_INPUT_HEADER_CHARS)
+                    validate_input_text(key, max_length=MAX_INPUT_HEADER_CHARS, allow_controls=True)
                 if isinstance(attribute, str):
-                    validate_input_text(attribute, max_length=MAX_INPUT_CELL_CHARS, multiline=True)
+                    # Original controls are safe inside JSON strings (escaped by
+                    # serialization); only sanitized text enters processing.
+                    validate_input_text(
+                        attribute, max_length=MAX_INPUT_CELL_CHARS, multiline=True, allow_controls=True
+                    )
         return value
 
     @field_validator("profile_link")

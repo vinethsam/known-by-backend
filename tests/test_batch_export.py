@@ -233,8 +233,9 @@ def test_missing_name_error_lists_observed_headers():
 def test_obvious_non_name_columns_are_not_accepted(value):
     content = f"candidate,company\n{value},Example Ltd\n".encode()
 
-    with pytest.raises(BatchParseError, match="missing a name column"):
-        parse_batch(content, "people.csv", None, _settings())
+    batch = parse_batch(content, "people.csv", None, _settings())
+    assert batch.seeds == [None]
+    assert batch.row_errors == ["INVALID_PERSON_NAME"]
 
 
 @pytest.mark.parametrize(
@@ -244,7 +245,6 @@ def test_obvious_non_name_columns_are_not_accepted(value):
         (b"name,\nAda,x\n", "blank"),
         (b"favorite_colour\nblue\n", "missing"),
         (b"candidate_name,member_name\nAda Lovelace,Ada Lovelace\n", "ambiguous"),
-        (b"name\n\n", "Blank row"),
     ],
 )
 def test_parse_csv_rejects_bad_headers_and_missing_people(content, message):
@@ -255,8 +255,10 @@ def test_parse_csv_rejects_bad_headers_and_missing_people(content, message):
 def test_parse_rejects_limits_and_missing_name():
     with pytest.raises(BatchParseError, match="too many rows"):
         parse_batch(b"name\nAda Lovelace\nGrace Hopper\nAlan Turing\n", "people.csv", None, _settings())
-    with pytest.raises(BatchParseError, match="Missing name"):
-        parse_batch(b"name\nAda Lovelace\n \n", "people.csv", None, _settings(MAX_BATCH_ROWS=5))
+    batch = parse_batch(b"name\nAda Lovelace\n \n", "people.csv", None, _settings(MAX_BATCH_ROWS=5))
+    assert batch.seeds[0].full_name == "Ada Lovelace"
+    assert batch.seeds[1] is None
+    assert batch.row_errors == [None, "INVALID_PERSON_NAME"]
     with pytest.raises(BatchParseError, match="too many columns"):
         parse_batch(b"name,a,b,c,d,e\nAda,1,2,3,4,5\n", "people.csv", None, _settings())
     with pytest.raises(BatchParseError, match="maximum size"):

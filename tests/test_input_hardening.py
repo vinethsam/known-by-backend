@@ -59,11 +59,8 @@ def test_person_seed_normalizes_unicode_without_losing_names_or_joiners():
 @pytest.mark.parametrize(
     "payload",
     [
-        {"full_name": "Jane\x00 Doe"},
-        {"full_name": "Jane\nDoe"},
-        {"organisation": "\rsecret"},
-        {"known_attributes": {"note": "\tsecret"}},
-        {"known_attributes": {"bad\x7fkey": "value"}},
+        {"full_name": "\x00"},
+        {"known_attributes": {"bad\x7fkey": "one", "badkey": "two"}},
         {"known_attributes": {"é": "one", "e\u0301": "two"}},
         {"preferred_urls": ["https://example.org/\tprofile"]},
         {"preferred_urls": ["https://example.org/" + "x" * MAX_INPUT_URL_CHARS]},
@@ -80,7 +77,7 @@ def test_person_seed_rejects_malformed_identity_input(payload):
 def test_api_rejects_bad_input_without_echoing_secrets(tmp_path):
     app = create_app(settings(DATABASE_URL=f"sqlite:///{tmp_path / 'input.db'}"))
     with TestClient(app) as client:
-        response = client.post("/v1/research/person", json={"full_name": "secret-value\x00"})
+        response = client.post("/v1/research/person", json={"full_name": "secret-value" + "x" * 201})
         assert response.status_code == 422
         assert "secret-value" not in response.text
         response = client.post("/v1/research/person", content=b"{}", headers={"Content-Length": "-1"})
@@ -103,7 +100,6 @@ def test_csv_preserves_original_unicode_and_multiline_cells():
 @pytest.mark.parametrize(
     "content,filename,name_column",
     [
-        (b"name,note\nJane Doe,contains\x00control", "people.csv", None),
         (b"name,note\nJane Doe," + b"x" * (MAX_INPUT_CELL_CHARS + 1), "people.csv", None),
         (b"name," + b"x" * 201 + b"\nJane Doe,note", "people.csv", None),
         (b"name\nJane Doe", "x" * 1025 + ".csv", None),
@@ -112,7 +108,6 @@ def test_csv_preserves_original_unicode_and_multiline_cells():
         (b"name\nJane Doe", "people.csv", "name\n"),
     ],
     ids=[
-        "cell-control",
         "cell-length",
         "header-length",
         "filename-length",

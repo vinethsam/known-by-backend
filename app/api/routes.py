@@ -165,7 +165,9 @@ def create_app(
             raise HTTPException(422, str(exc)) from None
         finally:
             await file.close()
-        return await asyncio.to_thread(store.create_job, batch.seeds, batch.rows, batch.columns)
+        return await asyncio.to_thread(
+            store.create_job, batch.seeds, batch.rows, batch.columns, row_errors=batch.row_errors
+        )
 
     @application.get("/v1/jobs/{job_id}", response_model=JobView, dependencies=secured)
     async def get_job(job_id: UUID):

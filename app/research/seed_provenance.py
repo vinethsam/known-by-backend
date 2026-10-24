@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.input_validation import sanitize_input_text
 from app.research.normalisation import comparison_key, name_key, normalise_display
 from app.schemas import EvidenceClaim, FieldDecision, PersonSeed, ProfileField, SourceRecord
 from app.seed_context import seed_core_values, seed_input_attributes
@@ -12,6 +13,7 @@ def _field(label: str | None) -> str | None:
 
 
 def _key(field: ProfileField, value: str) -> str:
+    value = sanitize_input_text(value)
     if field == ProfileField.full_name:
         return name_key(value)
     return comparison_key(normalise_display(field, value))

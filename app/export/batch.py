@@ -4,7 +4,7 @@ import csv
 import io
 import unicodedata
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any
 from xml.etree.ElementTree import ParseError, XMLParser, iterparse
@@ -19,6 +19,7 @@ from app.input_validation import (
     MAX_INPUT_CELL_CHARS,
     MAX_INPUT_FILENAME_CHARS,
     MAX_INPUT_HEADER_CHARS,
+    sanitize_input_text,
     validate_input_text,
 )
 from app.schemas import PersonSeed
@@ -34,9 +35,10 @@ class _ColumnInference:
 
 @dataclass(frozen=True)
 class BatchInput:
-    seeds: list[PersonSeed]
+    seeds: list[PersonSeed | None]
     rows: list[dict[str, Any]]
     columns: list[str]
+    row_errors: list[str | None] = field(default_factory=list)
 
 
 class BatchParseError(ValueError):
@@ -181,41 +183,50 @@ def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Set
         raise BatchParseError("Batch file is empty")
     header = []
     for value in rows[0]:
-        _validate_text(value, MAX_INPUT_HEADER_CHARS)
+        try:
+            _validate_text(value, MAX_INPUT_HEADER_CHARS, allow_controls=True)
+            _validate_text(sanitize_input_text(value), MAX_INPUT_HEADER_CHARS)
+        except ValueError as exc:
+            raise BatchParseError(str(exc)) from exc
         header.append(value)
     _validate_headers(header, settings)
 
     prepared_rows: list[tuple[int, list[str]]] = []
     for zero_based, raw_row in enumerate(rows[1:], start=2):
-        if not raw_row:
-            raise BatchParseError(f"Blank row at {zero_based}")
         if len(raw_row) > len(header):
             raise BatchParseError(f"Row {zero_based} contains data beyond the header")
         values = list(raw_row)
         if len(values) < len(header):
             values.extend([""] * (len(header) - len(values)))
-        if not any(value.strip() for value in values):
-            raise BatchParseError(f"Missing name in row {zero_based}")
         if len(prepared_rows) >= settings.MAX_BATCH_ROWS:
             raise BatchParseError("Batch file contains too many rows")
         prepared_rows.append((zero_based, values))
 
     inference = _infer_columns(header, [values for _, values in prepared_rows], name_column)
     output_rows: list[dict[str, Any]] = []
-    seeds: list[PersonSeed] = []
+    seeds: list[PersonSeed | None] = []
+    row_errors: list[str | None] = []
     for row_number, values in prepared_rows:
         row = {column: values[index] for index, column in enumerate(header)}
-        name = row[inference.name_column].strip()
-        if not name:
-            raise BatchParseError(f"Missing name in row {row_number}")
-        if _obviously_not_person_name(name):
-            raise BatchParseError(f"Invalid person name in row {row_number}")
-        seed = _seed_from_row(row, name, inference.seed_columns, name_column=inference.name_column)
         output_rows.append(row)
-        seeds.append(seed)
+        try:
+            for value in values:
+                _validate_text(value, MAX_INPUT_CELL_CHARS, multiline=True, allow_controls=True)
+            name = sanitize_input_text(row[inference.name_column]).strip()
+            if not name or _obviously_not_person_name(name):
+                seeds.append(None)
+                row_errors.append("INVALID_PERSON_NAME")
+                continue
+            seed = _seed_from_row(row, name, inference.seed_columns, name_column=inference.name_column)
+        except ValueError:
+            seeds.append(None)
+            row_errors.append("INVALID_PERSON_SEED")
+        else:
+            seeds.append(seed)
+            row_errors.append(None)
     if not seeds:
         raise BatchParseError("Batch file contains no people")
-    return BatchInput(seeds=seeds, rows=output_rows, columns=header)
+    return BatchInput(seeds=seeds, rows=output_rows, columns=header, row_errors=row_errors)
 
 
 def _validate_headers(header: list[str], settings: Settings) -> None:
@@ -223,9 +234,9 @@ def _validate_headers(header: list[str], settings: Settings) -> None:
         raise BatchParseError("Batch file is missing a header row")
     if len(header) > settings.MAX_INPUT_COLUMNS:
         raise BatchParseError("Batch file contains too many columns")
-    if any(not column.strip() for column in header):
+    if any(not sanitize_input_text(column).strip() for column in header):
         raise BatchParseError("Batch file contains a blank header")
-    normalized = [unicodedata.normalize("NFC", column).strip().casefold() for column in header]
+    normalized = [sanitize_input_text(column).strip().casefold() for column in header]
     if len(set(normalized)) != len(normalized):
         raise BatchParseError("Batch file contains duplicate headers")
 
@@ -239,19 +250,19 @@ def _infer_columns(
         explicit = [
             (index, column)
             for index, column in enumerate(header)
-            if unicodedata.normalize("NFC", column) == unicodedata.normalize("NFC", name_column)
+            if sanitize_input_text(column) == unicodedata.normalize("NFC", name_column)
         ]
         if not explicit:
             raise BatchParseError("Selected name column is not present")
-        name_index, selected_name = explicit[0]
-        if not _usable_name_column(name_index, data_rows):
-            raise BatchParseError("Selected name column does not contain usable person names")
+        _, selected_name = explicit[0]
     else:
-        name_candidates = [
-            match
-            for match in matches
-            if match.field == "full_name" and _usable_name_column(column_indexes[match.column], data_rows)
+        name_candidates = [match for match in matches if match.field == "full_name"]
+        usable = [
+            match for match in name_candidates if _usable_name_column(column_indexes[match.column], data_rows)
         ]
+        # Prefer columns with real names, as before. If every recognized name is
+        # invalid, still retain those records and report their individual errors.
+        name_candidates = usable or name_candidates
         if not name_candidates:
             observed = ", ".join(repr(column) for column in header)
             raise BatchParseError(
@@ -286,8 +297,16 @@ def _infer_columns(
 def _usable_name_column(index: int, data_rows: list[list[str]]) -> bool:
     if not data_rows:
         return True
-    values = [row[index].strip() for row in data_rows if index < len(row) and row[index].strip()]
-    return bool(values) and any(not _obviously_not_person_name(value) for value in values)
+    for row in data_rows:
+        if index >= len(row):
+            continue
+        try:
+            value = sanitize_input_text(row[index]).strip()
+        except ValueError:
+            continue
+        if value and not _obviously_not_person_name(value):
+            return True
+    return False
 
 
 def _obviously_not_person_name(value: str) -> bool:
@@ -305,12 +324,15 @@ def _obviously_not_person_name(value: str) -> bool:
 def _seed_from_row(
     row: dict[str, str], full_name: str, seed_columns: dict[str, str], *, name_column: str | None = None
 ) -> PersonSeed:
+    processed = {
+        field_name: sanitize_input_text(row[column]).strip() for field_name, column in seed_columns.items()
+    }
     values = {
-        field_name: row[column].strip()
-        for field_name, column in seed_columns.items()
-        if row[column].strip()
-        and (field_name == "profile_link" or safe_context_value(row[column]))
-        and len(row[column].strip())
+        field_name: value
+        for field_name, value in processed.items()
+        if value
+        and (field_name == "profile_link" or safe_context_value(value))
+        and len(value)
         <= {"country": 100, "country_of_origin": 100, "program_year": 20, "profile_link": 2048}.get(
             field_name, 200
         )
@@ -368,13 +390,17 @@ def _stringify_cell(value: Any) -> str:
     if value is None:
         return ""
     value = str(value)
-    _validate_text(value, MAX_INPUT_CELL_CHARS, multiline=True)
+    # Keep file-level size safeguards, but defer character validity to each row.
+    if len(value) > MAX_INPUT_CELL_CHARS:
+        _validate_text(value, MAX_INPUT_CELL_CHARS, multiline=True, allow_controls=True)
     return value
 
 
-def _validate_text(value: str, max_length: int, *, multiline: bool = False) -> None:
+def _validate_text(
+    value: str, max_length: int, *, multiline: bool = False, allow_controls: bool = False
+) -> None:
     try:
-        validate_input_text(value, max_length=max_length, multiline=multiline)
+        validate_input_text(value, max_length=max_length, multiline=multiline, allow_controls=allow_controls)
     except ValueError as exc:
         raise BatchParseError(str(exc)) from exc
 

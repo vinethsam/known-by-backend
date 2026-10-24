@@ -104,14 +104,21 @@ class Store:
 
     def create_job(
         self,
-        seeds: list[PersonSeed],
+        seeds: list[PersonSeed | None],
         original_rows: list[dict] | None = None,
         columns: list[str] | None = None,
+        *,
+        row_errors: list[str | None] | None = None,
     ) -> JobCreated:
         if not seeds or len(seeds) > self.settings.MAX_BATCH_ROWS:
             raise ValueError("Job person count is outside configured limits")
         if original_rows is not None and len(original_rows) != len(seeds):
             raise ValueError("Original rows must match the person count")
+        errors = row_errors if row_errors is not None else [None] * len(seeds)
+        if len(errors) != len(seeds) or any(
+            (seed is None) != bool(error) for seed, error in zip(seeds, errors, strict=False)
+        ):
+            raise ValueError("Each invalid seed must have a matching row error")
         job_id = new_id()
         now = utcnow()
         rows = original_rows or [{} for _ in seeds]
@@ -128,20 +135,23 @@ class Store:
             session.flush()
             for offset, seed in enumerate(seeds):
                 source_row = dict(rows[offset]) if offset < len(rows) else {}
+                error = errors[offset]
                 session.add(
                     PersonTaskRow(
                         person_id=new_id(),
                         job_id=job_id,
                         row_index=offset + 2,
-                        seed_json=seed.model_dump(mode="json"),
+                        seed_json=seed.model_dump(mode="json") if seed is not None else {},
                         original_row_json=source_row,
-                        status=PersonStatus.queued.value,
+                        status=PersonStatus.failed.value if error else PersonStatus.queued.value,
+                        error_code=error,
                         attempts=0,
                         created_at=now,
+                        completed_at=now if error else None,
                     )
                 )
             self._refresh_job_status(session, job)
-        return JobCreated(job_id=job_id, status=JobStatus.queued, total_people=len(seeds))
+        return JobCreated(job_id=job_id, status=JobStatus(job.status), total_people=len(seeds))
 
     def get_job(self, id: str) -> JobView | None:
         with self.session_factory() as session:

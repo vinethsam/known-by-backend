@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from app.input_validation import sanitize_input_text
+
 
 @dataclass(frozen=True)
 class _TokenPattern:
@@ -431,7 +433,7 @@ _OBVIOUS_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 def normalize_header(value: str) -> str:
     """Return the Unicode-safe comparison form used only for column headers."""
 
-    normalized = unicodedata.normalize("NFKC", value).strip()
+    normalized = unicodedata.normalize("NFKC", sanitize_input_text(value)).strip()
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
     normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", normalized)
     separated = "".join(character if character.isalnum() else " " for character in normalized)
@@ -587,7 +589,7 @@ def safe_context_value(value: Any) -> str | None:
     """Public-search context is short prose, never contact details or long blobs."""
     if not isinstance(value, str):
         return None
-    value = " ".join(value.split())
+    value = " ".join(sanitize_input_text(value).split())
     if not value or len(value) > 200 or value.casefold() in {"unknown", "none", "null", "n/a", "na", "-"}:
         return None
     if "@" in value or re.search(r"https?://|www\.|\b\d[\d ()+.-]{6,}\d\b", value, re.I):

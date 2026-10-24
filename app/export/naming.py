@@ -8,6 +8,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from app.export.batch import normalize_header
+from app.input_validation import sanitize_input_text
 from app.schemas import JobResults, JobView
 
 ExportFormat = Literal["csv", "xlsx"]
@@ -19,13 +20,17 @@ _SOURCE_LIST_HEADERS = frozenset(
 
 
 def source_list_name(results: JobResults) -> str | None:
-    """Read the first nonempty list value without changing any original input row."""
+    """Derive a safe library label without changing the JSON-backed original row."""
 
     for person in sorted(results.people, key=lambda person: person.row_index):
         for header, value in person.original_row.items():
             if normalize_header(header) not in _SOURCE_LIST_HEADERS or value is None:
                 continue
-            text = str(value).strip()
+            try:
+                text = sanitize_input_text(str(value), multiline=True).strip()
+            except ValueError:
+                # An invalid record can still be exported with its valid peers.
+                continue
             if text:
                 return text
     return None

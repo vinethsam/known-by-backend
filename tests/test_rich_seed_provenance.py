@@ -71,6 +71,32 @@ def profile(seed, claims=(), sources=()):
     return reconcile("person", seed, list(claims), list(sources), POLICY, today=TODAY)
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (ProfileField.full_name, NAME),
+        (ProfileField.organisation, "Aster Labs"),
+        (ProfileField.university_name, "Lake University"),
+    ],
+)
+def test_sanitized_seed_comparison_corroborates_without_overwriting_raw_value(field, value):
+    raw = value[:2] + "\x00" + value[2:]
+    seed_values = {"full_name": NAME, "organisation": "Aster Labs", field.value: raw}
+    seed = PersonSeed(**seed_values)
+    source = evidence_source(seed, f"{NAME} works for Aster Labs and attended Lake University.")
+    claims = [evidence_claim("verified", field, value)]
+    result = profile(seed, claims, [source])
+    supplied = next(item for item in result.seed_attributes if item["field"] == field.value)
+    assert supplied["value"] == raw
+    assert supplied["provenance_status"] == "corroborated"
+    assert supplied["corroborating_claim_ids"] == ["verified"]
+    assert supplied["conflicting_claim_ids"] == []
+    clean_seed = PersonSeed(**{**seed_values, field.value: value})
+    clean = profile(clean_seed, claims, [source])
+    assert result.fields[field].research_confidence == clean.fields[field].research_confidence
+    assert result.coverage == clean.coverage
+
+
 def rich_seed():
     return PersonSeed(
         full_name=NAME,
