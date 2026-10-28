@@ -50,6 +50,7 @@ from app.schemas import (
     SourceCandidate,
     SourceRecord,
     SourceType,
+    has_researched_value,
     utcnow,
 )
 from app.seed_context import seed_context_values
@@ -242,7 +243,7 @@ class ResearchOrchestrator:
                 record_fields = [record.fields for record in profile.records] or [profile.fields]
                 if all(
                     all(
-                        decision.value is not None
+                        (field_name == ProfileField.full_name or has_researched_value(decision))
                         and decision.confidence >= settings.TARGET_FIELD_CONFIDENCE
                         and not decision.review_required
                         for field_name, decision in fields.items()
@@ -706,7 +707,7 @@ class ResearchOrchestrator:
                             field.value
                             for field in ProfileField
                             if any(
-                                (decision := fields[field]).value is None
+                                not has_researched_value(decision := fields[field])
                                 or decision.review_required
                                 or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
                                 for fields in record_fields
@@ -766,8 +767,8 @@ class ResearchOrchestrator:
                         )
                         if (
                             not role_completion_queued
-                            and organisation.value is None
-                            and role.value is not None
+                            and not has_researched_value(organisation)
+                            and has_researched_value(role)
                             and strong_unpaired_role
                             and relationship_type
                             in {
@@ -790,7 +791,7 @@ class ResearchOrchestrator:
                                 important_completion_fields,
                                 key=lambda item: item.value,
                             )
-                            if any(fields[field_name].value is None for fields in record_fields)
+                            if any(not has_researched_value(fields[field_name]) for fields in record_fields)
                         ]
                         try:
                             with stage("discovery_ms"):

@@ -18,6 +18,7 @@ or inferred from the token. Missing or incorrect credentials return 401.
 | POST | `/v1/jobs/{job_id}/library` | Save one export and return its metadata with HTTP 201 |
 | GET | `/v1/library/files?limit=50&offset=0` | Metadata, newest first; maximum page size 100 |
 | GET | `/v1/library/files/{file_id}` | Download the retained artifact |
+| GET | `/v1/library/files/{file_id}/records?limit=50&offset=0&q=` | Read-only paginated record preview, maximum page size 100 |
 | DELETE | `/v1/library/files/{file_id}` | Permanently remove that artifact; HTTP 204 |
 
 The explicit save body is:
@@ -34,9 +35,9 @@ generates the artifact using the same renderer and scoring threshold as its ordi
 download. A save is explicit each time; repeating it intentionally creates another
 saved file, subject to the same limits.
 
-Only jobs with `status=completed` and retained results can be saved. Completed results
+Jobs with `status=completed` or `status=partial` and retained results can be saved after every person is terminal. `partial` means processing completed with issues. Completed results
 may contain review flags; the user's explicit request is the decision to retain the
-file. Queued, running, partial, failed, and cancelled jobs return 409. Unknown jobs or
+file. Queued, running, failed, and cancelled jobs return 409. Unknown jobs or
 files return 404. No provider configuration, network retrieval, or model call is needed
 to save, list, download, or delete a file.
 
@@ -52,17 +53,37 @@ appear as the filename. See [export contracts](exports.md).
 
 Metadata includes only file ID, filename, format, saved time, research start time,
 byte size, and optional originating list name. The file itself contains the ordinary
-standardized export, including original per-row source-list metadata. No separate
+standardized export, with supplied values and research provenance kept distinct. Administrative input columns are excluded. No separate
 HTML, Markdown, search/model responses, claims, or confidence objects are copied into
 library storage. Listing retrieves metadata without loading the binary file. Library
 responses are private and disable browser/proxy caching.
 
-Saved CSV and XLSX files have the same fixed column prefix as a normal download:
+Saved CSV and XLSX files have the same fixed column contract as a normal download:
 `full_name`, `country_of_origin`, `organisation`, `job_title`, `university_name`,
 `degree_type`, `subject`, `profile_link`, their confidence columns, then the standard
-summary, review, status, error, and aggregate source columns. Optional field URLs and
-unchanged input metadata follow. A name-only upload and an upload with extra seed
-columns therefore share the same leading export layout. See [export contracts](exports.md).
+provenance, summary, review, status and error columns, ending with `source_urls`.
+Nothing follows that last column. A name-only upload and an upload with extra seed
+columns share the entire export layout. See [export contracts](exports.md).
+
+## In-app record previews
+
+The records endpoint reads the actual saved artifact and returns `{file, records, total,
+limit, offset, has_more}`. Records use the canonical export keys; legacy friendly headers
+are recognized. Search (`q`, maximum 200 characters) matches the eight core displayed
+fields. Unknown administrative columns do not appear in previews. Missing legacy
+confidence/provenance is left empty, never reconstructed as independent research.
+The known legacy research prefix and optional provenance block are recognized before
+appended input metadata, so an administrative `STATUS` cannot replace the saved
+research `status`. When a legacy file includes explicit research confidence, it takes
+precedence over its older combined confidence column. The original October 26 CSV
+and XLSX were both previewed successfully: 65 saved rows each, with unchanged bytes.
+
+CSV rows and read-only XLSX rows are iterated on the server, retaining only the requested
+page. Reads are bounded by the configured file-size and uncompressed-workbook limits,
+512 columns and 100,000 rows. Browser memory holds at most 100 records. Formula cells
+are inert strings; macros, external links and formulas are not executed. Malformed or
+oversized previews return 422 while the unchanged original remains downloadable.
+Previews require the same team authentication as listing, download and deletion.
 
 ## Storage and limits
 

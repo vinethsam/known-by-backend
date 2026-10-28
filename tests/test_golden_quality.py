@@ -89,7 +89,10 @@ def test_golden_andrew_marsh_seed_context_excludes_football_namesakes():
     assert result.fields[ProfileField.job_title].value == "Chief Executive Officer"
     assert result.fields[ProfileField.university_name].value is None
     assert result.fields[ProfileField.full_name].sources == []
-    assert profile(seed, [], []).fields[ProfileField.organisation].value is None
+    supplied = profile(seed, [], []).fields[ProfileField.organisation]
+    assert supplied.value == "Entergy"
+    assert supplied.researched_value is None and supplied.selected_claim_id is None
+    assert supplied.supporting_claim_ids == [] and supplied.provenance_status == "supplied"
 
 
 def test_golden_anutin_current_prime_minister_beats_old_analyst_and_party():

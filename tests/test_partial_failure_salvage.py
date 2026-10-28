@@ -314,7 +314,10 @@ def test_disconnected_seed_mismatch_sources_remain_identity_ineligible():
     ]
     result = profile(seed, [business, university], claims)
     assert result.coverage == 0
-    assert result.fields[ProfileField.organisation].value is None
+    decision = result.fields[ProfileField.organisation]
+    assert decision.value == seed.organisation
+    assert decision.researched_value is None and decision.selected_claim_id is None
+    assert decision.supporting_claim_ids == [] and decision.provenance_status == "supplied"
     assert result.fields[ProfileField.university_name].value is None
 
 

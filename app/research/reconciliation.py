@@ -50,7 +50,7 @@ from app.research.normalisation import (
     normalise_degree_candidates,
     normalise_display,
 )
-from app.research.seed_provenance import attach_seed_provenance, supplied_attributes
+from app.research.seed_provenance import attach_seed_provenance, seed_review_reasons, supplied_attributes
 from app.schemas import (
     EvidenceClaim,
     FieldDecision,
@@ -578,16 +578,27 @@ def _employment_bundles(claims: list[EvidenceClaim]) -> list[_FactBundle]:
     ] + inferred
 
 
-def _employment_clusters(claims: list[EvidenceClaim]) -> list[_EvidenceCluster]:
+def _employment_clusters(
+    claims: list[EvidenceClaim], *, include_historical: bool = False
+) -> list[_EvidenceCluster]:
     active = [
         claim
         for claim in claims
-        if claim.field in VOLATILE_FIELDS and claim.is_current is not False and claim.end_date is None
+        if claim.field in VOLATILE_FIELDS
+        and (include_historical or (claim.is_current is not False and claim.end_date is None))
     ]
     clusters: list[_EvidenceCluster] = []
     for bundle in _employment_bundles(active):
         compatible: list[tuple[int, _EvidenceCluster]] = []
+        historical_bundle = all(
+            claim.is_current is False or claim.end_date is not None for claim in bundle.claims
+        )
         for cluster in clusters:
+            historical_cluster = all(
+                claim.is_current is False or claim.end_date is not None for claim in cluster.claims
+            )
+            if historical_bundle != historical_cluster:
+                continue
             overlap, conflict = _overlap_and_conflict(bundle.claims, cluster.claims)
             if overlap and not conflict:
                 compatible.append((overlap, cluster))
@@ -835,9 +846,21 @@ def _employment_decisions(
         for claim in bundle.claims
     }
 
+    def unnamed_relative_business(claim: EvidenceClaim) -> bool:
+        # A relative's unnamed business is a biographical description, not a
+        # named professional organisation suitable for a primary affiliation.
+        return claim.field == ProfileField.organisation and bool(
+            re.match(
+                r"^(?:his|her|their|my) (?:father|mother|parents?|family)(?: s)?\b",
+                comparison_key(claim.raw_value),
+            )
+        )
+
     def invalid_organisation(claim: EvidenceClaim) -> bool:
         if claim.field != ProfileField.organisation:
             return False
+        if unnamed_relative_business(claim):
+            return True
         if comparison_key(claim.raw_value) in geography_keys:
             return True
         paired_titles = paired_titles_by_claim.get(claim.claim_id, [])
@@ -862,13 +885,76 @@ def _employment_decisions(
 
     invalid_organisations = [claim for claim in claims if invalid_organisation(claim)]
     invalid_ids = {claim.claim_id for claim in invalid_organisations}
-    eligible_claims = [claim for claim in claims if claim.claim_id not in invalid_ids]
+    invalid_relationship_claims = invalid_organisations + [
+        claim
+        for bundle in _employment_bundles(claims)
+        if any(unnamed_relative_business(claim) for claim in bundle.claims)
+        for claim in bundle.claims
+    ]
+    invalid_ids.update(claim.claim_id for claim in invalid_relationship_claims)
+
+    def temporally_grounded(claim: EvidenceClaim) -> EvidenceClaim:
+        # A model's 'current' flag cannot turn an explicitly ended/past job into
+        # present employment. Preserve the original claim; normalize selection only.
+        # Evaluate the sentence containing this value, not unrelated past roles
+        # elsewhere in a multi-sentence quote.
+        sentences = re.split(r"(?<=[.!?;])\s+", claim.evidence_text)
+        relevant_sentences = [
+            sentence
+            for sentence in sentences
+            if f" {comparison_key(claim.raw_value)} " in f" {comparison_key(sentence)} "
+        ]
+        quote = comparison_key(" ".join(relevant_sentences) or claim.evidence_text)
+        past = re.search(
+            r"\b(formerly|previously|former|retired|resigned|left|until|was|were)\b|"
+            r"\b(?:was|worked|served)\s+(?:as|at|for|with|the|an?)\b",
+            quote,
+        )
+        present = re.search(r"\b(currently|now|still|since)\b", quote)
+        if past and not present and claim.field in VOLATILE_FIELDS:
+            return claim.model_copy(update={"is_current": False})
+        return claim
+
+    eligible_claims = [temporally_grounded(claim) for claim in claims if claim.claim_id not in invalid_ids]
     historical = [
         claim
         for claim in eligible_claims
         if claim.field in VOLATILE_FIELDS and (claim.is_current is False or claim.end_date is not None)
     ]
-    clusters = _employment_clusters(eligible_claims)
+
+    def principal_practice(cluster: _EvidenceCluster) -> bool:
+        organisations = " ".join(
+            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation
+        )
+        titles = " ".join(
+            claim.raw_value for claim in cluster.claims if claim.field == ProfileField.job_title
+        )
+        quote = comparison_key(" ".join(claim.evidence_text for claim in cluster.claims))
+        practice = re.search(
+            r"\b(architects?|architecture|studio|atelier|workshop|practice|partners|associates|chambers|law firm)\b",
+            comparison_key(f"{organisations} {titles}"),
+        )
+        if not practice:
+            practice = re.search(
+                r"\b(?:architectural practice|architecture firm|law practice|design studio)\b", quote
+            )
+        ownership = re.search(r"\b(founder|co founder|principal|owner|partner)\b", comparison_key(titles))
+        founding = re.search(r"\b(founded|co founded|established|set up)\b", quote)
+        # Require grounded ownership/practice context; supplied affiliation alone
+        # never establishes professional primacy or currentness.
+        return bool(practice and (ownership or founding))
+
+    clusters = [
+        cluster
+        for cluster in _employment_clusters(eligible_claims, include_historical=True)
+        if principal_practice(cluster)
+        or any(claim.is_current is not False and claim.end_date is None for claim in cluster.claims)
+    ]
+    active_practice = any(
+        principal_practice(cluster)
+        and any(claim.is_current is not False and claim.end_date is None for claim in cluster.claims)
+        for cluster in clusters
+    )
     if not clusters:
         return {
             field_name: _decision(
@@ -888,6 +974,8 @@ def _employment_decisions(
         }
 
     def relationship_type(cluster: _EvidenceCluster) -> RelationshipType:
+        if principal_practice(cluster):
+            return RelationshipType.principal_professional_practice
         organisations = " ".join(
             claim.raw_value for claim in cluster.claims if claim.field == ProfileField.organisation
         )
@@ -898,11 +986,14 @@ def _employment_decisions(
                 if claim.field == ProfileField.job_title
             )
         )
-        return classify_relationship(
+        kind = classify_relationship(
             organisations or None,
             titles or None,
             source_types={sources[claim.source_id].source_type for claim in cluster.claims},
         )
+        if kind == RelationshipType.current_academic_role and active_practice:
+            return RelationshipType.secondary_academic_role
+        return kind
 
     def public_office_type(cluster: _EvidenceCluster):
         organisations = " ".join(
@@ -978,6 +1069,7 @@ def _employment_decisions(
                 RelationshipType.current_executive_role,
                 RelationshipType.current_primary_employment,
                 RelationshipType.current_academic_role,
+                RelationshipType.principal_professional_practice,
             }
         )
         primary_office = int(
@@ -1100,9 +1192,17 @@ def _employment_decisions(
             for claim in cluster.claims
             if claim.field == field_name
         ]
-        alternative_claims.extend(claim for claim in historical if claim.field == field_name)
-        alternative_claims.extend(claim for claim in invalid_organisations if claim.field == field_name)
+        selected_ids = {claim.claim_id for claim in selected.claims}
+        alternative_claims.extend(
+            claim for claim in historical if claim.field == field_name and claim.claim_id not in selected_ids
+        )
+        alternative_claims.extend(claim for claim in invalid_relationship_claims if claim.field == field_name)
+        historical_selection = all(
+            claim.is_current is False or claim.end_date is not None for claim in selected.claims
+        )
         reasons = ["CURRENT_ROLE_CONFLICT"] if conflict_claims else []
+        if historical_selection:
+            reasons.append("HISTORICAL_PROFESSIONAL_AFFILIATION")
         if len({claim.field for claim in selected.claims} & VOLATILE_FIELDS) < len(VOLATILE_FIELDS):
             reasons.append("UNPAIRED_FACT")
         if invalid_organisations and field_name == ProfileField.organisation:
@@ -1121,6 +1221,15 @@ def _employment_decisions(
             reason_codes=reasons,
         )
         decisions[field_name].scoring_components["relationship_type"] = relationship_type(selected).value
+        decisions[field_name].scoring_components["relationship_temporal_status"] = (
+            "historical"
+            if historical_selection
+            else "current"
+            if any(claim.is_current is True and claim.end_date is None for claim in selected.claims)
+            else "unspecified"
+        )
+        if historical_selection:
+            decisions[field_name].review_required = True
         office_type = public_office_type(selected)
         if office_type is not None:
             decisions[field_name].scoring_components["public_office_type"] = office_type.value
@@ -1576,6 +1685,8 @@ def reconcile(
         profile_confidence, coverage = profile_scores(fields, policy)
         review, record_reasons = _record_review(fields, policy, web_identity)
         attach_seed_provenance(fields, seed, seed_attributes, web_identity)
+        record_reasons = list(dict.fromkeys([*record_reasons, *seed_review_reasons(fields)]))
+        review = review or bool(seed_review_reasons(fields))
         records.append(
             ProfileRecord(
                 record_id=_record_id(fields),

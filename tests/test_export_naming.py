@@ -71,7 +71,8 @@ def test_first_nonempty_list_uses_original_row_order_and_leaves_rows_unchanged()
     assert results.model_dump() == original
     assert export_results(results, ["name", "LIST_NAME"], "csv") == before
     rows = list(csv.DictReader(io.StringIO(before.decode("utf-8-sig"))))
-    assert [row["LIST_NAME"] for row in rows] == ["YALI", "Forbes 2000", "  "]
+    assert all("LIST_NAME" not in row for row in rows)
+    assert [person.original_row["LIST_NAME"] for person in results.people] == ["YALI", "Forbes 2000", "  "]
 
 
 @pytest.mark.parametrize(

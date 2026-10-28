@@ -19,8 +19,10 @@ from app.db import Store
 from app.db.library import DatabaseResultFileStorage
 from app.export.artifacts import build_export_artifact, export_media_type
 from app.export.batch import BatchParseError, parse_batch
+from app.export.formats import ExportCellLimitError
 from app.export.naming import content_disposition
 from app.library import LibraryLimitError, ResultFileStorage, SavedResultFile, SaveResultRequest
+from app.library_preview import LibraryPreviewError, SavedRecordsPage, preview_saved_file
 from app.logging import configure_logging
 from app.processing import html_to_markdown
 from app.retrieval.service import FetchConfigurationError, FetchError, FetchTimeoutError, StaticFetcher
@@ -192,25 +194,37 @@ def create_app(
 
     async def job_export(job_id, format, provenance, *, require_completed=False):
         job = await get_job(job_id)
-        if require_completed and job.status != JobStatus.completed:
-            raise HTTPException(409, "Only completed research jobs can be saved to the library")
+        saveable_statuses = {JobStatus.completed, JobStatus.partial}
+        if require_completed and job.status not in saveable_statuses:
+            raise HTTPException(409, "Only finished research jobs with results can be saved to the library")
         results = await get_results(job_id)
         if require_completed and (
-            results.status != JobStatus.completed
+            results.status not in saveable_statuses
             or not results.people
-            or any(person.result is None for person in results.people)
+            or any(person.status in {"queued", "researching"} for person in results.people)
+            or not any(person.result is not None for person in results.people)
+            or (
+                results.status == JobStatus.partial
+                and not any(
+                    person.result is not None and person.status in {"completed", "review_required"}
+                    for person in results.people
+                )
+            )
         ):
             raise HTTPException(409, "Completed result is unavailable")
         columns = await asyncio.to_thread(store.get_columns, str(job_id))
-        return await asyncio.to_thread(
-            build_export_artifact,
-            results,
-            columns,
-            job,
-            format,
-            provenance=provenance,
-            low_confidence_threshold=settings.SCORING.review_threshold,
-        )
+        try:
+            return await asyncio.to_thread(
+                build_export_artifact,
+                results,
+                columns,
+                job,
+                format,
+                provenance=provenance,
+                low_confidence_threshold=settings.SCORING.review_threshold,
+            )
+        except ExportCellLimitError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @application.get("/v1/jobs/{job_id}/export", dependencies=secured)
     async def export(
@@ -264,6 +278,35 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @application.get(
+        "/v1/library/files/{file_id}/records", response_model=SavedRecordsPage, dependencies=library_secured
+    )
+    async def preview_saved_records(
+        file_id: UUID,
+        response: Response,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        q: str = Query(default="", max_length=200),
+    ):
+        saved = await asyncio.to_thread(library.get, str(file_id))
+        if saved is None:
+            raise HTTPException(404, "Saved result not found")
+        try:
+            page = await asyncio.to_thread(
+                preview_saved_file,
+                saved,
+                limit=limit,
+                offset=offset,
+                query=q,
+                max_file_bytes=settings.LIBRARY_MAX_FILE_BYTES,
+                max_uncompressed_bytes=settings.MAX_XLSX_UNCOMPRESSED_BYTES,
+            )
+        except LibraryPreviewError as exc:
+            raise HTTPException(422, str(exc)) from None
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return page
 
     @application.delete("/v1/library/files/{file_id}", status_code=204, dependencies=library_secured)
     async def delete_saved_result(file_id: UUID):

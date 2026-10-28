@@ -42,6 +42,7 @@ from app.db.models import (
     WorkerHeartbeatRow,
 )
 from app.research.normalisation import finalize_display
+from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
 from app.research.source_policy import sanitize_research_result
 from app.schemas import (
     EvidenceClaim,
@@ -59,6 +60,7 @@ from app.schemas import (
     new_id,
     utcnow,
 )
+from app.seed_context import seed_input_attributes
 
 EXPECTED_ALEMBIC_REVISION = "202609290001"
 SUCCESS_STATUSES = {PersonStatus.completed.value, PersonStatus.review_required.value}
@@ -751,7 +753,7 @@ class Store:
             result = sanitize_research_result(
                 result, PersonSeed.model_validate(task.seed_json), self.settings.SCORING
             )
-            result.profile = finalize_display(result.profile)
+            result.profile = finalize_display(project_stored_seed(result.profile, task.seed_json))
             result.profile.status = PersonStatus(task.status)
             if task.status in {"queued", "researching", "cancelled"}:
                 result.profile.research_status = task.status
@@ -767,6 +769,12 @@ class Store:
             status=PersonStatus(task.status),
             error_code=task.error_code,
             result=result,
+            supplied_fields=supplied_field_decisions(
+                task.seed_json or {"input_metadata": task.original_row_json}
+            ),
+            seed_attributes=seed_input_attributes(
+                task.seed_json or {"input_metadata": task.original_row_json}
+            ),
         )
 
     def _heartbeat(self, session: Session, worker_id: str, now: datetime) -> None:

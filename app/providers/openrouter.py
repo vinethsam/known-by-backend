@@ -215,6 +215,7 @@ class OpenRouterClient:
             response_received = False
             response_body_received = False
             http_status: int | None = None
+            data: Any = None
             try:
                 request = self.client.build_request(
                     "POST",
@@ -281,6 +282,32 @@ class OpenRouterClient:
                 )
             finally:
                 if failure is not None:
+                    if failure.error_code == OPENROUTER_SCHEMA_ERROR and isinstance(data, dict):
+                        choices = data.get("choices")
+                        choices = choices if isinstance(choices, list) else []
+                        exhausted = any(
+                            isinstance(choice, dict) and choice.get("finish_reason") == "length"
+                            for choice in choices
+                        )
+                        response_usage = data.get("usage")
+                        completion_tokens = (
+                            response_usage.get("completion_tokens", 0)
+                            if isinstance(response_usage, dict)
+                            else 0
+                        )
+                        reached_limit = isinstance(
+                            completion_tokens, (int, float)
+                        ) and completion_tokens >= body.get("max_tokens", float("inf"))
+                        if exhausted or reached_limit:
+                            # Repeating this same bounded request cannot repair a
+                            # truncated contract. Preserve usage and salvage other
+                            # sources instead of paying for identical retries.
+                            failure = OpenRouterError(
+                                "OpenRouter structured output exceeded the response token limit",
+                                error_code=OPENROUTER_SCHEMA_ERROR,
+                                retryable=False,
+                                exception_type="OutputTokenLimit",
+                            )
                     failure.operation = operation
                     failure.http_status = failure.http_status or http_status
                     failure.request_sent = request_sent

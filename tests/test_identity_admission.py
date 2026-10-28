@@ -155,7 +155,10 @@ def test_unanchored_claims_about_partial_namesake_do_not_gain_identity_from_foot
     )
     profile = reconcile("person", seed, claims, sources, POLICY)
 
-    assert profile.fields[ProfileField.organisation].value is None
+    decision = profile.fields[ProfileField.organisation]
+    assert decision.value == seed.organisation
+    assert decision.researched_value is None and decision.selected_claim_id is None
+    assert decision.supporting_claim_ids == [] and decision.provenance_status == "supplied"
     assert eligible == set()
     assert len(claims) == 2  # Evidence remains available for audit.
 
@@ -183,7 +186,10 @@ def test_disputed_footer_anchor_cannot_admit_partial_namesake_claims():
     profile = reconcile("person", seed, claims, sources, POLICY)
 
     assert eligible == set()
-    assert profile.fields[ProfileField.organisation].value is None
+    decision = profile.fields[ProfileField.organisation]
+    assert decision.value == seed.organisation
+    assert decision.researched_value is None and decision.selected_claim_id is None
+    assert decision.supporting_claim_ids == [] and decision.provenance_status == "supplied"
 
 
 def test_disputed_mixed_page_rejects_partial_namesake_claim_even_with_valid_anchor():
@@ -257,7 +263,10 @@ def test_disputed_same_sentence_namesakes_cannot_cross_validate_claims():
         for value in ("Example Analytics", "Aardvark Company")
     ]
     profile = reconcile("person", seed, old_claims, [source], POLICY)
-    assert profile.fields[ProfileField.organisation].value is None
+    decision = profile.fields[ProfileField.organisation]
+    assert decision.value == seed.organisation
+    assert decision.researched_value is None and decision.selected_claim_id is None
+    assert decision.supporting_claim_ids == [] and decision.provenance_status == "supplied"
 
 
 def test_current_corrective_cluster_with_full_seed_name_remains_eligible():

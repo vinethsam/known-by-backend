@@ -215,7 +215,7 @@ COLUMN_ALIASES: dict[str, dict[str, frozenset[str]]] = {
         "generic": frozenset({"designation", "occupation", "position", "role", "title"}),
     },
     "country": {
-        "strong": frozenset({"country name", "current country", "residence country", "nationality"}),
+        "strong": frozenset({"country name", "current country", "residence country"}),
         "generic": frozenset({"country"}),
     },
     "location": {
@@ -268,9 +268,12 @@ _ADDITIONAL_ALIASES = {
         {"degree", "qualification", "credential"},
     ),
     "country_of_origin": (
-        {"country of origin", "origin country", "home country", "birth country", "country of birth"},
+        {"country of origin", "origin country"},
         set(),
     ),
+    "nationality": ({"nationality", "alumni nationality"}, set()),
+    "citizenship": ({"citizenship", "country of citizenship"}, set()),
+    "birthplace": ({"birthplace", "birth place", "birth country", "country of birth"}, set()),
     "industry": (
         {
             "professional field",
@@ -290,7 +293,14 @@ _ADDITIONAL_ALIASES = {
         set(),
     ),
     "profile_link": (
-        {"profile link", "profile url", "professional profile", "personal website"},
+        {
+            "profile link",
+            "profile url",
+            "professional profile",
+            "personal website",
+            "alumni profile link",
+            "alumni profile url",
+        },
         {"website"},
     ),
 }
@@ -412,8 +422,18 @@ COLUMN_PATTERNS: dict[str, tuple[_TokenPattern, ...]] = {
         _TokenPattern(required=frozenset({"institution", "attended"})),
     ),
     "subject": (
+        _TokenPattern(required=frozenset({"subject"})),
         _TokenPattern(required=frozenset({"field", "study"})),
         _TokenPattern(required=frozenset({"degree", "subject"})),
+    ),
+    "degree_type": (
+        _TokenPattern(required=frozenset({"degree", "type"})),
+        _TokenPattern(required=frozenset({"degree", "name"})),
+    ),
+    "country_of_origin": (_TokenPattern(required=frozenset({"country", "origin"})),),
+    "profile_link": (
+        _TokenPattern(required=frozenset({"profile", "link"})),
+        _TokenPattern(required=frozenset({"profile", "url"})),
     ),
     "program_year": (
         _TokenPattern(

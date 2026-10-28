@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from app.input_validation import sanitize_input_text
 from app.research.normalisation import comparison_key, name_key, normalise_display
-from app.schemas import EvidenceClaim, FieldDecision, PersonSeed, ProfileField, SourceRecord
+from app.retrieval.urls import source_policy_allows
+from app.schemas import EvidenceClaim, FieldDecision, PersonSeed, PersonStatus, ProfileField, SourceRecord
 from app.seed_context import seed_core_values, seed_input_attributes
+
+SEED_REVIEW_REASONS = {"SUPPLIED_VALUE_CONFLICT", "SUPPLIED_VALUE_SUPERSEDED"}
 
 
 def _field(label: str | None) -> str | None:
-    return {"current_employer": "organisation", "government_office": "organisation"}.get(label, label)
+    return {
+        "current_employer": "organisation",
+        "government_office": "organisation",
+        "alumni_organisation": "organisation",
+        "organisation_affiliation": "organisation",
+    }.get(label, label)
 
 
 def _key(field: ProfileField, value: str) -> str:
@@ -93,8 +101,12 @@ def attach_seed_provenance(
     attributes: list[dict],
     web_identity: FieldDecision,
 ) -> None:
-    """Annotate decisions after scoring; seed values never fill researched cells."""
+    """Project supplied values after scoring, keeping the research selection separate."""
     core = seed_core_values(seed)
+    for field, decision in fields.items():
+        if field != ProfileField.full_name and decision.provenance_status == "supplied":
+            decision.value = decision.researched_value
+    researched = {field: decision.value for field, decision in fields.items()}
     for field, decision in fields.items():
         supplied = [attribute for attribute in attributes if _field(attribute["field"]) == field.value]
         values = list(dict.fromkeys(attribute["value"] for attribute in supplied if attribute["value"]))
@@ -113,6 +125,11 @@ def attach_seed_provenance(
             (web_identity.confidence if matching_name else 0)
             if field == ProfileField.full_name
             else decision.confidence
+        )
+        decision.researched_value = (
+            (web_identity.value if matching_name and web_identity.supporting_claim_ids else None)
+            if field == ProfileField.full_name
+            else decision.value
         )
         decision.provenance_status = "researched" if decision.value is not None else None
         if not values:
@@ -143,6 +160,54 @@ def attach_seed_provenance(
             and field != ProfileField.full_name
         ):
             decision.provenance_status = "researched"
+        if decision.value is None and values:
+            # Do not attach a supplied role/degree fragment to a different researched
+            # organisation or credential. The original values remain in provenance.
+            context_fields = (
+                (ProfileField.organisation, ProfileField.job_title)
+                if field in {ProfileField.organisation, ProfileField.job_title}
+                else (ProfileField.university_name, ProfileField.degree_type, ProfileField.subject)
+                if field in {ProfileField.university_name, ProfileField.degree_type, ProfileField.subject}
+                else ()
+            )
+            compatible = True
+            blocked_profile_link = field == ProfileField.profile_link and not source_policy_allows(
+                sanitize_input_text(str(values[0]))
+            )
+            for context_field in context_fields:
+                selected = researched.get(context_field)
+                supplied_context = [
+                    attribute["value"]
+                    for attribute in attributes
+                    if _field(attribute["field"]) == context_field.value and attribute["value"]
+                ]
+                if selected and (
+                    not supplied_context
+                    or not any(
+                        _key(context_field, selected) == _key(context_field, value)
+                        for value in supplied_context
+                    )
+                ):
+                    compatible = False
+            if blocked_profile_link:
+                decision.scoring_components["seed_projection_reason"] = "EXCLUDED_SOURCE_POLICY"
+            elif compatible:
+                decision.value = normalise_display(field, sanitize_input_text(str(values[0])))
+                decision.confidence = 0
+                decision.research_confidence = 0
+                decision.provenance_status = "supplied"
+                decision.scoring_components["confidence_kind"] = "seed_input_certainty"
+                decision.scoring_components["supplied_temporal_status"] = "unspecified"
+            else:
+                decision.scoring_components["seed_projection_reason"] = "DIFFERENT_RESEARCH_CONTEXT"
+        if decision.provenance_status in {"conflicting", "superseded"}:
+            decision.review_required = True
+            reason = (
+                "SUPPLIED_VALUE_CONFLICT"
+                if decision.provenance_status == "conflicting"
+                else "SUPPLIED_VALUE_SUPERSEDED"
+            )
+            decision.review_reason_codes = list(dict.fromkeys([*decision.review_reason_codes, reason]))
         # Evidence IDs live in an additive audit component. They do not enter the
         # selected support set or the independent-source confidence calculation.
         decision.scoring_components["seed_corroborating_claim_ids"] = list(
@@ -157,3 +222,49 @@ def attach_seed_provenance(
                 claim_id for attribute in supplied for claim_id in attribute.get("conflicting_claim_ids", [])
             )
         )
+
+
+def supplied_field_decisions(seed: PersonSeed | dict) -> dict[ProfileField, FieldDecision]:
+    """The same projection for tasks that failed before a research profile existed."""
+    fields = {field: FieldDecision(review_required=False) for field in ProfileField}
+    attach_seed_provenance(fields, seed, seed_input_attributes(seed), FieldDecision())
+    return fields
+
+
+def project_stored_seed(profile, seed):
+    """Adapt stored decisions at presentation without rerunning or changing research."""
+    profile = profile.model_copy(deep=True)
+    attributes = profile.seed_attributes or seed_input_attributes(seed)
+    for fields in [profile.fields, *(record.fields for record in profile.records)]:
+        name = fields.get(ProfileField.full_name, FieldDecision()).model_copy(deep=True)
+        name.confidence = name.research_confidence or 0
+        if name.research_confidence and name.provenance_status == "corroborated":
+            # Stored provenance already records independent agreement; no new claim
+            # identifiers or evidence are fabricated by this presentation adapter.
+            name.supporting_claim_ids = list(name.scoring_components.get("seed_corroborating_claim_ids", []))
+        attach_seed_provenance(fields, seed, attributes, name)
+    for record in profile.records:
+        reasons = seed_review_reasons(record.fields)
+        if reasons:
+            record.review_required = True
+            record.review_reason_codes = list(dict.fromkeys([*record.review_reason_codes, *reasons]))
+            if record.status == PersonStatus.completed:
+                record.status = PersonStatus.review_required
+    if seed_review_reasons(profile.fields) or any(record.review_required for record in profile.records):
+        profile.review_required = True
+        if profile.status == PersonStatus.completed:
+            profile.status = PersonStatus.review_required
+    profile.seed_attributes = attributes
+    return profile
+
+
+def seed_review_reasons(fields: dict[ProfileField, FieldDecision]) -> list[str]:
+    """Keep input disagreement visible without affecting independent evidence scores."""
+    return sorted(
+        {
+            reason
+            for decision in fields.values()
+            for reason in decision.review_reason_codes
+            if reason in SEED_REVIEW_REASONS
+        }
+    )

@@ -341,6 +341,9 @@ def _seed_from_row(
         "current_employer",
         "alumni_organisation",
         "government_office",
+        "nationality",
+        "citizenship",
+        "birthplace",
     }
     payload: dict[str, Any] = {
         "full_name": full_name,

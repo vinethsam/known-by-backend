@@ -138,7 +138,8 @@ def test_final_gate_normalizes_every_record_and_export_without_mutating_evidence
         row = dict(zip(rows[0], rows[1], strict=True))
         workbook.close()
     assert row["job_title"] == "Prime Minister"
-    assert row["LIST_NAME"] == "Pm"
+    assert "LIST_NAME" not in row
+    assert job.people[0].original_row["LIST_NAME"] == "Pm"
     assert original.model_dump() == before
 
 

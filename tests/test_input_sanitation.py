@@ -142,12 +142,14 @@ def test_provenance_round_trip_preserves_original_controls_without_creating_evid
         rows = workbook.active.iter_rows(values_only=True)
         row = dict(zip(next(rows), next(rows), strict=True))
         workbook.close()
-    attributes = json.loads(row["seed_input_metadata"])
+    assert "seed_input_metadata" not in row
+    attributes = profile.seed_attributes
     supplied = next(item for item in attributes if item["field"] == "university_name")
     assert supplied["value"] == raw
     assert supplied["input_confidence"] == 100
     assert json.loads(row["university_name_supplied_values"]) == [raw]
-    assert float(row["university_name_research_confidence"]) == 0
+    assert float(row["university_name_confidence"]) == 0
+    assert row["university_name"] == "Lake University Faculty Physics"
 
 
 def test_header_controls_are_sanitized_for_matching_without_losing_original_labels():

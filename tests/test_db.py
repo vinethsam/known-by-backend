@@ -105,6 +105,25 @@ def _result(person_id: str, status: PersonStatus = PersonStatus.completed) -> Re
     return ResearchResult(profile=profile, sources=[source], claims=[], usage=[usage])
 
 
+def _research_snapshot(profile):
+    """Presentation may add seed provenance; every stored research property stays exact."""
+    snapshot = profile.model_dump(mode="json")
+    snapshot.pop("seed_attributes", None)
+    for record in [snapshot, *snapshot.get("records", [])]:
+        for decision in record["fields"].values():
+            for key in (
+                "researched_value",
+                "supplied_values",
+                "input_confidence",
+                "research_confidence",
+                "provenance_status",
+            ):
+                decision.pop(key)
+            for key in ("seed_corroborating_claim_ids", "seed_conflicting_claim_ids"):
+                decision["scoring_components"].pop(key, None)
+    return snapshot
+
+
 def test_create_claim_finish_and_results_round_trip(tmp_path):
     store = _store(tmp_path)
     assert store.ready()
@@ -208,7 +227,10 @@ def test_profile_records_survive_checkpoint_and_final_result_without_migration(t
 
     assert store.checkpoint(lease, result)
     checkpoint = store.get_results(created.job_id).people[0].result
-    assert [item.model_dump(mode="json") for item in checkpoint.profile.records] == expected
+    assert [_research_snapshot(item) for item in checkpoint.profile.records] == [
+        _research_snapshot(item) for item in result.profile.records
+    ]
+    assert checkpoint.profile.records[0].fields[ProfileField.full_name].input_confidence == 100
     with store.session_factory() as session:
         persisted = session.get(ProfileRow, lease.person_id)
         assert persisted.data_json["records"] == expected
@@ -221,7 +243,9 @@ def test_profile_records_survive_checkpoint_and_final_result_without_migration(t
     )
     assert store.finish_task(lease, result)
     final = store.get_results(created.job_id).people[0].result
-    assert final.profile.records == result.profile.records
+    assert [_research_snapshot(item) for item in final.profile.records] == [
+        _research_snapshot(item) for item in result.profile.records
+    ]
     assert final.profile.records[1].fields[ProfileField.subject].value == "Mathematics"
 
 
@@ -385,7 +409,9 @@ def test_batch_results_use_constant_queries_and_preserve_attempt_ledgers(tmp_pat
         assert view.original_row == originals[index]
         assert view.status == result.profile.status
         assert view.error_code is None
-        assert view.result.model_dump() == result.model_dump()
+        assert view.result.model_dump(exclude={"profile"}) == result.model_dump(exclude={"profile"})
+        assert _research_snapshot(view.result.profile) == _research_snapshot(result.profile)
+        assert view.supplied_fields[ProfileField.full_name].input_confidence == 100
 
 
 def test_alembic_upgrade_and_downgrade(tmp_path):

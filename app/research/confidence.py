@@ -8,7 +8,15 @@ from urllib.parse import urlsplit
 
 from app.config import ScoringPolicy
 from app.retrieval.urls import source_record_allowed
-from app.schemas import EvidenceClaim, FieldDecision, ProfileField, SourceRecord, SourceType, utcnow
+from app.schemas import (
+    EvidenceClaim,
+    FieldDecision,
+    ProfileField,
+    SourceRecord,
+    SourceType,
+    has_researched_value,
+    utcnow,
+)
 
 VOLATILE_FIELDS = {ProfileField.organisation, ProfileField.job_title}
 EDUCATION_FIELDS = {ProfileField.university_name, ProfileField.degree_type, ProfileField.subject}
@@ -306,7 +314,7 @@ def confidence_for_group(
 
 def profile_scores(fields: dict[ProfileField, FieldDecision], policy: ScoringPolicy) -> tuple[float, float]:
     research_fields = {field for field in ProfileField if field != ProfileField.full_name}
-    present = {f: d for f, d in fields.items() if f in research_fields and d.value is not None}
+    present = {f: d for f, d in fields.items() if f in research_fields and has_researched_value(d)}
     coverage = 100 * len(present) / len(research_fields)
     denominator = sum(policy.field_weights[f] for f in present)
     confidence = (

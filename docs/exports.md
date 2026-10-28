@@ -1,114 +1,54 @@
 # Result exports
 
-`GET /v1/jobs/{job_id}/export` supports CSV and XLSX through the `format`
-query parameter:
+`GET /v1/jobs/{job_id}/export?format=csv` and `format=xlsx` use the same centrally defined schema and renderer as history downloads and Shared Library saves. CSV and XLSX have equivalent values and provenance semantics. The existing `provenance=none|field` parameter remains accepted for compatibility; it no longer changes the columns. No input-dependent columns are appended.
 
-```text
-GET /v1/jobs/{job_id}/export?format=csv
-```
+## Fixed 73-column contract
 
-The standard prefix is fixed for every result, whether the input contains only a
-name or many contextual columns. CSV, XLSX, normal downloads, and Shared Library
-saves use the same schema registry and renderer. The first eight columns, in order,
-are:
+The first eight columns always appear in this order:
 
 ```text
 full_name, country_of_origin, organisation, job_title, university_name,
 degree_type, subject, profile_link
 ```
 
-These are followed by their eight `{field}_confidence` columns in the same field
-order, then `profile_confidence`, `coverage`, `legacy_coverage`, `review_required`,
-`status`, `error_code`, and `source_urls`. The standard prefix occupies these same
-positions even when values are blank or field provenance is requested. `status` and
-`error_code` keep their existing meanings.
+They are followed by these registered groups in `app/export/schema.py`:
 
-Use `provenance=field` to append eight supporting-source columns after the fixed
-prefix and before input metadata:
+| Group | Count | Meaning |
+| --- | ---: | --- |
+| `{field}_confidence` for the eight fields in order | 8 | Independent research confidence, never supplied certainty |
+| Six provenance columns for each field in order | 48 | `input_confidence`, `provenance_status`, `supplied_values`, `source_urls`, `review_required`, `review_reasons` |
+| Summary | 9 | `profile_confidence`, `coverage`, `legacy_coverage`, `review_required`, `review_reasons`, `status`, `record_status`, `error_code`, `source_urls` |
 
-```text
-GET /v1/jobs/{job_id}/export?format=xlsx&provenance=field
-```
+The person-wide `source_urls` column is always last. Nothing follows it. `LIST_NAME`, input headers, identifiers, staging fields, and raw input metadata remain in storage and the API rather than appearing as extra export columns. Raw mapped values also remain in the standardized `{field}_supplied_values` JSON cells. Supplied certainty is 100 even when research fails; independent research confidence is zero when no finding was selected.
 
-The added columns are named `{field}_source_urls` in the same field order. Each
-contains the unique, semicolon-separated URLs supporting that selected field value.
-These URLs come from that output record's field decision; sources supporting another
-education record are not included. The existing person-wide `source_urls` column remains
-available in both modes for compatibility and research diagnostics.
+Field URL columns contain only sources supporting that field in that record. They never borrow support from another education record. The final person-wide source list is a diagnostic list capped at ten allowed retrieved URLs; it does not claim that every listed source supports every field.
 
-All original input columns follow the standard columns (and optional field URL
-columns) in their original order. Their values remain unchanged. If an input header
-collides with a standard or optional header, the input copy receives a numbered
-suffix such as `full_name (2)`; the research column retains the standard name and
-position. Extra headers never move `status`, `error_code`, or a core field.
+Supplied profile URLs excluded by the existing social-source policy remain in raw supplied details with 100% input certainty. They are not projected into the core Profile Link or supporting-source columns and have zero research confidence, consistently in API results and both export formats.
 
-A result with several education records produces one export row per record.
-Original input values, the display-normalized seed name, the selected Country of Origin,
-and shared employment values repeat on those rows. Education fields, record scores,
-review state, profile link, and field provenance remain record-specific. The enriched
-`full_name` value always uses the validated seed name with conservative display casing
-and deterministic confidence `100`. The original input cell stays unchanged. It has
-no selected web claim, field-level review, or supporting source URL; web identity remains internal
-and the optional `full_name_source_urls` cell is therefore blank. Existing
-single-record results and historical flat profiles still produce one row. Failed tasks
-and tasks without a result also produce one row with empty enrichment values.
+## Values, records, and review
 
-Country of Origin is a researched decision, separate from any input country clue.
-It appears only when retrieved source text explicitly establishes where the person
-is from or their country of origin and the country name can be normalized. Residence,
-citizenship, birthplace alone, employer country, and university location do not
-establish it. Conflicting supported countries leave the selected field empty and
-require review. Unsupported origin remains blank; seed context never supplies its
-confidence or provenance.
+Each education record produces one row. Person-level `status` repeats consistently across those rows. `record_status` and record review columns describe the individual education record. A completed job can contain failed people; the frontend describes a terminal partial job as completed with issues rather than interrupted.
 
-The final display gate applies to every selected record, including older stored
-profiles: `PM`, `Pm`, `pm`, and capitalization variants become `Prime Minister`.
-Canonical English titles/degrees and conservative casing use the same normalization
-as JSON results. Scores, review flags, raw input, evidence, provenance, and columns
-are unchanged. Internal decision traces and the API-only `status_label` add no export
-columns. Shared Library saves use this same export path.
+Mapped supplied values fill otherwise unselected core cells as `supplied`, including failed people. Their research confidence and coverage contribution remain zero. Supplied employment and education fragments cannot be attached to an incompatible researched relationship; their original values remain accessible in provenance. Explicit historical employment remains in supplied details rather than being projected as current work. A selected research value remains distinct through `researched_value` in the API, alongside the displayed value and original inputs.
 
-Source-list columns such as `LIST_NAME`, `source_list`, `source_dataset`,
-`dataset_name`, `cohort`, and `source_cohort` are passive input metadata. Their original
-header and value are preserved through the existing original-row projection and repeat
-unchanged on every derived education row. They are not sent into research queries or
-model/identity context, do not become provenance, and do not affect selected values,
-confidence, coverage, or review. Rows with the same person but different list metadata
-remain separate rows/results. Missing list metadata is valid, and unrecognized metadata
-columns receive the same passive preservation behavior.
+Input disagreement is marked `conflicting` or `superseded`. Field review flags and record review reasons expose those conditions without changing independent research scores. A different legitimate university or qualification does not automatically mean the input is false.
 
-Both modes apply the same CSV/XLSX spreadsheet-formula and XML character
-protections. XLSX also fills a populated selected-value cell and its associated
-confidence cell with pale yellow (`#FFF2CC`) when confidence is strictly below the
-configured `SCORING.review_threshold` (50 by default). Blank fields, confidence equal
-to 50, higher-confidence fields, unrelated cells, and whole rows are not highlighted.
-CSV retains the deterministic confidence and review columns but has no styling.
-Profile confidence and the new `coverage` use seven evidence-derived fields, so the
-guaranteed name value does not raise either research metric. `coverage` counts selected
-Country of Origin alongside the original six research fields (`n / 7`); the separate
-`legacy_coverage` retains the original six-field calculation (`n / 6`) for comparison.
-Older profile JSON lacking Country of Origin loads with that decision explicitly
-missing; its `coverage` is recalculated on the seven-field denominator and its
-original six-field comparison measure is available as `legacy_coverage`.
+Country of Origin accepts an explicit mapped origin value as supplied information. Independent origin research still requires source text establishing where a person is from. Nationality, citizenship, birthplace alone, residence, employer country, and university location are not silently converted to origin; their supplied values remain in record details.
 
-Enriched values below
-`SCORING.selection_threshold` (10 by default) are blank in CSV/XLSX because the field
-decision is null; their raw claims, alternative IDs, provenance, confidence, and reason
-codes remain available in the JSON result/evidence ledger. Seed metadata and original
-input columns remain unchanged.
+The shared backend display normalizer applies professional casing to selected human-readable values in API results, CSV, XLSX, and saved-record previews. It preserves supported brands and acronyms including IBM, UNESCO, ICCROM, McGill, PwC, ETH Zürich, and RPBW. URLs, error codes, identifiers, raw input, and raw evidence are not title-cased. Control characters are sanitized in displayed input values; exact originals remain in provenance.
 
-## Download filenames and retained files
+XLSX uses pale yellow (`#FFF2CC`) for populated reviewed fields and associated research-confidence cells, including conflicts and independent confidence strictly below the unchanged 50% review threshold. Supplied-only zero research confidence does not imply a low-confidence researched finding. Empty ordinary cells are not indiscriminately highlighted. A true `review_required` summary indicator receives the same yellow fill and bold text. CSV preserves equivalent textual review flags and reasons. Tests inspect actual workbook fills and compare numeric CSV/XLSX values semantically.
 
-CSV and XLSX downloads use `<List-Name>_<YYYY-MM-DD>_<HHmm>.<extension>`, with the
-research/job start in UTC. Repeated downloads use the same timestamp; an unstarted job
-uses its creation time. The first nonempty list value in original row order supplies
-the filename only. With no list metadata the prefix is `KnownBy`. The list prefix is
-sanitized to safe readable Unicode and hyphens, bounded to 100 characters and 180 UTF-8
-bytes; job IDs are absent. `Content-Disposition` includes an ASCII fallback and an
-encoded Unicode filename when needed.
+`coverage` uses the seven research fields excluding the supplied name; `legacy_coverage` preserves the original six-field comparison excluding origin. Neither counts unverified supplied values. Raw evidence rejected below the existing selection threshold remains in the evidence ledger.
 
-An explicit save to the [shared results library](library.md) uses this identical
-export renderer, filename, provenance mode, and highlighting threshold. Saving does
-not alter research or call providers. The saved bytes remain downloadable after job
-cleanup. XLSX archive packaging timestamps may differ between separate renderings;
-the cells, columns, evidence, formulas protections, and styles are the same.
+## File safety and compatibility
+
+Both formats retain formula-injection protection. XLSX additionally replaces characters XML cannot represent. If any standardized cell, after safety escaping, would exceed Excel's 32,767-character limit, both formats fail explicitly rather than silently truncating data or introducing variable overflow columns. The API returns 422; original values remain available in record details.
+
+Already saved library files retain their original bytes and downloads. The preview adapter interprets supported legacy headers without rewriting files. New library saves use the current fixed schema and review treatment. See [Shared results library](library.md) for paging, access controls, and preview limits.
+
+## Download filenames
+
+Downloads use `<List-Name>_<YYYY-MM-DD>_<HHmm>.<extension>`, with the research/job start in UTC. Repeated downloads use the same timestamp; an unstarted job uses its creation time. The first nonempty list value in original row order supplies the filename only. With no list metadata the prefix is `KnownBy`. The list prefix is sanitized to safe readable Unicode and hyphens, bounded to 100 characters and 180 UTF-8 bytes; job IDs are absent. `Content-Disposition` includes an ASCII fallback and an encoded Unicode filename when needed.
+
+Saving does not rerun research or call providers. Saved bytes remain downloadable after job cleanup. XLSX archive timestamps can differ between separate renderings; the columns, values, provenance, and cell styles remain equivalent.

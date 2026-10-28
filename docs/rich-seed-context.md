@@ -23,7 +23,8 @@ are normalized for matching only. Examples include:
 | Subject | subject, major, field of study, education major |
 | Professional context | industry, sector, professional field, specialization |
 | Geographic context | country, current country, city, region, location |
-| Origin hypothesis | country of origin, birth country, country of birth |
+| Origin hypothesis | country of origin, origin country |
+| Other geographical information | nationality, citizenship, birthplace, country of birth |
 | Other context | graduation year, program year, government office, alumni organisation |
 
 `PersonSeed.input_metadata` preserves original column labels and text, including
@@ -71,22 +72,27 @@ or contradict input. A former employer can be corroborated historically while a
 newer independently supported role supersedes it.
 
 The immutable name retains its existing 100% input-certainty value. The other seven
-research cells remain evidence-derived: seed-only values appear as supplied input,
-not as verified output. They do not increase coverage, research confidence, or
+core cells can display mapped seed-only values with explicit supplied provenance.
+They do not increase coverage, research confidence, or
 independent source counts. Different legitimate qualifications stay in separate
 education records; seed components never fill gaps in another credential. A different
 university is not automatically classified as conflicting education.
 
-The eight-field order, confidence columns, status/error columns, and default export
-prefix remain unchanged. Original input columns remain on every output record.
-Optional field-provenance exports append supplied values, both confidence kinds,
-status, and `seed_input_metadata`. JSON values exceeding a safe Excel cell size use
-`__part_2`, `__part_3`, etc. columns in both CSV and XLSX; concatenate parts in order
-to restore the JSON. Existing stored results and Shared Library files remain valid.
+The October corrective release uses one fixed 73-column export schema; the eight
+core values come first and `source_urls` is always last. Original input columns
+remain in storage and API details instead of being appended. Standard field
+provenance columns retain mapped supplied values, certainty, source support, and
+review state in both formats. Oversized standardized cells fail explicitly without
+truncation or variable overflow columns. Existing stored results are adapted for
+presentation; previously saved Shared Library files retain their original bytes.
+See [the export contract](exports.md) and [corrective output report](corrective-output.md).
 The frontend keeps the upload workflow and adds provenance labels and supplied-input
 details inside the existing field drawer.
 
-## Offline validation
+## Earlier rich-seed release validation
+
+The following counts describe the earlier rich-seed release, before the October
+corrective changes above. Current validation is reported in the corrective release report.
 
 All provider responses were mocked; no paid/live research was performed. Focused
 tests cover name-only, employer-only, university-only, role-only, university/subject,

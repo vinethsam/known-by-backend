@@ -349,6 +349,7 @@ class EvidenceClaim(Contract):
 
 class FieldDecision(Contract):
     value: str | None = None
+    researched_value: str | None = None
     confidence: float = Field(default=0, ge=0, le=100)
     selected_claim_id: str | None = None
     supporting_claim_ids: list[str] = Field(default_factory=list)
@@ -363,6 +364,11 @@ class FieldDecision(Contract):
     input_confidence: float | None = Field(default=None, ge=0, le=100)
     research_confidence: float | None = Field(default=None, ge=0, le=100)
     provenance_status: str | None = None
+
+
+def has_researched_value(decision: FieldDecision | None) -> bool:
+    """Seed display projection never counts as independently discovered coverage."""
+    return bool(decision and decision.value is not None and decision.provenance_status != "supplied")
 
 
 LEGACY_RESEARCH_FIELDS = (
@@ -380,7 +386,7 @@ def legacy_research_coverage(fields: dict[ProfileField, FieldDecision]) -> float
 
     return round(
         100
-        * sum(bool(fields.get(field) and fields[field].value is not None) for field in LEGACY_RESEARCH_FIELDS)
+        * sum(has_researched_value(fields.get(field)) for field in LEGACY_RESEARCH_FIELDS)
         / len(LEGACY_RESEARCH_FIELDS),
         2,
     )
@@ -395,10 +401,7 @@ def _fill_profile_origin_and_coverage(profile: ProfileRecord | PersonProfile) ->
         profile.legacy_coverage = legacy_research_coverage(profile.fields)
     if missing_origin:
         researched = (field for field in ProfileField if field != ProfileField.full_name)
-        present = sum(
-            bool(profile.fields.get(field) and profile.fields[field].value is not None)
-            for field in researched
-        )
+        present = sum(has_researched_value(profile.fields.get(field)) for field in researched)
         profile.coverage = round(100 * present / (len(ProfileField) - 1), 2)
 
 
@@ -537,6 +540,8 @@ class PersonResultView(Contract):
     status: PersonStatus
     error_code: str | None = None
     result: ResearchResult | None = None
+    supplied_fields: dict[ProfileField, FieldDecision] = Field(default_factory=dict)
+    seed_attributes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class JobResults(Contract):

@@ -154,11 +154,10 @@ def test_wrong_person_evidence_cannot_populate_enrichment_while_seed_name_remain
     assert name.value == "Donald Trump"
     assert name.confidence == 100
     assert not name.review_required
-    assert all(
-        decision.value is None
-        for field, decision in profile.fields.items()
-        if field != ProfileField.full_name
-    )
+    assert profile.fields[ProfileField.organisation].value == "Trump Organization"
+    assert profile.fields[ProfileField.organisation].provenance_status == "supplied"
+    assert all(not decision.selected_claim_id for decision in profile.fields.values())
+    assert all(decision.researched_value is None for decision in profile.fields.values())
     assert profile.profile_confidence == 0
     assert profile.coverage == 0
 
@@ -230,5 +229,6 @@ def test_every_education_record_repeats_seed_name_and_exports_input_certainty():
 
     assert len(rows) == 3
     assert {row["full_name"] for row in rows} == {"Donald Trump"}
-    assert {row["ALUMNI_FULL_NAME"] for row in rows} == {"DONALD TRUMP"}
-    assert {float(row["full_name_confidence"]) for row in rows} == {100.0}
+    assert all("ALUMNI_FULL_NAME" not in row for row in rows)
+    assert {float(row["full_name_input_confidence"]) for row in rows} == {100.0}
+    assert {float(row["full_name_confidence"]) for row in rows} == {0.0}

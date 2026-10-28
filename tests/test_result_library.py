@@ -172,7 +172,7 @@ def test_explicit_save_matches_normal_export_with_same_human_filename(library_co
         assert metadata["size_bytes"] == len(download.content)
         if format == "csv":
             assert download.content == normal.content
-            assert "Forbes 2000" in download.text and "YALI" in download.text
+            assert "LIST_NAME" not in download.text and "YALI" not in download.text
         else:
             assert _workbook_content(download.content) == _workbook_content(normal.content)
         assert client.get("/v1/library/files", headers=AUTH).json() == [metadata]
@@ -277,9 +277,10 @@ def test_unauthorized_requests_cannot_view_download_create_or_delete_saved_files
             client.post(f"/v1/jobs/{job_id}/library", json={"format": "csv"}, headers=headers),
             client.get("/v1/library/files", headers=headers),
             client.get(path, headers=headers),
+            client.get(f"{path}/records", headers=headers),
             client.delete(path, headers=headers),
         ]
-        assert [response.status_code for response in requests] == [401] * 4
+        assert [response.status_code for response in requests] == [401] * 5
         assert all("Forbes" not in response.text and "Jane" not in response.text for response in requests)
         assert client.get(path, headers=AUTH).status_code == 200
 
@@ -293,9 +294,10 @@ def test_library_is_disabled_when_shared_authentication_is_unconfigured(library_
             client.post(f"/v1/jobs/{identifier}/library", json={"format": "csv"}),
             client.get("/v1/library/files"),
             client.get(f"/v1/library/files/{identifier}"),
+            client.get(f"/v1/library/files/{identifier}/records"),
             client.delete(f"/v1/library/files/{identifier}"),
         ]
-        assert [response.status_code for response in responses] == [503] * 4
+        assert [response.status_code for response in responses] == [503] * 5
         assert all("API_ACCESS_TOKEN" in response.text for response in responses)
 
 
@@ -326,7 +328,7 @@ def test_library_does_not_accept_arbitrary_uploaded_content_or_metadata(library_
     assert storage.list_files() == []
 
 
-@pytest.mark.parametrize("status", ["queued", "running", "failed", "cancelled", "partial"])
+@pytest.mark.parametrize("status", ["queued", "running", "failed", "cancelled"])
 def test_only_completed_jobs_can_be_saved(library_context, status):
     _, store, storage, app = library_context()
     job_id = _completed_job(store)

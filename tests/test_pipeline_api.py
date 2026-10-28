@@ -953,15 +953,17 @@ def test_api_batch_and_export_contracts(tmp_path, kind):
                 sheet = load_workbook(io.BytesIO(export.content)).active
                 headers = [cell.value for cell in sheet[1]]
                 assert headers[:2] == ["full_name", "country_of_origin"]
-                assert sheet.cell(2, headers.index("Person") + 1).value == "Jane Doe"
+                assert sheet.cell(2, headers.index("full_name") + 1).value == "Jane Doe"
+                assert "Person" not in headers and "Department" not in headers
             else:
-                assert "Department" in export.text and "Jane Doe" in export.text
+                assert "Department" not in export.text and "Jane Doe" in export.text
         rich_export = client.get(f"/v1/jobs/{job_id}/export?format=csv&provenance=field", headers=AUTH)
         assert rich_export.status_code == 200
         rich_headers = next(csv.reader(io.StringIO(rich_export.content.decode("utf-8-sig"))))
         assert "full_name_source_urls" in rich_headers
         assert rich_headers[:2] == ["full_name", "country_of_origin"]
-        assert rich_headers.index("full_name_source_urls") > rich_headers.index("source_urls")
+        assert rich_headers.index("full_name_source_urls") < rich_headers.index("source_urls")
+        assert rich_headers[-1] == "source_urls"
         assert client.get(f"/v1/jobs/{job_id}/export?provenance=claims", headers=AUTH).status_code == 422
 
 

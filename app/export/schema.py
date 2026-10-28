@@ -22,31 +22,39 @@ SUMMARY_COLUMNS: tuple[str, ...] = (
     "coverage",
     "legacy_coverage",
     "review_required",
+    "review_reasons",
     "status",
+    "record_status",
     "error_code",
     "source_urls",
 )
 
 
 def standard_columns() -> tuple[str, ...]:
-    """Return the fixed prefix, independent of input columns and provenance mode."""
+    """The complete export schema, independent of input and provenance options."""
 
     return (
         *(field.value for field in RESEARCH_FIELDS),
         *(f"{field.value}_confidence" for field in RESEARCH_FIELDS),
+        *provenance_columns(),
         *SUMMARY_COLUMNS,
     )
 
 
 def provenance_columns() -> tuple[str, ...]:
-    """Optional field URLs follow the stable prefix without moving its columns."""
+    """Standard provenance distinguishes supplied certainty from research confidence."""
 
     return (
-        *(f"{field.value}_source_urls" for field in RESEARCH_FIELDS),
         *(
             f"{field.value}_{detail}"
             for field in RESEARCH_FIELDS
-            for detail in ("supplied_values", "input_confidence", "research_confidence", "provenance_status")
+            for detail in (
+                "input_confidence",
+                "provenance_status",
+                "supplied_values",
+                "source_urls",
+                "review_required",
+                "review_reasons",
+            )
         ),
-        "seed_input_metadata",
     )

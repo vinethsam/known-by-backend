@@ -1,0 +1,1741 @@
+{
+  "evidence_limits": "Original logs contain summary counts and provider metrics, not raw claims/page bodies or per-source identity signals. Before/after fixtures are reconstructions, not replay of those original claims. Original individual validity and live after outcomes remain unverified.",
+  "original_trace": {
+    "Jonathan Anderson": {
+      "claims_grounded": 11,
+      "claims_selected": 0,
+      "selection_eligible_source_count": 0,
+      "sources_retrieved": 2,
+      "sources_failed": 4,
+      "failure_reason": "IDENTITY_UNRESOLVED",
+      "seed_context": {
+        "alumni_organisation": "Christian Dior Couture; JW Anderson",
+        "job_title": "Creative Director; Founder"
+      },
+      "selected_relationship": {
+        "job_title": null,
+        "organisation": null
+      },
+      "processed_domains": [
+        "bbc.com",
+        "businessoffashion.com",
+        "gq-magazine.co.uk",
+        "jwanderson.com",
+        "wikipedia.org"
+      ]
+    },
+    "Elahe Mohammadi": {
+      "claims_grounded": 14,
+      "claims_selected": 0,
+      "selection_eligible_source_count": 0,
+      "sources_retrieved": 5,
+      "sources_failed": 1,
+      "failure_reason": "IDENTITY_UNRESOLVED",
+      "seed_context": {
+        "alumni_organisation": "Ham-Mihan Newspaper",
+        "job_title": "Journalist (Society & Women's Issues Reporter)",
+        "location": "Iran"
+      },
+      "selected_relationship": {
+        "job_title": null,
+        "organisation": null
+      },
+      "processed_domains": [
+        "cnsmaryland.org",
+        "cpj.org",
+        "harvard.edu",
+        "uscirf.gov",
+        "wikipedia.org"
+      ]
+    },
+    "Achille Mbembe": {
+      "claims_grounded": 65,
+      "claims_selected": 0,
+      "selection_eligible_source_count": 0,
+      "sources_retrieved": 5,
+      "sources_failed": 2,
+      "failure_reason": "IDENTITY_UNRESOLVED",
+      "seed_context": {
+        "alumni_organisation": "University of the Witwatersrand",
+        "job_title": "Philosopher and Research Professor"
+      },
+      "selected_relationship": {
+        "job_title": null,
+        "organisation": null
+      },
+      "processed_domains": [
+        "ac.za",
+        "egs.edu",
+        "holbergprize.org",
+        "wikipedia.org"
+      ]
+    },
+    "Liu Jiakun": {
+      "claims_grounded": 20,
+      "claims_selected": 5,
+      "selection_eligible_source_count": 2,
+      "sources_retrieved": 6,
+      "sources_failed": 0,
+      "failure_reason": null,
+      "seed_context": {
+        "alumni_organisation": "Jiakun Architects",
+        "job_title": "Architect"
+      },
+      "selected_relationship": {
+        "job_title": "Visiting Professor",
+        "organisation": "Central Academy of Fine Arts"
+      },
+      "processed_domains": [
+        "archdaily.com",
+        "architecturalrecord.com",
+        "liu-jia-kun.com",
+        "npr.org",
+        "pritzkerprize.com"
+      ]
+    },
+    "Zaha Hadid": {
+      "claims_grounded": 51,
+      "claims_selected": 12,
+      "selection_eligible_source_count": 4,
+      "sources_retrieved": 4,
+      "sources_failed": 2,
+      "failure_reason": null,
+      "seed_context": {
+        "alumni_organisation": "Zaha Hadid Architects",
+        "job_title": "Architect"
+      },
+      "selected_relationship": {
+        "job_title": "Architect",
+        "organisation": "Office of Metropolitan Architecture"
+      },
+      "processed_domains": [
+        "pritzkerprize.com",
+        "skyscrapercenter.com",
+        "soane.org",
+        "zha.com",
+        "zhfoundation.com"
+      ]
+    },
+    "Jacques Herzog": {
+      "claims_grounded": 37,
+      "claims_selected": 5,
+      "selection_eligible_source_count": 4,
+      "sources_retrieved": 6,
+      "sources_failed": 0,
+      "failure_reason": null,
+      "seed_context": {
+        "alumni_organisation": "Herzog & de Meuron",
+        "job_title": "Architect"
+      },
+      "selected_relationship": {
+        "job_title": "Professor",
+        "organisation": "ETH Zurich"
+      },
+      "processed_domains": [
+        "centrepompidou.fr",
+        "herzogdemeuron.com",
+        "pritzkerprize.com",
+        "tate.org.uk"
+      ]
+    },
+    "Frank Gehry": {
+      "claims_grounded": 34,
+      "claims_selected": 7,
+      "selection_eligible_source_count": 5,
+      "sources_retrieved": 5,
+      "sources_failed": 1,
+      "failure_reason": null,
+      "seed_context": {
+        "alumni_organisation": "Gehry Partners, LLP.",
+        "job_title": "Architect",
+        "location": "United States of America"
+      },
+      "selected_relationship": {
+        "job_title": "Charlotte Davenport Professorship in Architecture",
+        "organisation": "Yale University"
+      },
+      "processed_domains": [
+        "californiamuseum.org",
+        "foga.com",
+        "guggenheim-bilbao.eus",
+        "moma.org",
+        "pritzkerprize.com",
+        "wallpaper.com"
+      ]
+    },
+    "Zanele Muholi": {
+      "claims_grounded": 35,
+      "claims_selected": 0,
+      "selection_eligible_source_count": 0,
+      "sources_retrieved": 3,
+      "sources_failed": 3,
+      "failure_reason": "IDENTITY_UNRESOLVED",
+      "seed_context": {
+        "alumni_organisation": "Inkanyiso",
+        "job_title": "Visual Activist and Photographer"
+      },
+      "selected_relationship": {
+        "job_title": null,
+        "organisation": null
+      },
+      "processed_domains": [
+        "bbc.com",
+        "biennale.com",
+        "moma.org",
+        "org.za",
+        "studiomuseum.org",
+        "wikipedia.org"
+      ]
+    },
+    "Gamini Wijesuriya": {
+      "claims_grounded": 48,
+      "claims_selected": 0,
+      "selection_eligible_source_count": 0,
+      "sources_retrieved": 3,
+      "sources_failed": 3,
+      "failure_reason": "IDENTITY_UNRESOLVED",
+      "seed_context": {
+        "alumni_organisation": "ICCROM",
+        "job_title": "Project Manager / Special Advisor, World Heritage Leadership"
+      },
+      "selected_relationship": {
+        "job_title": null,
+        "organisation": null
+      },
+      "processed_domains": [
+        "archaeology.lk",
+        "iccrom.org",
+        "unesco.org",
+        "whitr-ap.org",
+        "wikipedia.org"
+      ]
+    }
+  },
+  "offline_before": {
+    "kind": "deterministic_reconstruction_not_original_claim_replay",
+    "identity": {
+      "Achille Mbembe": {
+        "eligible_sources": 0,
+        "grounded_claims": 2,
+        "selected_claims": [],
+        "fields": {
+          "full_name": {
+            "value": "Achille Mbembe",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 0.0
+      },
+      "Elahe Mohammadi": {
+        "eligible_sources": 0,
+        "grounded_claims": 2,
+        "selected_claims": [],
+        "fields": {
+          "full_name": {
+            "value": "Elahe Mohammadi",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 0.0
+      },
+      "Jonathan Anderson": {
+        "eligible_sources": 0,
+        "grounded_claims": 2,
+        "selected_claims": [],
+        "fields": {
+          "full_name": {
+            "value": "Jonathan Anderson",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 0.0
+      },
+      "Zanele Muholi": {
+        "eligible_sources": 0,
+        "grounded_claims": 2,
+        "selected_claims": [],
+        "fields": {
+          "full_name": {
+            "value": "Zanele Muholi",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 0.0
+      },
+      "Gamini Wijesuriya": {
+        "eligible_sources": 0,
+        "grounded_claims": 2,
+        "selected_claims": [],
+        "fields": {
+          "full_name": {
+            "value": "Gamini Wijesuriya",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 0.0
+      }
+    },
+    "professional_relationships": {
+      "Renzo Piano": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation",
+          "practice-role-job_title"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Renzo Piano",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "His Father's Construction Company",
+            "confidence": 63.79,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Architect",
+            "confidence": 91.85,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Zaha Hadid": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Zaha Hadid",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Office for Metropolitan Architecture",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Architect",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "I. M. Pei": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "I. M. Pei",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Webb & Knapp",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Architect",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Liu Jiakun": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Liu Jiakun",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Central Academy of Fine Arts",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Visiting Professor",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Jacques Herzog": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Jacques Herzog",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "ETH Zurich",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Professor",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Frank Gehry": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "other-role-job_title",
+          "other-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Frank Gehry",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Yale University",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-organisation",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "job_title": {
+            "value": "Charlotte Davenport Professorship in Architecture",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://other.example.org/biography",
+            "confidence": 94.5,
+            "selected_claim_id": "other-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      }
+    },
+    "provider_work": {
+      "model_calls": 0,
+      "search_calls": 0,
+      "fetch_calls": 0
+    }
+  },
+  "offline_after": {
+    "kind": "deterministic_reconstruction_not_original_claim_replay",
+    "identity": {
+      "Achille Mbembe": {
+        "eligible_sources": 1,
+        "grounded_claims": 2,
+        "selected_claims": [
+          "official-role-job_title",
+          "official-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Achille Mbembe",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "University of the Witwatersrand",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-organisation",
+            "provenance": "corroborated",
+            "temporal_status": "current"
+          },
+          "job_title": {
+            "value": "Research Professor",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://official.example.org/biography",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Elahe Mohammadi": {
+        "eligible_sources": 1,
+        "grounded_claims": 2,
+        "selected_claims": [
+          "official-role-job_title",
+          "official-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Elahe Mohammadi",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Ham-Mihan",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-organisation",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "job_title": {
+            "value": "Journalist",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://official.example.org/biography",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Jonathan Anderson": {
+        "eligible_sources": 1,
+        "grounded_claims": 2,
+        "selected_claims": [
+          "official-role-job_title",
+          "official-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Jonathan Anderson",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Christian Dior Couture",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-organisation",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "job_title": {
+            "value": "Creative Director",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://official.example.org/biography",
+            "confidence": 77.49,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Zanele Muholi": {
+        "eligible_sources": 1,
+        "grounded_claims": 2,
+        "selected_claims": [
+          "official-role-job_title",
+          "official-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Zanele Muholi",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Inkanyiso",
+            "confidence": 79.75,
+            "selected_claim_id": "official-role-organisation",
+            "provenance": "corroborated",
+            "temporal_status": "current"
+          },
+          "job_title": {
+            "value": "Founder",
+            "confidence": 79.75,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://official.example.org/biography",
+            "confidence": 79.75,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Gamini Wijesuriya": {
+        "eligible_sources": 1,
+        "grounded_claims": 2,
+        "selected_claims": [
+          "official-role-job_title",
+          "official-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Gamini Wijesuriya",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "ICCROM",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-organisation",
+            "provenance": "corroborated",
+            "temporal_status": "current"
+          },
+          "job_title": {
+            "value": "Special Advisor",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "conflicting",
+            "temporal_status": "current"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://official.example.org/biography",
+            "confidence": 75.24,
+            "selected_claim_id": "official-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      }
+    },
+    "professional_relationships": {
+      "Renzo Piano": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Renzo Piano",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Renzo Piano Building Workshop",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "job_title": {
+            "value": "Architect",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Zaha Hadid": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Zaha Hadid",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Zaha Hadid Architects",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "historical"
+          },
+          "job_title": {
+            "value": "Founder",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "historical"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "I. M. Pei": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "I. M. Pei",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Pei Cobb Freed & Partners",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "historical"
+          },
+          "job_title": {
+            "value": "Founding Partner",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "historical"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 48.43,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": true,
+        "research_coverage": 42.86
+      },
+      "Liu Jiakun": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Liu Jiakun",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Jiakun Architects",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "job_title": {
+            "value": "Founder",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Jacques Herzog": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Jacques Herzog",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Herzog & de Meuron",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "job_title": {
+            "value": "Architect and Founder",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      },
+      "Frank Gehry": {
+        "eligible_sources": 2,
+        "grounded_claims": 4,
+        "selected_claims": [
+          "practice-role-job_title",
+          "practice-role-organisation"
+        ],
+        "fields": {
+          "full_name": {
+            "value": "Frank Gehry",
+            "confidence": 100.0,
+            "selected_claim_id": null,
+            "provenance": "supplied",
+            "temporal_status": null
+          },
+          "country_of_origin": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "organisation": {
+            "value": "Gehry Partners",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-organisation",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "job_title": {
+            "value": "Founder",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": "unspecified"
+          },
+          "degree_type": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "subject": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "university_name": {
+            "value": null,
+            "confidence": 0,
+            "selected_claim_id": null,
+            "provenance": null,
+            "temporal_status": null
+          },
+          "profile_link": {
+            "value": "https://practice.example.org/biography",
+            "confidence": 85.05,
+            "selected_claim_id": "practice-role-job_title",
+            "provenance": "researched",
+            "temporal_status": null
+          }
+        },
+        "review_required": false,
+        "research_coverage": 42.86
+      }
+    },
+    "provider_work": {
+      "model_calls": 0,
+      "search_calls": 0,
+      "fetch_calls": 0
+    }
+  },
+  "provider_diagnostics": {
+    "schema_error_attempts": 7,
+    "completion_tokens": [
+      3000,
+      3000,
+      3000,
+      3000,
+      3000,
+      3000,
+      3000
+    ],
+    "http_statuses": [
+      200
+    ],
+    "exceptions": [
+      "JSONDecodeError"
+    ],
+    "mocked_truncation_attempts_before": 3,
+    "mocked_truncation_attempts_after": 1,
+    "live_calls_during_validation": 0
+  }
+}

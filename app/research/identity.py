@@ -35,7 +35,14 @@ _CONTEXT_FIELDS = {
 
 
 def _clue_field(label: str) -> str:
-    return label.partition(":")[0]
+    field = label.partition(":")[0]
+    # These fields describe an affiliation, not a claim of current employment.
+    # They are nevertheless specific institutional identity anchors.
+    return {
+        "alumni_organisation": "organisation",
+        "organisation_affiliation": "organisation",
+        "government_office": "organisation",
+    }.get(field, field)
 
 
 def _clue_key(label: str, value: str) -> str:
@@ -43,6 +50,7 @@ def _clue_key(label: str, value: str) -> str:
     key = comparison_key(value)
     if label in _INSTITUTION_FIELDS:
         key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc|corporation|corp)$", "", key)
+        key = re.sub(r"\s+newspaper$", "", key)
     if label == "job_title":
         for abbreviation, expanded in _ROLE_ALIASES.items():
             key = re.sub(rf"\b{abbreviation}\b", expanded, key)
@@ -115,11 +123,15 @@ def research_seed_payload(seed: PersonSeed, *, purpose: str | None = None, unres
 def _seed_clues(seed: PersonSeed) -> dict[str, str]:
     clues = {}
     for label, values in seed_context_values(seed).items():
+        if label == "organisation" and seed.organisation:
+            values = [seed.organisation]
+        if _clue_field(label) in _INSTITUTION_FIELDS:
+            # A semicolon is an explicit list separator; commas and 'and' often
+            # belong to one institution and must not be guessed apart.
+            values = [part.strip() for value in values for part in value.split(";") if part.strip()]
         # An explicit current employer still leads over a conflicting alias.
         # Multiple alma maters or former employers may all be legitimate anchors.
-        multiple = label in {"university_name", "historical_employer"} or (
-            label == "organisation" and not seed.organisation
-        )
+        multiple = _clue_field(label) in _INSTITUTION_FIELDS
         for index, value in enumerate(values if multiple else values[:1]):
             clues[label if index == 0 else f"{label}:{index + 1}"] = value
     return clues
@@ -133,7 +145,15 @@ def seed_identity_anchors(seed: PersonSeed) -> dict[str, str]:
     for an explicitly supplied employer or university.
     """
     clues = _seed_clues(seed)
-    anchors = {label: value for label, value in clues.items() if _clue_field(label) in _INSTITUTION_FIELDS}
+    anchors = {}
+    institution_keys = set()
+    for label, value in clues.items():
+        if _clue_field(label) not in _INSTITUTION_FIELDS:
+            continue
+        key = _clue_key(label, value)
+        if key not in institution_keys:
+            anchors[label] = value
+            institution_keys.add(key)
     if not anchors and clues.get("job_title"):
         anchors["job_title"] = clues["job_title"]
     return anchors
@@ -460,8 +480,11 @@ def eligible_identity_source_ids(
         key = _clue_key(claim.field.value, claim.normalised_value)
         keys[claim.source_id].add((claim.field, key))
         if disputed_source_has_anchored_claim(claim.source_id) and any(
-            ("organisation" if _clue_field(label) == "historical_employer" else _clue_field(label))
-            == claim.field.value
+            (
+                _clue_field(label) in _INSTITUTION_FIELDS
+                and claim.field in {ProfileField.organisation, ProfileField.university_name}
+                or _clue_field(label) == claim.field.value
+            )
             and _matches_clue(label, value, claim.raw_value)
             for label, value in anchors.items()
         ):

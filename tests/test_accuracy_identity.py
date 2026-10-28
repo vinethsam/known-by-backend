@@ -163,10 +163,13 @@ def test_corroborating_namesakes_cannot_manufacture_a_seed_anchor():
     record = reconcile("person", seed, claims, list(sources.values()), policy).records[0]
     assert record.fields[ProfileField.full_name].value == seed.full_name
     assert all(
-        decision.value is None
+        decision.researched_value is None and decision.selected_claim_id is None
         for field_name, decision in record.fields.items()
         if field_name != ProfileField.full_name
     )
+    assert record.fields[ProfileField.organisation].value == seed.organisation
+    assert record.fields[ProfileField.organisation].provenance_status == "supplied"
+    assert record.coverage == 0
 
 
 def test_seed_linked_source_can_establish_an_independent_education_source():

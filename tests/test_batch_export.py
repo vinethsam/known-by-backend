@@ -325,9 +325,9 @@ def _results() -> JobResults:
 def test_export_csv_is_formula_safe_and_collision_safe():
     data = export_results(_results(), ["name", "status"], "csv")
     rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
-    assert rows[0]["name"] == "'+Ada Lovelace"
+    assert "name" not in rows[0]
     assert rows[0]["status"] == "completed"
-    assert rows[0]["status (2)"] == "original"
+    assert "status (2)" not in rows[0]
     assert rows[0]["full_name"] == "'=Ada"
     assert rows[0]["source_urls"] == "https://example.com"
     assert list(rows[0])[: len(standard_columns())] == list(standard_columns())
@@ -341,18 +341,20 @@ def test_export_xlsx_is_readable_and_formula_safe():
     row = [cell.value for cell in sheet[2]]
     workbook.close()
     assert headers[: len(standard_columns())] == list(standard_columns())
-    assert row[headers.index("name")] == "'+Ada Lovelace"
+    assert "name" not in headers
     assert row[headers.index("status")] == "completed"
-    assert row[headers.index("status (2)")] == "original"
+    assert "status (2)" not in headers
     assert row[headers.index("full_name")] == "'=Ada"
 
 
 def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
     results = _results()
     first = results.people[0]
-    first.original_row.update(note="+" + "x" * 49, wide_note="x" * 80)
+    first.result.profile.fields[ProfileField.job_title].value = "+" + "x" * 49
+    first.result.profile.fields[ProfileField.subject].value = "x" * 80
     second = first.model_copy(deep=True)
-    second.original_row.update(note="short", wide_note="short")
+    second.result.profile.fields[ProfileField.job_title].value = "short"
+    second.result.profile.fields[ProfileField.subject].value = "short"
     results.people.append(second)
 
     data = export_results(results, ["note", "wide_note"], "xlsx")
@@ -360,9 +362,9 @@ def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
     try:
         sheet = workbook.active
         headers = [cell.value for cell in sheet[1]]
-        note = sheet.cell(2, headers.index("note") + 1)
-        wide_note = sheet.cell(2, headers.index("wide_note") + 1)
-        assert note.value == "'" + first.original_row["note"]
+        note = sheet.cell(2, headers.index("job_title") + 1)
+        wide_note = sheet.cell(2, headers.index("subject") + 1)
+        assert note.value == "'+" + "x" * 49
         # Preserve the existing widths based on raw input, before formula escaping.
         assert sheet.column_dimensions[note.column_letter].width == 52
         assert sheet.column_dimensions[wide_note.column_letter].width == 60
@@ -428,7 +430,7 @@ def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
 
     assert cell("subject").fill.fgColor.rgb.endswith("FFF2CC")
     assert cell("subject_confidence").fill.fgColor.rgb.endswith("FFF2CC")
-    assert cell("subject (2)").fill.fill_type is None
+    assert "subject (2)" not in headers
     assert cell("degree_type").fill.fill_type is None
     assert cell("degree_type_confidence").fill.fill_type is None
     assert cell("university_name").fill.fill_type is None
@@ -440,7 +442,7 @@ def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
     workbook = load_workbook(io.BytesIO(custom), data_only=False)
     sheet = workbook.active
     headers = [item.value for item in sheet[1]]
-    assert sheet.cell(2, headers.index("subject") + 1).fill.fill_type is None
+    assert sheet.cell(2, headers.index("subject") + 1).fill.fgColor.rgb.endswith("FFF2CC")
     workbook.close()
 
 
@@ -515,11 +517,10 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
 
     assert len(rows) == 2
     assert headers[: len(standard_columns())] == list(standard_columns())
-    assert headers[len(standard_columns()) : len(standard_columns()) + len(provenance_columns())] == list(
-        provenance_columns()
-    )
+    assert set(provenance_columns()) <= set(headers)
+    assert headers[-1] == "source_urls"
     assert [row["degree_type"] for row in rows] == ["Bachelor's Degree", "Master's Degree"]
-    assert [row["name"] for row in rows] == ["'+Ada Lovelace", "'+Ada Lovelace"]
+    assert all("name" not in row for row in rows)
     assert rows[0]["degree_type_source_urls"] == bachelor_url
     assert rows[1]["degree_type_source_urls"] == master_url
     assert master_url not in rows[0]["university_name_source_urls"]
@@ -589,13 +590,9 @@ def test_source_list_metadata_follows_each_derived_education_row_without_cross_l
         "Master's Degree",
         "Doctoral Degree",
     ]
-    assert [row["LIST_NAME"] for row in rows] == ["Forbes 2000", "Forbes 2000", "YALI"]
-    assert [row["source_note"] for row in rows] == [
-        "first membership",
-        "first membership",
-        "second membership",
-    ]
-    assert [row["name"] for row in rows] == ["Jane Doe", "Jane Doe", "Jane Doe"]
+    assert all("LIST_NAME" not in row and "source_note" not in row and "name" not in row for row in rows)
+    assert first.original_row["LIST_NAME"] == "Forbes 2000"
+    assert second.original_row["LIST_NAME"] == "YALI"
 
 
 def test_batch_without_source_list_metadata_keeps_existing_parse_and_export_shape():
@@ -613,8 +610,8 @@ def test_batch_without_source_list_metadata_keeps_existing_parse_and_export_shap
     exported = list(
         csv.DictReader(io.StringIO(export_results(results, batch.columns, "csv").decode("utf-8-sig")))
     )
-    assert exported[0]["name"] == "Jane Doe"
-    assert exported[0]["organisation (2)"] == "Example Ltd"
+    assert "name" not in exported[0] and "organisation (2)" not in exported[0]
+    assert results.people[0].original_row == batch.rows[0]
     assert not ({"LIST_NAME", "source_list", "source_dataset", "cohort"} & set(exported[0]))
 
 
@@ -649,15 +646,10 @@ def test_export_rejects_unknown_provenance_mode():
 def test_export_has_each_enrichment_once_and_keeps_input_columns_unchanged():
     columns = ["name", "status", "status (2)", "full_name"]
     rows = list(csv.reader(io.StringIO(export_results(_results(), columns, "csv").decode("utf-8-sig"))))
-    assert len(rows[0]) == len(columns) + len(standard_columns())
+    assert len(rows[0]) == len(standard_columns())
     assert len(set(rows[0])) == len(rows[0])
     assert rows[0][: len(standard_columns())] == list(standard_columns())
-    assert rows[0][len(standard_columns()) :] == [
-        "name",
-        "status (2)",
-        "status (2) (2)",
-        "full_name (2)",
-    ]
+    assert rows[0][-1] == "source_urls"
     assert columns == ["name", "status", "status (2)", "full_name"]
 
 
@@ -665,7 +657,6 @@ def test_export_has_each_enrichment_once_and_keeps_input_columns_unchanged():
 def test_standard_layout_is_identical_for_name_only_and_contextual_csv_xlsx(provenance):
     results = _results()
     standard = list(standard_columns())
-    optional = list(provenance_columns()) if provenance == "field" else []
     for input_row in (
         {"name": "Ada Lovelace"},
         {"name": "Ada Lovelace", "company": "Example Ltd", "LIST_NAME": "Alumni"},
@@ -680,13 +671,16 @@ def test_standard_layout_is_identical_for_name_only_and_contextual_csv_xlsx(prov
                 workbook = load_workbook(io.BytesIO(data), read_only=True)
                 headers = [cell.value for cell in next(workbook.active.rows)]
                 workbook.close()
-            assert headers == [*standard, *optional, *columns]
+            assert headers == standard
 
 
 @pytest.mark.parametrize("format", ["csv", "xlsx"])
 def test_export_escapes_headers_and_whitespace_prefixed_formulas(format):
     results = _results()
     results.people[0].original_row = {" =header": ' \t=HYPERLINK("https://example.org")'}
+    results.people[0].result.profile.fields[
+        ProfileField.profile_link
+    ].value = ' \t=HYPERLINK("https://example.org")'
     data = export_results(results, [" =header"], format)
     if format == "csv":
         rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
@@ -694,8 +688,9 @@ def test_export_escapes_headers_and_whitespace_prefixed_formulas(format):
         workbook = load_workbook(io.BytesIO(data), data_only=False)
         rows = list(workbook.active.values)
         workbook.close()
-    assert rows[0][-1] == "' =header"
-    assert rows[1][-1].startswith("' \t=")
+    assert rows[0][-1] == "source_urls"
+    assert " =header" not in rows[0]
+    assert rows[1][list(rows[0]).index("profile_link")].startswith("' \t=")
 
 
 @pytest.mark.parametrize("hidden_cell", ["Z2", "A10000"])
@@ -719,9 +714,9 @@ def test_xlsx_cannot_hide_excess_cells_with_false_dimensions(hidden_cell):
 
 
 def test_xlsx_replaces_xml_invalid_input_without_losing_other_text():
-    results = _results()
-    results.people[0].original_row["name"] = "Jane\x00 Doe"
-    data = export_results(results, ["name"], "xlsx")
+    from app.export.formats import _export_xlsx
+
+    data = _export_xlsx([{"full_name": "Jane\x00 Doe"}], ["full_name"])
     workbook = load_workbook(io.BytesIO(data))
-    assert workbook.active.cell(2, len(standard_columns()) + 1).value == "Jane\ufffd Doe"
+    assert workbook.active.cell(2, 1).value == "Jane\ufffd Doe"
     workbook.close()

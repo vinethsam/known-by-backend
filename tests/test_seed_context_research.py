@@ -91,7 +91,7 @@ def test_batch_headers_preserve_current_alumni_historical_and_government_semanti
     )
 
 
-def test_current_employer_remains_the_stronger_anchor_than_generic_affiliation():
+def test_independent_affiliation_can_anchor_identity_without_becoming_current_employment():
     seed = parse_batch(
         b"name,current_employer,organisation\nJane Doe,Current Company,Industry Association\n",
         "people.csv",
@@ -99,7 +99,11 @@ def test_current_employer_remains_the_stronger_anchor_than_generic_affiliation()
         settings(),
     ).seeds[0]
 
-    assert seed_identity_anchors(seed) == {"organisation": "Current Company"}
+    assert seed.organisation == "Current Company"
+    assert seed_identity_anchors(seed) == {
+        "organisation": "Current Company",
+        "organisation_affiliation": "Industry Association",
+    }
     supporting = assess_identity(
         seed,
         "Jane Doe is a member of Industry Association.",
@@ -111,9 +115,9 @@ def test_current_employer_remains_the_stronger_anchor_than_generic_affiliation()
         ScoringPolicy(),
     )
 
-    assert supporting.signals["matched_seed_anchors"] == []
-    assert "SEED_IDENTITY_UNCONFIRMED" in supporting.reason_codes
-    assert verified.signals["matched_seed_anchors"] == ["organisation"]
+    assert supporting.signals["matched_seed_anchors"] == ["organisation_affiliation"]
+    assert "SEED_IDENTITY_UNCONFIRMED" not in supporting.reason_codes
+    assert verified.signals["matched_seed_anchors"] == ["organisation", "organisation_affiliation"]
     assert verified.score > supporting.score
 
 
@@ -284,9 +288,9 @@ def test_alumni_organisation_guides_research_but_is_not_a_current_employer_ancho
     assert seed.organisation is None
     assert seed.known_attributes == {"alumni_organisation": "Example University Alumni Association"}
     assert "Example University Alumni Association" in build_query(seed)
-    assert seed_identity_anchors(seed) == {}
+    assert seed_identity_anchors(seed) == {"alumni_organisation": "Example University Alumni Association"}
     assert match.score > policy.identity_name_only
-    assert match.signals["matched_seed_anchors"] == []
+    assert match.signals["matched_seed_anchors"] == ["alumni_organisation"]
 
 
 def test_government_office_seed_is_a_strong_public_official_identity_clue():
@@ -331,7 +335,34 @@ def test_passive_source_list_metadata_never_changes_search_or_identity():
     assert "Priority prospects" not in query
     assert "September import" not in query
     assert identity.signals["matched_clues"] == []
-    assert seed_identity_anchors(seed) == {}
+    assert seed_identity_anchors(seed) == {"alumni_organisation": "Example Alumni Network"}
+    assert identity.signals["matched_seed_anchors"] == []
+    without_metadata = seed.model_copy(
+        update={"known_attributes": {"alumni_organisation": "Example Alumni Network"}}
+    )
+    assert identity == assess_identity(
+        without_metadata,
+        "Jane Doe appears in Priority prospects from the September import.",
+        ScoringPolicy(),
+    )
     assert research_seed_payload(seed)["known_attributes"] == {
         "alumni_organisation": "Example Alumni Network"
     }
+
+
+def test_duplicate_institution_aliases_do_not_increase_identity_strength():
+    seed = PersonSeed(full_name="Jane Doe", organisation="Ministry of Science")
+    repeated = seed.model_copy(
+        update={
+            "known_attributes": {
+                "government_office": "Ministry of Science",
+                "alumni_organisation": "Ministry of Science",
+            }
+        }
+    )
+    text = "Jane Doe serves at the Ministry of Science."
+    baseline = assess_identity(seed, text, ScoringPolicy())
+    duplicate = assess_identity(repeated, text, ScoringPolicy())
+    assert seed_identity_anchors(repeated) == {"organisation": "Ministry of Science"}
+    assert duplicate.score == baseline.score
+    assert duplicate.signals["matched_seed_anchors"] == baseline.signals["matched_seed_anchors"]

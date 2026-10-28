@@ -18,6 +18,41 @@ class DiagnosticResponse(Contract):
     name: str
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason,completion_tokens", [("length", 100), (None, 3000)])
+async def test_truncated_structured_output_is_not_retried(finish_reason, completion_tokens):
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"finish_reason": finish_reason, "message": {"content": '{"name":'}}],
+                "usage": {"prompt_tokens": 2163, "completion_tokens": completion_tokens},
+            },
+        )
+
+    error, emitted = await complete(handler, retries=2)
+    assert len(attempts) == len(emitted) == 1
+    assert error.retryable is False
+    assert error.error_code == "OPENROUTER_SCHEMA_ERROR"
+    assert error.exception_type == "OutputTokenLimit"
+    assert emitted[0].completion_tokens == completion_tokens
+    assert "token limit" in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage,choices", [("invalid", 42), ([], None), (None, {})])
+async def test_malformed_envelope_does_not_mask_schema_error(usage, choices):
+    def handler(request):
+        return httpx.Response(200, json={"choices": choices, "usage": usage})
+
+    error, emitted = await complete(handler)
+    assert error.error_code == "OPENROUTER_SCHEMA_ERROR"
+    assert len(emitted) == 1
+
+
 async def no_sleep(_: float) -> None:
     return None
 

@@ -12,16 +12,19 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
-from app.export.schema import RESEARCH_FIELDS, provenance_columns, standard_columns
+from app.export.schema import RESEARCH_FIELDS, standard_columns
 from app.research.normalisation import finalize_display
+from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
 from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
-from app.seed_context import seed_input_attributes
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 ProvenanceMode = Literal["none", "field"]
-_PROVENANCE_CHUNK_CHARS = 30000
 _JSON_FORMULA_ESCAPES = str.maketrans({char: f"\\u{ord(char):04x}" for char in "=+-@"})
+
+
+class ExportCellLimitError(ValueError):
+    """A standardized cell cannot be represented losslessly in both formats."""
 
 
 def _provenance_json(value, *, compact=False):
@@ -36,20 +39,6 @@ def _provenance_json(value, *, compact=False):
     )
 
 
-def _provenance_chunks(payload):
-    chunks = []
-    start = 0
-    while start < len(payload):
-        end = min(start + _PROVENANCE_CHUNK_CHARS, len(payload))
-        # String punctuation is escaped above; a numeric minus outside a string
-        # may still need the preceding JSON delimiter at the next cell's start.
-        while end < len(payload) and payload[end:].lstrip().startswith(FORMULA_PREFIXES):
-            end -= 1
-        chunks.append(payload[start:end])
-        start = end
-    return chunks
-
-
 def export_results(
     results: JobResults,
     columns: list[str],
@@ -61,6 +50,7 @@ def export_results(
     if provenance not in {"none", "field"}:
         raise ValueError("Unsupported provenance mode")
     rows, output_columns = _flatten_results(results, columns, provenance=provenance)
+    rows = _validated_rows(rows, output_columns)
     normalized = format.lower()
     if normalized == "csv":
         return _export_csv(rows, output_columns)
@@ -80,181 +70,103 @@ def _flatten_results(
     *,
     provenance: ProvenanceMode = "none",
 ) -> tuple[Iterator[dict[str, Any]], list[str]]:
-    original_columns = list(columns)
-    standard = list(standard_columns())
-    if provenance == "field":
-        standard.extend(provenance_columns())
-    used_columns = list(standard)
-    metadata_map = {name: _unique_column(name, used_columns) for name in original_columns}
-    rows = _iter_rows(results, metadata_map, provenance=provenance)
-    if provenance == "field":
-        # JSON quoting/metadata can exceed Excel's cell limit even when every
-        # original input cell is legal. Use the same lossless parts in both formats
-        # while leaving the existing prefix and original columns in place.
-        parts: dict[str, list[str]] = {}
-        for person in results.people:
-            if not person.result:
-                payloads = [
-                    (column, payload)
-                    for column, payload in _unresearched_provenance(person).items()
-                    if column == "seed_input_metadata" or column.endswith("_supplied_values")
-                ]
-            else:
-                profile = person.result.profile
-                payloads = [
-                    (
-                        "seed_input_metadata",
-                        _provenance_json(profile.seed_attributes, compact=True),
-                    )
-                ]
-                payloads.extend(
-                    (
-                        f"{field.value}_supplied_values",
-                        _provenance_json(decision.supplied_values),
-                    )
-                    for record in profile.records or [profile]
-                    for field, decision in record.fields.items()
-                )
-            for column, payload in payloads:
-                count = len(_provenance_chunks(payload))
-                names = parts.setdefault(column, [column])
-                while len(names) < count:
-                    names.append(_unique_column(f"{column}__part_{len(names) + 1}", used_columns))
-        rows = _split_provenance(rows, parts)
-    return rows, used_columns
+    # Input columns and the legacy provenance switch no longer alter normal files.
+    # Full raw input remains in storage/API; the artifact contains standardized data.
+    return _iter_rows(results), list(standard_columns())
 
 
-def _split_provenance(rows, parts):
-    for row in rows:
-        for column, names in parts.items():
-            fragments = _provenance_chunks(row.get(column, ""))
-            for index, name in enumerate(names):
-                row[name] = fragments[index] if index < len(fragments) else ""
-        yield row
-
-
-def _iter_rows(
-    results: JobResults,
-    metadata_map: dict[str, str],
-    *,
-    provenance: ProvenanceMode,
-) -> Iterator[dict[str, Any]]:
+def _iter_rows(results: JobResults) -> Iterator[dict[str, Any]]:
     for person in results.people:
         if person.result:
-            profile = finalize_display(person.result.profile)
-            # Historical profiles have no records. Treat their flat decision set as
-            # one record with the same columns and final selected-value normalization.
-            records = getattr(profile, "records", ()) or (profile,)
-            source_urls = _compact_source_urls(person.result)
-            seed_metadata = (
-                _provenance_json(profile.seed_attributes, compact=True) if provenance == "field" else ""
+            profile = finalize_display(
+                project_stored_seed(
+                    person.result.profile,
+                    {
+                        "full_name": person.result.profile.input_name,
+                        "input_metadata": person.original_row,
+                    },
+                )
             )
-            for record in records:
-                row = _base_row(person, metadata_map, status=record.status)
-                if provenance == "field":
-                    row["seed_input_metadata"] = seed_metadata
-                for field in RESEARCH_FIELDS:
-                    decision = record.fields.get(field)
-                    if (
-                        field == ProfileField.profile_link
-                        and decision
-                        and decision.value
-                        and not source_policy_allows(decision.value)
-                    ):
-                        decision = None
-                    row[field.value] = decision.value if decision and decision.value is not None else ""
-                    row[f"{field.value}_confidence"] = decision.confidence if decision else 0
-                    if provenance == "field":
-                        row[f"{field.value}_source_urls"] = _compact_urls(
-                            decision.sources if decision else ()
-                        )
-                        row[f"{field.value}_supplied_values"] = _provenance_json(
-                            decision.supplied_values if decision else []
-                        )
-                        row[f"{field.value}_input_confidence"] = (
-                            decision.input_confidence
-                            if decision and decision.input_confidence is not None
-                            else ""
-                        )
-                        row[f"{field.value}_research_confidence"] = (
-                            decision.research_confidence
-                            if decision and decision.research_confidence is not None
-                            else decision.confidence
-                            if decision
-                            else 0
-                        )
-                        row[f"{field.value}_provenance_status"] = (
-                            decision.provenance_status or "" if decision else ""
-                        )
-                row["profile_confidence"] = record.profile_confidence
-                row["coverage"] = record.coverage
-                row["legacy_coverage"] = record.legacy_coverage
-                row["review_required"] = record.review_required
-                row["source_urls"] = source_urls
-                yield row
+            records = profile.records or [profile]
+            source_urls = _compact_source_urls(person.result)
         else:
-            row = _base_row(person, metadata_map)
-            if provenance == "field":
-                row.update(_unresearched_provenance(person))
+            profile = None
+            records = [None]
+            source_urls = ""
+        for record in records:
+            fields = (
+                record.fields
+                if record
+                else (
+                    person.supplied_fields
+                    or supplied_field_decisions({"input_metadata": person.original_row})
+                )
+            )
+            row = {
+                "status": person.status.value,
+                "record_status": record.status.value if record else person.status.value,
+                "error_code": person.error_code or "",
+                "profile_confidence": record.profile_confidence if record else 0,
+                "coverage": record.coverage if record else 0,
+                "legacy_coverage": record.legacy_coverage if record else 0,
+                "review_required": record.review_required if record else False,
+                "review_reasons": "; ".join(
+                    getattr(record, "review_reason_codes", [])
+                    or sorted(
+                        {reason for decision in fields.values() for reason in decision.review_reason_codes}
+                    )
+                ),
+                "source_urls": source_urls,
+                "_review_fields": set(),
+            }
             for field in RESEARCH_FIELDS:
-                row[field.value] = ""
-                row[f"{field.value}_confidence"] = ""
-                if provenance == "field":
-                    row[f"{field.value}_source_urls"] = ""
-            row["profile_confidence"] = ""
-            row["coverage"] = ""
-            row["legacy_coverage"] = ""
-            row["review_required"] = ""
-            row["source_urls"] = ""
+                decision = fields.get(field)
+                if not decision:
+                    continue
+                value = decision.value
+                # Supplied links are input data, never asserted research sources.
+                blocked_link = bool(
+                    field == ProfileField.profile_link and value and not source_policy_allows(value)
+                )
+                if blocked_link:
+                    value = None
+                row[field.value] = value or ""
+                row[f"{field.value}_confidence"] = (
+                    0
+                    if blocked_link
+                    else decision.research_confidence
+                    if decision.research_confidence is not None
+                    else decision.confidence
+                )
+                row[f"{field.value}_input_confidence"] = (
+                    decision.input_confidence if decision.input_confidence is not None else ""
+                )
+                row[f"{field.value}_provenance_status"] = decision.provenance_status or (
+                    "researched" if value else ""
+                )
+                row[f"{field.value}_supplied_values"] = _provenance_json(decision.supplied_values)
+                row[f"{field.value}_source_urls"] = _compact_urls(decision.sources)
+                row[f"{field.value}_review_required"] = decision.review_required
+                row[f"{field.value}_review_reasons"] = "; ".join(decision.review_reason_codes)
+                if decision.review_required or decision.provenance_status in {"conflicting", "superseded"}:
+                    row["_review_fields"].add(field.value)
             yield row
 
 
-def _unresearched_provenance(person) -> dict[str, Any]:
-    """A failed/cancelled run still preserves its supplied input, without evidence."""
-    attributes = seed_input_attributes({"input_metadata": person.original_row})
-    row = {
-        "seed_input_metadata": _provenance_json(attributes, compact=True),
-    }
-    core_aliases = {"current_employer": "organisation", "government_office": "organisation"}
-    for field in RESEARCH_FIELDS:
-        supplied = []
-        for attribute in attributes:
-            label = core_aliases.get(attribute["field"], attribute["field"])
-            value = attribute["value"]
-            if label == field.value and value not in (None, "") and value not in supplied:
-                supplied.append(value)
-        row[f"{field.value}_supplied_values"] = _provenance_json(supplied)
-        row[f"{field.value}_input_confidence"] = 100 if supplied else ""
-        row[f"{field.value}_research_confidence"] = ""
-        row[f"{field.value}_provenance_status"] = "supplied" if supplied else ""
-    return row
-
-
-def _base_row(person, metadata_map, *, status=None) -> dict[str, Any]:
-    row = {output: person.original_row.get(source, "") for source, output in metadata_map.items()}
-    effective_status = status or person.status
-    row["status"] = getattr(effective_status, "value", effective_status)
-    row["error_code"] = person.error_code or ""
-    return row
+def _validated_rows(rows, columns):
+    for row in rows:
+        if any(
+            isinstance(row.get(column), str) and len(_safe_cell(row[column])) > 32767 for column in columns
+        ):
+            raise ExportCellLimitError(
+                "A result cell exceeds the spreadsheet limit of 32767 characters; "
+                "original supplied values remain available in record details."
+            )
+        yield row
 
 
 def _field_column_pairs() -> list[tuple[str, str]]:
     return [(field.value, f"{field.value}_confidence") for field in RESEARCH_FIELDS]
-
-
-def _unique_column(name: str, existing: list[str]) -> str:
-    seen = set(existing)
-    candidate = name
-    if candidate not in seen:
-        existing.append(candidate)
-        return candidate
-    index = 2
-    while True:
-        candidate = f"{name} ({index})"
-        if candidate not in seen:
-            existing.append(candidate)
-            return candidate
-        index += 1
 
 
 def _compact_source_urls(result) -> str:
@@ -327,14 +239,21 @@ def _export_xlsx(
         for value_column, confidence_column in field_columns:
             value = row.get(value_column)
             confidence = row.get(confidence_column)
-            if (
-                value not in {None, ""}
-                and isinstance(confidence, (int, float))
-                and not isinstance(confidence, bool)
-                and confidence < low_confidence_threshold
+            if value not in {None, ""} and (
+                value_column in row.get("_review_fields", ())
+                or (
+                    isinstance(confidence, (int, float))
+                    and not isinstance(confidence, bool)
+                    and confidence < low_confidence_threshold
+                    and row.get(f"{value_column}_provenance_status") != "supplied"
+                )
             ):
                 sheet.cell(row=row_index, column=column_indexes[value_column]).fill = pale_yellow
                 sheet.cell(row=row_index, column=column_indexes[confidence_column]).fill = pale_yellow
+        if row.get("review_required"):
+            cell = sheet.cell(row=row_index, column=column_indexes["review_required"])
+            cell.fill = pale_yellow
+            cell.font = Font(bold=True)
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for index, width in enumerate(widths, start=1):

@@ -131,7 +131,8 @@ def test_all_supplied_core_fields_have_input_certainty_without_research_coverage
             assert decision.value == NAME
             assert decision.confidence == 100
         else:
-            assert decision.value is None
+            assert decision.value is not None
+            assert decision.researched_value is None
             assert decision.confidence == 0
 
 
@@ -221,6 +222,10 @@ def test_conflicting_country_preserves_exact_seed_and_external_evidence_separate
     assert decision.research_confidence == decision.confidence > 0
     assert decision.supporting_claim_ids == ["origin"]
     assert decision.scoring_components["seed_conflicting_claim_ids"] == ["origin"]
+    assert decision.review_required
+    assert "SUPPLIED_VALUE_CONFLICT" in decision.review_reason_codes
+    assert result.records[0].review_required
+    assert "SUPPLIED_VALUE_CONFLICT" in result.records[0].review_reason_codes
     supplied = next(item for item in result.seed_attributes if item["field"] == "country_of_origin")
     assert supplied["value"] == "  Sri Lanka  "
     assert supplied["conflicting_claim_ids"] == ["origin"]
@@ -252,6 +257,10 @@ def test_old_seed_employer_is_superseded_when_evidence_supports_a_current_career
     assert decision.supplied_values == ["Former Labs"]
     assert decision.input_confidence == 100
     assert decision.provenance_status == "superseded"
+    assert decision.review_required
+    assert "SUPPLIED_VALUE_SUPERSEDED" in decision.review_reason_codes
+    assert result.review_required and result.records[0].review_required
+    assert "SUPPLIED_VALUE_SUPERSEDED" in result.records[0].review_reason_codes
     supplied = next(item for item in result.seed_attributes if item["field"] == "organisation")
     assert supplied["provenance_status"] == "superseded"
     assert supplied["corroborating_claim_ids"] == ["former"]
@@ -336,7 +345,8 @@ def test_multiple_education_records_do_not_borrow_unverified_seed_components():
     assert hill[ProfileField.degree_type].value != "Master's Degree"
     for record in result.records:
         assert record.fields[ProfileField.full_name].value == NAME
-        assert record.fields[ProfileField.organisation].value is None
+        assert record.fields[ProfileField.organisation].value == "Aster Labs"
+        assert record.fields[ProfileField.organisation].provenance_status == "supplied"
         assert record.fields[ProfileField.organisation].supplied_values == ["Aster Labs"]
         assert record.fields[ProfileField.organisation].input_confidence == 100
 
@@ -372,11 +382,11 @@ def test_optional_export_provenance_keeps_fixed_prefix_and_raw_seed_certainty(fo
 
     assert headers[: len(standard_columns())] == list(standard_columns())
     assert float(row["university_name_input_confidence"]) == 100
-    assert float(row["university_name_research_confidence"]) == 0
     assert float(row["university_name_confidence"]) == 0
-    assert row["university_name"] in {None, ""}
+    assert row["university_name"] == "Lake University"
     assert json.loads(row["country_of_origin_supplied_values"]) == ["  Sri Lanka  "]
-    metadata = {item["column"]: item for item in json.loads(row["seed_input_metadata"])}
+    assert "seed_input_metadata" not in row
+    metadata = {item["column"]: item for item in result.seed_attributes}
     assert metadata["country_of_origin"]["value"] == "  Sri Lanka  "
     assert metadata["Email"]["value"] == "private@example.test"
     assert all(item["input_confidence"] == 100 for item in metadata.values())
@@ -413,14 +423,10 @@ def test_large_seed_provenance_round_trips_without_excel_cell_truncation(format)
         workbook.close()
 
     assert headers[: len(standard_columns())] == list(standard_columns())
-    assert "seed_input_metadata__part_2" in headers
-    fragments = [row["seed_input_metadata"]]
-    index = 2
-    while f"seed_input_metadata__part_{index}" in row:
-        fragments.append(row[f"seed_input_metadata__part_{index}"] or "")
-        index += 1
-    assert all(len(fragment) <= 32767 for fragment in fragments)
-    restored = {item["column"]: item for item in json.loads("".join(fragments))}
+    assert headers == list(standard_columns())
+    assert set(row) == set(headers)
+    assert "seed_input_metadata__part_2" not in headers
+    restored = {item["column"]: item for item in result.seed_attributes}
     for column, raw in original.items():
         assert restored[column]["value"] == raw
         assert restored[column]["input_confidence"] == 100
@@ -467,13 +473,15 @@ def test_unresearched_rows_preserve_input_certainty_and_long_metadata_without_re
     assert row["error_code"] == (
         "PROVIDER_UNAVAILABLE" if status == "failed" else "" if format == "csv" else None
     )
+    assert row["full_name"] == NAME
+    assert row["university_name"] == "Lake University"
     for field in ProfileField:
-        assert row[field.value] in {"", None}
-        assert row[f"{field.value}_confidence"] in {"", None}
-        assert row[f"{field.value}_research_confidence"] in {"", None}
+        if field not in {ProfileField.full_name, ProfileField.university_name}:
+            assert row[field.value] in {"", None}
+        assert float(row[f"{field.value}_confidence"]) == 0
         assert row[f"{field.value}_source_urls"] in {"", None}
-    assert row["profile_confidence"] in {"", None}
-    assert row["coverage"] in {"", None}
+    assert float(row["profile_confidence"]) == 0
+    assert float(row["coverage"]) == 0
     assert float(row["full_name_input_confidence"]) == 100
     assert float(row["university_name_input_confidence"]) == 100
     assert row["university_name_provenance_status"] == "supplied"
@@ -481,23 +489,12 @@ def test_unresearched_rows_preserve_input_certainty_and_long_metadata_without_re
     assert json.loads(row["organisation_supplied_values"]) == []
     assert json.loads(row["job_title_supplied_values"]) == []
     assert row["organisation_input_confidence"] in {"", None}
-    assert "seed_input_metadata__part_2" in row
-    parts = [row["seed_input_metadata"]]
-    index = 2
-    while f"seed_input_metadata__part_{index}" in row:
-        parts.append(row[f"seed_input_metadata__part_{index}"] or "")
-        index += 1
-    assert all(len(part) <= 32767 for part in parts)
-    attributes = json.loads("".join(parts))
-    assert {item["column"]: item["value"] for item in attributes} == original
-    assert all(item["input_confidence"] == 100 for item in attributes)
-    assert all(item["provenance_status"] == "supplied" for item in attributes)
-
-    # Optional audit columns must not appear in the existing default export.
+    assert "seed_input_metadata__part_2" not in row
+    assert results.people[0].original_row == original
     default = export_results(results, list(original), "csv")
     default_reader = csv.DictReader(io.StringIO(default.decode("utf-8-sig")))
-    assert "seed_input_metadata" not in default_reader.fieldnames
-    assert next(default_reader)["University"] == original["University"]
+    assert default_reader.fieldnames == list(standard_columns())
+    assert "University" not in next(default_reader)
 
 
 @pytest.mark.parametrize(

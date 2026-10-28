@@ -39,6 +39,8 @@ class RelationshipType(StrEnum):
     current_primary_employment = "current_primary_employment"
     current_executive_role = "current_executive_role"
     current_academic_role = "current_academic_role"
+    principal_professional_practice = "principal_professional_practice"
+    secondary_academic_role = "secondary_academic_role"
     board_role = "board_role"
     advisory_role = "advisory_role"
     political_party_role = "political_party_role"
@@ -65,7 +67,9 @@ RELATIONSHIP_PRIORITY = {
     RelationshipType.current_government_office: 90,
     RelationshipType.current_executive_role: 80,
     RelationshipType.current_primary_employment: 75,
+    RelationshipType.principal_professional_practice: 78,
     RelationshipType.current_academic_role: 65,
+    RelationshipType.secondary_academic_role: 45,
     RelationshipType.board_role: 40,
     RelationshipType.advisory_role: 30,
     RelationshipType.political_party_role: 20,
@@ -193,9 +197,15 @@ _ACRONYMS = {
     "svp": "SVP",
     "un": "UN",
     "unesco": "UNESCO",
+    "iccrom": "ICCROM",
+    "eth": "ETH",
+    "rpbw": "RPBW",
+    "pwc": "PwC",
+    "mcgill": "McGill",
     "usa": "USA",
     "uk": "UK",
     "vp": "VP",
+    "6a": "6a",
 }
 
 # Exact phrases only: translating fragments in an unfamiliar proper name or a
@@ -930,7 +940,11 @@ def classify_relationship(
         return RelationshipType.advisory_role
     if classify_public_office(organisation, title, source_types=source_types) is not None:
         return RelationshipType.current_government_office
-    if re.search(r"\b(professor|lecturer|dean|rector|academic|research fellow)\b", title_key):
+    if re.search(r"\b(visiting|guest|adjunct|emeritus|honorary)\b", title_key) and re.search(
+        r"\b(professor|professorship|lecturer|fellow|chair)\b", title_key
+    ):
+        return RelationshipType.secondary_academic_role
+    if re.search(r"\b(professor|professorship|lecturer|dean|rector|academic|research fellow)\b", title_key):
         return RelationshipType.current_academic_role
     if re.search(
         r"\b(chief .+ officer|chief executive|ceo|cfo|cio|cto|managing director|executive director|"

@@ -103,9 +103,12 @@ def test_mixed_input_keeps_row_errors_and_only_valid_people_are_researched(tmp_p
         assert len(exported) == 4
         assert exported[1]["error_code"] == "INVALID_PERSON_NAME"
         assert exported[2]["error_code"] == "INVALID_PERSON_SEED"
-        assert exported[1]["University"] == "Hill University"
+        assert "University" not in exported[1]
+        assert results.people[1].original_row["University"] == "Hill University"
         assert float(exported[1]["university_name_input_confidence"]) == 100
-        assert exported[1]["university_name"] in {"", None}
+        assert exported[1]["university_name"] == "Hill University"
+        assert float(exported[1]["university_name_confidence"]) == 0
+        assert exported[1]["university_name_provenance_status"] == "supplied"
     finally:
         store.engine.dispose()
 

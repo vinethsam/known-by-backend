@@ -1,0 +1,26 @@
+[
+  {
+    "format": "csv",
+    "original_bytes": 58857,
+    "sha256": "43d4641e3aee496eea0e33a81c1804405ba86ddeda3d124fb2c2fb10d2aba556",
+    "rows": 65,
+    "page_rows": 2,
+    "has_more": true,
+    "renzo_search_matches": 1,
+    "standard_columns": 73,
+    "last_column": "source_urls",
+    "original_unchanged": true
+  },
+  {
+    "format": "xlsx",
+    "original_bytes": 32064,
+    "sha256": "c6107ed4a625f8e0ef394b8bf973bbabd355c953872d6f0d3767488eff353469",
+    "rows": 65,
+    "page_rows": 2,
+    "has_more": true,
+    "renzo_search_matches": 1,
+    "standard_columns": 73,
+    "last_column": "source_urls",
+    "original_unchanged": true
+  }
+]
