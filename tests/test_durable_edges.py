@@ -127,7 +127,7 @@ def expire(store, lease):
         session.get(PersonTaskRow, lease.person_id).lease_expires_at = utcnow() - timedelta(seconds=1)
 
 
-def test_final_expired_attempt_terminates_job_and_preserves_checkpoint(store):
+def test_final_expired_attempt_waits_then_resumes_and_preserves_checkpoint(store):
     job = store.create_job([PersonSeed(full_name="Jane Doe")])
     first = store.claim_task("first")
     checkpoint = result_for(first)
@@ -137,13 +137,22 @@ def test_final_expired_attempt_terminates_job_and_preserves_checkpoint(store):
     assert second.person_id == first.person_id
     expire(store, second)
     assert store.claim_task("third") is None
-    assert store.get_job(job.job_id).status == "failed"
+    waiting = store.get_job(job.job_id)
+    assert waiting.status == "queued"
+    assert waiting.recovery_state == "reconnecting"
+    assert waiting.counts["failed"] == 0
     view = store.get_results(job.job_id).people[0]
-    assert view.error_code == "WORKER_ATTEMPTS_EXHAUSTED"
-    assert view.result.profile.status == "failed"
-    assert view.result.profile.research_status == "failed"
+    assert view.error_code == "INFRASTRUCTURE_WAIT:WORKER_INTERRUPTED"
+    assert view.result.profile.status == "queued"
+    assert view.result.profile.research_status == "queued"
     assert view.result.claims[0].claim_id == checkpoint.claims[0].claim_id
     assert not store.finish_task(second, checkpoint)
+    expire(store, second)
+    recovered = store.claim_task("third")
+    assert recovered.person_id == first.person_id
+    assert recovered.checkpoint.claims[0].claim_id == checkpoint.claims[0].claim_id
+    assert store.finish_task(recovered, recovered.checkpoint)
+    assert store.get_job(job.job_id).status == "completed"
 
 
 def test_reclaim_retains_provenance_usage_and_does_not_duplicate_checkpoints(store):

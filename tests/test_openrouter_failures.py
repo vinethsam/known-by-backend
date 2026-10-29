@@ -103,6 +103,7 @@ def assert_zero_token_diagnostics(
     exception_type: str,
     response_received: bool,
     response_body_received: bool,
+    request_sent: bool = True,
 ) -> None:
     assert error.error_code == error_code
     assert error.http_status == http_status
@@ -111,7 +112,7 @@ def assert_zero_token_diagnostics(
     assert usage.http_status == http_status
     assert usage.exception_type == exception_type
     assert usage.retry_attempt == 0
-    assert usage.request_sent is True
+    assert usage.request_sent is request_sent
     assert usage.response_received is response_received
     assert usage.response_body_received is response_body_received
     assert usage.prompt_tokens == 0
@@ -242,8 +243,60 @@ async def test_transport_failure_records_safe_zero_token_diagnostics() -> None:
         exception_type="ConnectError",
         response_received=False,
         response_body_received=False,
+        request_sent=False,
     )
     assert "private socket detail" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError])
+async def test_uncertain_paid_request_is_not_retried(failure_type):
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        raise failure_type("private acknowledgement detail", request=request)
+
+    error, emitted = await complete(handler, retries=2)
+    assert calls == len(emitted) == 1
+    assert error.transient is True
+    assert error.response_uncertain is True
+    assert error.retryable is False
+    assert emitted[0].request_sent is True
+    assert "private acknowledgement detail" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout])
+async def test_unsent_connection_attempts_are_bounded_and_identified(failure_type):
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        raise failure_type("unavailable", request=request)
+
+    error, emitted = await complete(handler, retries=2)
+    assert calls == len(emitted) == 3
+    assert error.transient is True
+    assert error.response_uncertain is False
+    assert all(record.request_sent is False for record in emitted)
+
+
+@pytest.mark.asyncio
+async def test_long_retry_after_returns_to_durable_worker_without_early_retry():
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"Retry-After": "90"}, json={"error": {"code": 429}})
+
+    error, emitted = await complete(handler, retries=2)
+    assert calls == len(emitted) == 1
+    assert error.transient is True
+    assert error.retry_after_seconds == 90
 
 
 @pytest.mark.asyncio

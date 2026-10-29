@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.logging import JsonFormatter
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
-from app.providers.openrouter import OpenRouterClient
+from app.providers.openrouter import OpenRouterClient, OpenRouterError
 from app.providers.search import OpenRouterSearchProvider
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.concurrency import ordered_window
@@ -21,7 +21,14 @@ from app.research.extraction import extract_chunks
 from app.research.orchestrator import ResearchOrchestrator, _process_source
 from app.research.telemetry import COUNTERS, TIMINGS, count, person_performance, stage
 from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
-from app.schemas import ExtractionResponse, PersonSeed, ResearchMetrics, SourceCandidate, SourceRecord
+from app.schemas import (
+    ExtractionResponse,
+    PersonSeed,
+    ResearchMetrics,
+    SourceCandidate,
+    SourceRecord,
+    UsageRecord,
+)
 from app.worker import process_lease
 
 CONTEXT = {"job_id": "fixture-job", "person_id": "fixture-person"}
@@ -45,6 +52,196 @@ def response(content='{"claims":[]}'):
             "usage": {"prompt_tokens": 20, "completion_tokens": 10},
         },
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["complete", "search"])
+async def test_durable_paid_reply_is_reused_after_metrics_reload(operation):
+    settings = configured(OPENROUTER_MAX_RETRIES=0)
+    metrics, usage, snapshots = ResearchMetrics(), [], []
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if operation == "search":
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url_citation": {
+                                            "url": "https://example.org/jane",
+                                            "title": "Jane Doe",
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+                },
+            )
+        return response()
+
+    async def invoke(budget, provider):
+        if operation == "search":
+            return await budget.search(OpenRouterSearchProvider(settings, provider), "Jane Doe", 1, CONTEXT)
+        return await budget.complete(
+            ExtractionResponse,
+            "extraction",
+            EXTRACTION_SYSTEM_PROMPT,
+            {},
+            CONTEXT,
+            EXTRACTION_PROMPT_VERSION,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterClient(settings, http)
+        budget = BudgetedModel(provider, settings, metrics, usage)
+
+        async def checkpoint():
+            snapshots.append((metrics.model_dump(mode="json"), [x.model_dump(mode="json") for x in usage]))
+
+        budget.checkpoint = checkpoint
+        original = await invoke(budget, provider)
+        saved_metrics, saved_usage = snapshots[-1]
+        resumed_metrics = ResearchMetrics.model_validate(saved_metrics)
+        resumed_usage = [UsageRecord.model_validate(x) for x in saved_usage]
+        resumed = BudgetedModel(provider, settings, resumed_metrics, resumed_usage)
+        resumed.checkpoint = checkpoint
+        cached = await invoke(resumed, provider)
+    assert calls == 1
+    assert cached == original
+    assert resumed_metrics.llm_calls == 1
+    assert len(resumed_usage) == 1
+    if operation == "complete":
+        assert isinstance(cached, tuple) and isinstance(cached[0], ExtractionResponse)
+        assert isinstance(cached[1][0], UsageRecord)
+    else:
+        assert isinstance(cached, list) and isinstance(cached[0], SourceCandidate)
+    assert all(receipt["state"] == "completed" for receipt in resumed_metrics.recovery["requests"].values())
+
+
+@pytest.mark.asyncio
+async def test_uncertain_paid_request_stays_blocked_after_metrics_reload():
+    settings = configured(OPENROUTER_MAX_RETRIES=2)
+    metrics, usage, snapshots = ResearchMetrics(), [], []
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("acknowledgement lost", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterClient(settings, http)
+        budget = BudgetedModel(provider, settings, metrics, usage)
+
+        async def checkpoint():
+            snapshots.append(metrics.model_dump(mode="json"))
+
+        budget.checkpoint = checkpoint
+        arguments = (
+            ExtractionResponse,
+            "extraction",
+            EXTRACTION_SYSTEM_PROMPT,
+            {},
+            CONTEXT,
+            EXTRACTION_PROMPT_VERSION,
+        )
+        with pytest.raises(OpenRouterError) as caught:
+            await budget.complete(*arguments)
+        assert caught.value.response_uncertain is True
+        resumed_metrics = ResearchMetrics.model_validate(snapshots[-1])
+        resumed = BudgetedModel(provider, settings, resumed_metrics, usage)
+        resumed.checkpoint = checkpoint
+        with pytest.raises(BudgetExceeded, match="PROVIDER_RESPONSE_UNCERTAIN"):
+            await resumed.complete(*arguments)
+    assert calls == len(usage) == resumed_metrics.llm_calls == 1
+    assert resumed_metrics.tokens_budgeted > 0
+
+
+@pytest.mark.asyncio
+async def test_only_proven_unsent_connection_attempts_release_paid_reservations():
+    settings = configured(OPENROUTER_MAX_RETRIES=2)
+    metrics, usage = ResearchMetrics(), []
+
+    async def handler(request):
+        raise httpx.ConnectTimeout("temporarily unavailable", request=request)
+
+    async def no_sleep(_):
+        pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        budget = BudgetedModel(OpenRouterClient(settings, http, sleep=no_sleep), settings, metrics, usage)
+        budget.checkpoint = lambda: asyncio.sleep(0)
+        with pytest.raises(OpenRouterError):
+            await budget.complete(
+                ExtractionResponse,
+                "extraction",
+                EXTRACTION_SYSTEM_PROMPT,
+                {},
+                CONTEXT,
+                EXTRACTION_PROMPT_VERSION,
+            )
+    assert len(usage) == 3
+    assert metrics.llm_calls == metrics.tokens_budgeted == metrics.tokens_used == 0
+    assert metrics.recovery["requests"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unsent", "rate_limited"])
+async def test_crash_after_definitive_failure_checkpoint_keeps_request_recoverable(failure):
+    settings = configured(OPENROUTER_MAX_RETRIES=0)
+    metrics, usage, snapshots = ResearchMetrics(), [], []
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            if failure == "unsent":
+                raise httpx.ConnectTimeout("temporarily unavailable", request=request)
+            return httpx.Response(429, json={"error": {"code": 429}})
+        assert all(x["state"] == "in_flight" for x in resumed_metrics.recovery["requests"].values())
+        return response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterClient(settings, http)
+        budget = BudgetedModel(provider, settings, metrics, usage)
+
+        async def checkpoint_then_crash():
+            snapshots.append((metrics.model_dump(mode="json"), [x.model_dump(mode="json") for x in usage]))
+            if usage:
+                raise asyncio.CancelledError()
+
+        budget.checkpoint = checkpoint_then_crash
+        arguments = (
+            ExtractionResponse,
+            "extraction",
+            EXTRACTION_SYSTEM_PROMPT,
+            {},
+            CONTEXT,
+            EXTRACTION_PROMPT_VERSION,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await budget.complete(*arguments)
+        saved_metrics, saved_usage = snapshots[-1]
+        resumed_metrics = ResearchMetrics.model_validate(saved_metrics)
+        resumed_usage = [UsageRecord.model_validate(x) for x in saved_usage]
+        assert all(x["state"] == "retryable" for x in resumed_metrics.recovery["requests"].values())
+        resumed = BudgetedModel(provider, settings, resumed_metrics, resumed_usage)
+        resumed.checkpoint = lambda: asyncio.sleep(0)
+        parsed, _ = await resumed.complete(*arguments)
+    assert isinstance(parsed, ExtractionResponse)
+    assert calls == len(resumed_usage) == 2
+    assert resumed_metrics.llm_calls == (1 if failure == "unsent" else 2)
+    assert all(x["state"] == "completed" for x in resumed_metrics.recovery["requests"].values())
 
 
 @pytest.mark.asyncio
@@ -141,7 +338,7 @@ async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
     assert peak == 2 and active == 0
     assert len(usage) == metrics.llm_calls == 3
     assert metrics.tokens_used == metrics.tokens_budgeted == 90
-    assert len(checkpoints) == 6
+    assert len(checkpoints) == 9
     assert all(calls <= settings.MAX_LLM_CALLS_PER_PERSON for calls, _, _ in checkpoints)
 
 
@@ -374,14 +571,12 @@ async def test_production_prefetch_overlaps_but_evidence_and_errors_keep_source_
                 await second_started.wait()
             if url == urls[1]:
                 second_started.set()
-            if failed_source and url == urls[0]:
-                return httpx.Response(502, json={"error": "offline fixture"})
             return httpx.Response(
                 200,
                 json={
                     "requested_url": url,
                     "final_url": urls[1] if redirect_source and url == urls[0] else url,
-                    "status": 200,
+                    "status": 502 if failed_source and url == urls[0] else 200,
                     "content_type": "text/html",
                     "html": f"<h1>Jane Doe</h1><p>{statement}</p><p>{url}</p>",
                 },

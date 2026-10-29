@@ -342,7 +342,7 @@ async def test_retry_reservation_can_stop_transport_without_erasing_first_attemp
 
     def handler(request):
         calls.append(request)
-        raise httpx.ReadTimeout("private detail", request=request)
+        raise httpx.ConnectTimeout("private detail", request=request)
 
     async def reserve(attempt):
         reservations.append(attempt)
@@ -426,4 +426,4 @@ async def test_reported_tool_overrun_stops_without_retry_and_preserves_usage():
     assert ledger[0].web_search_requests == metrics.web_search_requests == 2
     assert metrics.web_search_calls_reserved == metrics.search_results_reserved == 1
     assert metrics.tokens_used == metrics.tokens_budgeted == 34
-    assert checkpoints == [(1, 0, 0), (1, 2, 1)]
+    assert checkpoints == [(1, 0, 0), (1, 2, 1), (1, 2, 1)]

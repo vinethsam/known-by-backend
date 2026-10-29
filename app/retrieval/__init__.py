@@ -10,6 +10,7 @@ from app.retrieval.contracts import (
     FetchConfigurationError,
     FetchError,
     FetchTimeoutError,
+    FetchTransientError,
     RetrievedPage,
 )
 from app.retrieval.service import (
@@ -30,6 +31,7 @@ __all__ = [
     "FetchConfigurationError",
     "FetchError",
     "FetchTimeoutError",
+    "FetchTransientError",
     "PinnedAsyncHTTPTransport",
     "PinnedPublicNetworkBackend",
     "RetrievalService",

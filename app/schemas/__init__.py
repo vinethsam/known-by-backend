@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import (
@@ -441,6 +441,8 @@ class ResearchMetrics(Contract):
     stop_reason: str | None = None
     failure_reason: str | None = None
     error_codes: list[str] = Field(default_factory=list)
+    # Internal checkpoint cursor and paid-request receipts; omitted from public views.
+    recovery: dict[str, Any] = Field(default_factory=dict)
 
 
 class PersonProfile(Contract):
@@ -511,6 +513,9 @@ class JobView(JobCreated):
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    recovery_state: Literal["reconnecting", "resuming"] | None = None
+    recovery_reason: str | None = None
+    retry_at: datetime | None = None
 
     @computed_field
     @property

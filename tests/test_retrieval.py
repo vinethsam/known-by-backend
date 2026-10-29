@@ -12,6 +12,7 @@ import pytest
 from httpcore._backends.base import AsyncNetworkBackend, AsyncNetworkStream
 
 from app.config import Settings
+from app.retrieval.contracts import FetchTransientError
 from app.retrieval.service import (
     BrowserRenderer,
     BrowserRouteHTTPClient,
@@ -356,6 +357,49 @@ async def test_static_fetcher_posts_to_worker_and_validates_result(monkeypatch):
     assert page.final_url == "https://www.example.com/page"
     assert page.retrieval_method == "static"
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected_calls", [(503, 3), (401, 1)])
+async def test_static_worker_outage_retries_but_authorization_does_not(monkeypatch, status, expected_calls):
+    public_dns(monkeypatch)
+    calls = 0
+
+    async def no_sleep(_):
+        pass
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, json={})
+
+    monkeypatch.setattr("app.retrieval.service.asyncio.sleep", no_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = StaticFetcher(settings(), client=client)
+        with pytest.raises(FetchError) as caught:
+            await fetcher.fetch("https://example.com/")
+    assert calls == expected_calls
+    assert caught.value.transient is (status == 503)
+    assert caught.value.infrastructure is (status == 503)
+
+
+@pytest.mark.asyncio
+async def test_temporary_dns_failure_is_recoverable_without_calling_worker(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_AGAIN, "temporary resolver outage")
+
+    async def no_sleep(_):
+        pass
+
+    def unexpected_request(request):
+        raise AssertionError("Worker must not be called before DNS validation")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unavailable)
+    monkeypatch.setattr("app.retrieval.service.asyncio.sleep", no_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as client:
+        with pytest.raises(FetchTransientError) as caught:
+            await StaticFetcher(settings(), client=client).fetch("https://example.com/")
+    assert caught.value.infrastructure is True
 
 
 @pytest.mark.asyncio

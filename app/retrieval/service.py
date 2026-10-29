@@ -32,10 +32,15 @@ from app.retrieval.contracts import (
     FetchConfigurationError,
     FetchError,
     FetchTimeoutError,
+    FetchTransientError,
     RetrievedPage,
     content_type_allowed,
+    permanent_network_error,
+    retry_after_seconds,
+    retry_delay,
 )
 from app.retrieval.urls import (
+    TemporaryDNSFailure,
     URLValidationError,
     canonicalise_url,
     domain_key,
@@ -112,6 +117,10 @@ def _validate_worker_url(worker_url: str, settings: object) -> str:
 async def _validate_target(url: str, settings: object) -> str:
     try:
         return await validate_public_url(url, settings)
+    except TemporaryDNSFailure as exc:
+        raise FetchTransientError(
+            "Public DNS resolution is temporarily unavailable", infrastructure=True
+        ) from exc
     except URLValidationError as exc:
         raise _TargetValidationError(str(exc) or "URL is not eligible for retrieval") from exc
 
@@ -143,6 +152,18 @@ class StaticFetcher:
             self._client = None
 
     async def fetch(self, url: str) -> RetrievedPage:
+        # Fetching a public page is safe to repeat; retain the source/concurrency
+        # limits and return a typed outage after at most three HTTP attempts.
+        for attempt in range(3):
+            try:
+                return await self._fetch_once(url)
+            except FetchTransientError as exc:
+                if attempt == 2 or (exc.retry_after_seconds or 0) > 30:
+                    raise
+                await asyncio.sleep(retry_delay(attempt, exc.retry_after_seconds))
+        raise AssertionError("unreachable")
+
+    async def _fetch_once(self, url: str) -> RetrievedPage:
         target_url = await _validate_target(url, self.settings)
         worker_url = getattr(self.settings, "STATIC_FETCH_WORKER_URL", None)
         if not worker_url:
@@ -161,6 +182,12 @@ class StaticFetcher:
                 "POST", worker_url, json={"url": target_url}, headers=headers
             ) as response:
                 if response.status_code >= 400:
+                    if response.status_code in {408, 429} or response.status_code >= 500:
+                        raise FetchTransientError(
+                            f"The static-fetch Worker returned HTTP {response.status_code}",
+                            infrastructure=True,
+                            retry_after_seconds=retry_after_seconds(response.headers.get("Retry-After")),
+                        )
                     error_type = (
                         FetchConfigurationError
                         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}
@@ -172,11 +199,17 @@ class StaticFetcher:
                     if len(raw) > _worker_response_limit(self.settings):
                         raise _StaticPolicyError("The static-fetch Worker response exceeded the size limit")
         except httpx.TimeoutException as exc:
-            raise FetchTimeoutError("The static-fetch Worker request timed out") from exc
+            raise FetchTimeoutError("The static-fetch Worker request timed out", infrastructure=True) from exc
         except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
             raise FetchConfigurationError("STATIC_FETCH_WORKER_URL is not a valid HTTP(S) URL") from exc
         except httpx.RequestError as exc:
-            raise FetchError("Could not connect to the static-fetch Worker") from exc
+            if permanent_network_error(exc):
+                raise FetchConfigurationError(
+                    "The static-fetch Worker connection configuration is invalid"
+                ) from exc
+            raise FetchTransientError(
+                "Could not connect to the static-fetch Worker", infrastructure=True
+            ) from exc
 
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -435,6 +468,8 @@ class RetrievalService:
         page = page.model_copy(update={"requested_url": requested_url})
         error = _browser_result_error(page, self.settings)
         if error is not None:
+            if page.status in {408, 429} or page.status >= 500:
+                raise FetchTransientError(f"The browser returned unusable content ({error})")
             raise FetchError(f"The browser returned unusable content ({error})")
         return page
 
@@ -479,7 +514,14 @@ class RetrievalService:
                     except FetchError as exc:
                         if self.renderer is None or not self._static_error_allows_browser(exc):
                             raise
-                        page = await self._render_fallback(key_url, key_url)
+                        try:
+                            page = await self._render_fallback(key_url, key_url)
+                        except FetchError:
+                            # A browser failure must not erase an established
+                            # shared Worker outage and finalize the person.
+                            if exc.infrastructure:
+                                raise exc
+                            raise
                     else:
                         if (
                             _static_fallback_reason(page, self.settings) is not None

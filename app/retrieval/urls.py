@@ -12,6 +12,10 @@ class URLValidationError(ValueError):
     """Raised when a target URL is not safe to retrieve."""
 
 
+class TemporaryDNSFailure(URLValidationError):
+    """The resolver is temporarily unavailable; this is not a URL-policy rejection."""
+
+
 _TRACKING_PARAMS = {
     "fbclid",
     "gclid",
@@ -241,6 +245,8 @@ def _resolve_addresses(host: str, port: int | None) -> set[str]:
     try:
         results = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
+        if exc.errno == socket.EAI_AGAIN:
+            raise TemporaryDNSFailure("URL host resolution is temporarily unavailable") from exc
         raise URLValidationError("URL host could not be resolved") from exc
 
     addresses = {item[4][0] for item in results}

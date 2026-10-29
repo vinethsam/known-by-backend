@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import socket
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -26,7 +28,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, DisconnectionError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -65,6 +68,61 @@ from app.seed_context import seed_input_attributes
 EXPECTED_ALEMBIC_REVISION = "202610280001"
 SUCCESS_STATUSES = {PersonStatus.completed.value, PersonStatus.review_required.value}
 TERMINAL_STATUSES = SUCCESS_STATUSES | {PersonStatus.failed.value, PersonStatus.cancelled.value}
+INFRASTRUCTURE_WAIT = "INFRASTRUCTURE_WAIT:"
+INFRASTRUCTURE_RESUMING = "INFRASTRUCTURE_RESUMING:"
+logger = logging.getLogger(__name__)
+RECOVERY_REASONS = {
+    "DATABASE_UNAVAILABLE",
+    "PROVIDER_UNAVAILABLE",
+    "WORKER_INTERRUPTED",
+    "OPENROUTER_TIMEOUT",
+    "OPENROUTER_TRANSPORT_ERROR",
+    "OPENROUTER_HTTP_ERROR",
+    "RETRIEVAL_UNAVAILABLE",
+    "NETWORK_UNAVAILABLE",
+    "RATE_LIMITED",
+    "INFRASTRUCTURE_UNAVAILABLE",
+}
+
+
+def is_transient_database_error(exc: BaseException) -> bool:
+    """Classify connectivity/transaction outages without retrying credentials or SQL defects."""
+    if isinstance(exc, (PoolTimeoutError, DisconnectionError)):
+        return True
+    if not isinstance(exc, DBAPIError):
+        return False
+    original = exc.orig
+    state = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if state:
+        return state.startswith("08") or state in {"57P01", "57P02", "57P03", "53300", "40001", "40P01"}
+    message = str(original).casefold()
+    if any(
+        reason in message
+        for reason in ("password authentication failed", "no pg_hba.conf entry", "invalid connection option")
+    ):
+        return False
+    if exc.connection_invalidated or isinstance(original, (ConnectionError, TimeoutError, socket.gaierror)):
+        return True
+    return any(
+        reason in message
+        for reason in (
+            "connection refused",
+            "server closed the connection",
+            "connection reset",
+            "connection is closed",
+            "connection already closed",
+            "could not translate host name",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "nodename nor servname",
+            "timeout expired",
+            "connection timed out",
+            "could not connect to server",
+            "connection not open",
+            "network is unreachable",
+            "ssl connection has been closed",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -74,6 +132,7 @@ class Lease:
     seed: PersonSeed
     token: str
     created_at: datetime | None = None
+    checkpoint: ResearchResult | None = None
 
 
 def normalize_database_url(url: str) -> str:
@@ -88,9 +147,11 @@ class Database:
     def __init__(self, settings: Settings):
         self.settings = settings
         url = normalize_database_url(settings.DATABASE_URL)
-        kwargs: dict[str, Any] = {"future": True, "pool_pre_ping": True}
+        kwargs: dict[str, Any] = {"future": True, "pool_pre_ping": True, "pool_recycle": 300}
         if url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False}
+        elif url.startswith("postgresql"):
+            kwargs["connect_args"] = {"connect_timeout": 10}
         self.engine: Engine = create_engine(url, **kwargs)
         if url.startswith("sqlite"):
             event.listen(self.engine, "connect", _set_sqlite_foreign_keys)
@@ -103,6 +164,10 @@ class Store:
         self.database = Database(settings)
         self.engine = self.database.engine
         self.session_factory = self.database.session_factory
+
+    def invalidate_connections(self) -> None:
+        """Retire the pool after an outage; each operation already owns a fresh session."""
+        self.engine.dispose()
 
     def create_job(
         self,
@@ -161,6 +226,7 @@ class Store:
             if not job:
                 return None
             counts = self._counts(session, id)
+            recovery_state, recovery_reason, retry_at = self._job_recovery(session, id)
             return JobView(
                 job_id=job.job_id,
                 status=JobStatus(job.status),
@@ -169,6 +235,9 @@ class Store:
                 created_at=_aware(job.created_at),
                 started_at=_aware(job.started_at),
                 completed_at=_aware(job.completed_at),
+                recovery_state=recovery_state,
+                recovery_reason=recovery_reason,
+                retry_at=retry_at,
             )
 
     def get_results(self, id: str) -> JobResults | None:
@@ -214,12 +283,27 @@ class Store:
             job = session.get(JobRow, id)
             return list(job.columns_json) if job else []
 
-    def claim_task(self, worker_id: str) -> Lease | None:
+    def claim_task(self, worker_id: str, claim_token: str | None = None) -> Lease | None:
         now = utcnow()
-        token = str(uuid4())
+        token = claim_token or str(uuid4())
         expires = now + timedelta(seconds=self.settings.WORKER_LEASE_SECONDS)
         with self.session_factory.begin() as session:
             self._heartbeat(session, worker_id, now)
+            # Repeating a claim after a lost commit acknowledgement must not
+            # allocate a second person to the same logical claim request.
+            existing = session.scalar(
+                select(PersonTaskRow)
+                .join(JobRow, JobRow.job_id == PersonTaskRow.job_id)
+                .where(
+                    PersonTaskRow.lease_token == token,
+                    PersonTaskRow.leased_by == worker_id,
+                    PersonTaskRow.status == PersonStatus.researching.value,
+                    PersonTaskRow.lease_expires_at > now,
+                    JobRow.status != JobStatus.cancelled.value,
+                )
+            )
+            if existing is not None:
+                return self._lease(session, existing, token)
             self._recover_exhausted(session, now)
             if self.engine.dialect.name == "postgresql":
                 task = self._claim_postgresql(session, worker_id, token, now, expires)
@@ -227,13 +311,38 @@ class Store:
                 task = self._claim_guarded(session, worker_id, token, now, expires)
             if not task:
                 return None
-            return Lease(
-                job_id=task.job_id,
-                person_id=task.person_id,
-                seed=PersonSeed.model_validate(task.seed_json),
-                token=token,
-                created_at=_aware(task.created_at),
+            return self._lease(session, task, token)
+
+    def _lease(self, session: Session, task: PersonTaskRow, token: str) -> Lease:
+        profile = session.get(ProfileRow, task.person_id)
+        checkpoint = None
+        if profile:
+            checkpoint = ResearchResult(
+                profile=PersonProfile.model_validate(profile.data_json),
+                **{
+                    key: [
+                        model.model_validate(row.data_json)
+                        for row in session.scalars(
+                            select(row_type)
+                            .where(row_type.person_id == task.person_id)
+                            .order_by(row_type.created_at)
+                        )
+                    ]
+                    for key, row_type, model in (
+                        ("sources", SourceRow, SourceRecord),
+                        ("claims", EvidenceClaimRow, EvidenceClaim),
+                        ("usage", UsageRecordRow, UsageRecord),
+                    )
+                },
             )
+        return Lease(
+            job_id=task.job_id,
+            person_id=task.person_id,
+            seed=PersonSeed.model_validate(task.seed_json),
+            token=token,
+            created_at=_aware(task.created_at),
+            checkpoint=checkpoint,
+        )
 
     def renew_lease(self, lease: Lease) -> bool:
         now = utcnow()
@@ -263,11 +372,13 @@ class Store:
                 return False
             task = self._locked_task_for_completion(session, lease)
             if not task:
-                return False
+                return self._terminal_receipt(session, lease, result.profile.status.value)
             now = utcnow()
             task.status = result.profile.status.value
             task.error_code = None
-            task.lease_token = None
+            # Retain only the opaque token as an idempotent commit receipt. A
+            # terminal task is never claimable and has no active lease expiry.
+            task.lease_token = lease.token
             task.leased_by = None
             task.lease_expires_at = None
             task.completed_at = now
@@ -284,6 +395,8 @@ class Store:
             if not task:
                 return False
             self._replace_result(session, lease.job_id, lease.person_id, result, utcnow())
+            if task.error_code and task.error_code.startswith(INFRASTRUCTURE_RESUMING):
+                task.error_code = None
             return True
 
     def fail_task(self, lease: Lease, error_code: str, result: ResearchResult | None = None) -> bool:
@@ -293,10 +406,10 @@ class Store:
                 return False
             task = self._locked_task_for_completion(session, lease)
             if not task:
-                return False
+                return self._terminal_receipt(session, lease, PersonStatus.failed.value, error_code[:120])
             task.status = PersonStatus.failed.value
             task.error_code = error_code[:120]
-            task.lease_token = None
+            task.lease_token = lease.token
             task.leased_by = None
             task.lease_expires_at = None
             now = utcnow()
@@ -305,6 +418,63 @@ class Store:
                 self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
             return True
+
+    @staticmethod
+    def _terminal_receipt(session: Session, lease: Lease, status: str, error_code: str | None = None) -> bool:
+        task = session.get(PersonTaskRow, lease.person_id)
+        return bool(
+            task
+            and task.job_id == lease.job_id
+            and task.lease_token == lease.token
+            and task.status == status
+            and task.status in TERMINAL_STATUSES
+            and task.error_code == error_code
+            and task.completed_at is not None
+        )
+
+    def defer_task(
+        self, lease: Lease, error_code: str, retry_after: float = 5, result: ResearchResult | None = None
+    ) -> bool:
+        """Release recoverable work without converting an outage into a person failure."""
+        reason = error_code if error_code in RECOVERY_REASONS else "INFRASTRUCTURE_UNAVAILABLE"
+        marker = INFRASTRUCTURE_WAIT + reason
+        now = utcnow()
+        with self.session_factory.begin() as session:
+            job = self._lock_job(session, lease.job_id)
+            if not job or job.status == JobStatus.cancelled.value:
+                return False
+            query = select(PersonTaskRow).where(
+                PersonTaskRow.person_id == lease.person_id,
+                PersonTaskRow.job_id == lease.job_id,
+                PersonTaskRow.lease_token == lease.token,
+            )
+            if self.engine.dialect.name == "postgresql":
+                query = query.with_for_update()
+            task = session.scalar(query)
+            if not task:
+                return False
+            if task.status == PersonStatus.queued.value and task.error_code == marker:
+                return True
+            if task.status != PersonStatus.researching.value:
+                return False
+            if _aware(task.lease_expires_at) is None or _aware(task.lease_expires_at) <= now:
+                return False
+            # The same token/expiry fence used by checkpoint and completion also
+            # protects deferral. A newer owner or cancellation makes this a no-op.
+            if result is not None:
+                self._replace_result(session, lease.job_id, lease.person_id, result, now)
+            task.status = PersonStatus.queued.value
+            task.error_code = marker
+            task.attempts = max(0, task.attempts - 1)
+            task.leased_by = None
+            task.lease_expires_at = now + timedelta(seconds=max(1, retry_after))
+            task.completed_at = None
+            self._refresh_job_status(session, job)
+        logger.info(
+            "job_waiting_for_infrastructure",
+            extra={"job_id": lease.job_id, "person_id": lease.person_id, "error_code": reason},
+        )
+        return True
 
     def cancel_job(self, id: str) -> bool:
         now = utcnow()
@@ -343,7 +513,7 @@ class Store:
                 )
             )
 
-    def ready(self) -> bool:
+    def ready(self, *, raise_transient: bool = False) -> bool:
         try:
             with self.engine.connect() as conn:
                 conn.execute(select(1))
@@ -366,7 +536,9 @@ class Store:
                 version = conn.execute(text("select version_num from alembic_version")).scalar()
                 return version == EXPECTED_ALEMBIC_REVISION
             return True
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            if raise_transient and is_transient_database_error(exc):
+                raise
             return False
 
     def worker_is_alive(self) -> bool:
@@ -438,6 +610,9 @@ class Store:
             session.execute(stmt)
 
     def _recover_exhausted(self, session: Session, now: datetime) -> None:
+        # A dead worker or unavailable database is not a research failure. Give
+        # repeatedly interrupted leases a short pause, then reclaim the durable
+        # checkpoint without exhausting the person-level attempt allowance.
         exhausted = (
             (PersonTaskRow.status == PersonStatus.researching.value)
             & (PersonTaskRow.lease_expires_at <= now)
@@ -463,15 +638,26 @@ class Store:
             update(PersonTaskRow)
             .where(PersonTaskRow.job_id == job.job_id, exhausted)
             .values(
-                status=PersonStatus.failed.value,
-                error_code="WORKER_ATTEMPTS_EXHAUSTED",
+                status=PersonStatus.queued.value,
+                error_code=INFRASTRUCTURE_WAIT + "WORKER_INTERRUPTED",
+                attempts=max(0, self.settings.WORKER_MAX_ATTEMPTS - 1),
                 lease_token=None,
                 leased_by=None,
-                lease_expires_at=None,
-                completed_at=now,
+                lease_expires_at=now + timedelta(seconds=5),
+                completed_at=None,
             )
         )
         self._refresh_job_status(session, job)
+        logger.info("lease_recovered", extra={"job_id": job.job_id, "error_code": "WORKER_INTERRUPTED"})
+
+    @staticmethod
+    def _claimable(now: datetime):
+        return (
+            (PersonTaskRow.status == PersonStatus.queued.value)
+            & or_(PersonTaskRow.lease_expires_at.is_(None), PersonTaskRow.lease_expires_at <= now)
+        ) | (
+            (PersonTaskRow.status == PersonStatus.researching.value) & (PersonTaskRow.lease_expires_at <= now)
+        )
 
     def _claim_postgresql(
         self, session: Session, worker_id: str, token: str, now: datetime, expires: datetime
@@ -486,13 +672,7 @@ class Store:
                     select(PersonTaskRow.person_id).where(
                         PersonTaskRow.job_id == JobRow.job_id,
                         PersonTaskRow.attempts < self.settings.WORKER_MAX_ATTEMPTS,
-                        (
-                            (PersonTaskRow.status == PersonStatus.queued.value)
-                            | (
-                                (PersonTaskRow.status == PersonStatus.researching.value)
-                                & (PersonTaskRow.lease_expires_at <= now)
-                            )
-                        ),
+                        self._claimable(now),
                     )
                 ),
             )
@@ -507,13 +687,7 @@ class Store:
             .where(
                 PersonTaskRow.job_id == job.job_id,
                 PersonTaskRow.attempts < self.settings.WORKER_MAX_ATTEMPTS,
-                (
-                    (PersonTaskRow.status == PersonStatus.queued.value)
-                    | (
-                        (PersonTaskRow.status == PersonStatus.researching.value)
-                        & (PersonTaskRow.lease_expires_at <= now)
-                    )
-                ),
+                self._claimable(now),
             )
             .order_by(PersonTaskRow.created_at, PersonTaskRow.row_index)
             .with_for_update(skip_locked=True)
@@ -533,13 +707,7 @@ class Store:
             .where(
                 JobRow.status != JobStatus.cancelled.value,
                 PersonTaskRow.attempts < self.settings.WORKER_MAX_ATTEMPTS,
-                (
-                    (PersonTaskRow.status == PersonStatus.queued.value)
-                    | (
-                        (PersonTaskRow.status == PersonStatus.researching.value)
-                        & (PersonTaskRow.lease_expires_at <= now)
-                    )
-                ),
+                self._claimable(now),
             )
             .order_by(PersonTaskRow.created_at, PersonTaskRow.row_index)
             .limit(1)
@@ -555,13 +723,7 @@ class Store:
                 PersonTaskRow.person_id == candidate.person_id,
                 PersonTaskRow.attempts == candidate.attempts,
                 PersonTaskRow.attempts < self.settings.WORKER_MAX_ATTEMPTS,
-                (
-                    (PersonTaskRow.status == PersonStatus.queued.value)
-                    | (
-                        (PersonTaskRow.status == PersonStatus.researching.value)
-                        & (PersonTaskRow.lease_expires_at <= now)
-                    )
-                ),
+                self._claimable(now),
             )
             .values(
                 status=PersonStatus.researching.value,
@@ -575,7 +737,9 @@ class Store:
         ).rowcount
         if rows != 1:
             return None
+        prior_status, prior_error = candidate.status, candidate.error_code
         session.refresh(candidate)
+        self._mark_resuming(candidate, prior_status, prior_error)
         self._refresh_job_status(session, job)
         return candidate
 
@@ -589,6 +753,7 @@ class Store:
         now: datetime,
         expires: datetime,
     ) -> None:
+        self._mark_resuming(task, task.status, task.error_code)
         task.status = PersonStatus.researching.value
         task.attempts += 1
         task.lease_token = token
@@ -596,6 +761,20 @@ class Store:
         task.lease_expires_at = expires
         task.started_at = task.started_at or now
         self._refresh_job_status(session, job)
+
+    @staticmethod
+    def _mark_resuming(task: PersonTaskRow, prior_status: str, prior_error: str | None) -> None:
+        reason = None
+        if prior_error and prior_error.startswith(INFRASTRUCTURE_WAIT):
+            reason = prior_error.removeprefix(INFRASTRUCTURE_WAIT)
+        elif prior_status == PersonStatus.researching.value:
+            reason = "WORKER_INTERRUPTED"
+        if reason:
+            task.error_code = INFRASTRUCTURE_RESUMING + reason
+            logger.info(
+                "research_resumed",
+                extra={"job_id": task.job_id, "person_id": task.person_id, "error_code": reason},
+            )
 
     def _lock_job(self, session: Session, job_id: str) -> JobRow | None:
         if self.engine.dialect.name == "sqlite":
@@ -754,6 +933,10 @@ class Store:
                 result, PersonSeed.model_validate(task.seed_json), self.settings.SCORING
             )
             result.profile = finalize_display(project_stored_seed(result.profile, task.seed_json))
+            # Recovery cursors and cached request outputs belong to worker
+            # persistence, not the public diagnostics/result contract.
+            if hasattr(result.profile.metrics, "recovery"):
+                result.profile.metrics.recovery = {}
             result.profile.status = PersonStatus(task.status)
             if task.status in {"queued", "researching", "cancelled"}:
                 result.profile.research_status = task.status
@@ -802,6 +985,38 @@ class Store:
         for status, count in rows:
             counts[str(status)] = int(count)
         return counts
+
+    @staticmethod
+    def _job_recovery(session: Session, job_id: str) -> tuple[str | None, str | None, datetime | None]:
+        tasks = session.execute(
+            select(PersonTaskRow.status, PersonTaskRow.error_code, PersonTaskRow.lease_expires_at).where(
+                PersonTaskRow.job_id == job_id,
+                PersonTaskRow.status.in_([PersonStatus.queued.value, PersonStatus.researching.value]),
+            )
+        ).all()
+        waiting = []
+        resuming = []
+        now = utcnow()
+        for status, code, expires in tasks:
+            if code and code.startswith(INFRASTRUCTURE_WAIT):
+                reason = code.removeprefix(INFRASTRUCTURE_WAIT)
+                waiting.append((reason, _aware(expires)))
+            elif status == PersonStatus.researching.value and expires and _aware(expires) <= now:
+                waiting.append(("WORKER_INTERRUPTED", None))
+            elif code and code.startswith(INFRASTRUCTURE_RESUMING):
+                resuming.append(code.removeprefix(INFRASTRUCTURE_RESUMING))
+        if waiting:
+            reason = waiting[0][0]
+            retry_times = [retry_at for _, retry_at in waiting if retry_at is not None]
+            return (
+                "reconnecting",
+                reason if reason in RECOVERY_REASONS else "INFRASTRUCTURE_UNAVAILABLE",
+                min(retry_times) if retry_times else None,
+            )
+        if resuming:
+            reason = resuming[0]
+            return "resuming", reason if reason in RECOVERY_REASONS else "INFRASTRUCTURE_UNAVAILABLE", None
+        return None, None, None
 
     def _refresh_job_status(self, session: Session, job: JobRow) -> None:
         if job.status == JobStatus.cancelled.value:

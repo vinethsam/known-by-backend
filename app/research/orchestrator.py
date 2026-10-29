@@ -57,6 +57,28 @@ from app.seed_context import seed_context_values
 
 logger = logging.getLogger(__name__)
 
+
+class RecoverableResearchError(RuntimeError):
+    """A bounded request failed; the durable person task should wait and resume."""
+
+    def __init__(self, error_code, retry_after_seconds=None):
+        super().__init__(error_code)
+        self.error_code = error_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _recover_infrastructure(exc):
+    if getattr(exc, "response_uncertain", False):
+        raise BudgetExceeded("PROVIDER_RESPONSE_UNCERTAIN") from exc
+    if getattr(exc, "transient", False) and (
+        not isinstance(exc, FetchError) or getattr(exc, "infrastructure", False)
+    ):
+        raise RecoverableResearchError(
+            "RETRIEVAL_UNAVAILABLE" if isinstance(exc, FetchError) else "PROVIDER_UNAVAILABLE",
+            getattr(exc, "retry_after_seconds", None),
+        ) from exc
+
+
 _RETRYABLE_PIPELINE_ERRORS = (
     "SOURCE_ADVISOR_VALIDATION_ERROR",
     "SOURCE_ADVISOR_PROVIDER_ERROR",
@@ -80,6 +102,8 @@ def _empty_profile_failure_reason(
     selection_eligible_source_ids: set[str],
 ) -> str:
     present = set(metrics.error_codes)
+    if metrics.stop_reason == "PROVIDER_RESPONSE_UNCERTAIN":
+        return metrics.stop_reason
     # RETRIEVAL_FAILED is reserved for runs in which no attempted page was
     # successfully obtained. A later identity/grounding decision is not retrieval.
     if sources and not any(200 <= source.fetch_status < 300 for source in sources):
@@ -148,32 +172,74 @@ class ResearchOrchestrator:
         self._extraction_slots = asyncio.Semaphore(settings.MAX_CONCURRENT_EXTRACTIONS)
 
     async def research(
-        self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None
+        self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None, *, resume=None
     ) -> ResearchResult:
         with person_performance(job_id, person_id):
-            return await self._research(job_id, person_id, seed, checkpoint)
+            return await self._research(job_id, person_id, seed, checkpoint, resume=resume)
 
     async def _research(
-        self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None
+        self, job_id: str, person_id: str, seed: PersonSeed, checkpoint=None, *, resume=None
     ) -> ResearchResult:
         settings = self.settings
-        started = utcnow()
-        metrics = ResearchMetrics()
-        usage, sources, claims = [], [], []
+        resume = resume.model_copy(deep=True) if resume is not None else None
+        started = resume.profile.started_at if resume else utcnow()
+        metrics = resume.profile.metrics if resume else ResearchMetrics()
+        metrics.stop_reason = metrics.failure_reason = None
+        usage, sources, claims = (resume.usage, resume.sources, resume.claims) if resume else ([], [], [])
         client = BudgetedModel(self.model, settings, metrics, usage)
         advisor = SourceAdvisor(client, max_queries=settings.MAX_SEARCH_QUERIES_PER_PERSON)
         context = {"job_id": job_id, "person_id": person_id}
-        seen_urls, seen_hashes, queries_done, discovered_urls = set(), set(), set(), set()
-        validated_candidates, pending_candidates = {}, {}
-        rejected_urls = set()
+        cursor = metrics.recovery.get("cursor", {})
+        seen_urls = set(cursor.get("seen_urls", [s.canonical_url for s in sources]))
+        seen_hashes = set(cursor.get("seen_hashes", [s.content_hash for s in sources if s.content_hash]))
+        queries_done, discovered_urls = (
+            set(cursor.get("queries_done", [])),
+            set(cursor.get("discovered_urls", [])),
+        )
+
+        def restore_candidates(key):
+            return {c.url: c for item in cursor.get(key, []) if (c := SourceCandidate.model_validate(item))}
+
+        validated_candidates, pending_candidates = (
+            restore_candidates("validated"),
+            restore_candidates("pending"),
+        )
+        active_candidates = restore_candidates("active")
+        pending_candidates.update(active_candidates)
+        for url in active_candidates:
+            seen_urls.discard(canonicalise_url(url))
+            for source in sources:
+                if source.requested_url == url:
+                    seen_urls.discard(source.canonical_url)
+        active_urls = set(active_candidates)
+        seen_hashes = {
+            s.content_hash for s in sources if s.content_hash and s.requested_url not in active_urls
+        }
+        active_candidates = {}
+        accepted_sources = set(cursor.get("accepted_sources", []))
+        applied_chunks = set(cursor.get("applied_chunks", []))
+        rejected_urls = set(cursor.get("rejected_urls", []))
         trace_candidate_urls, trace_rejected_urls = set(), set()
-        no_new_claims = 0
+        no_new_claims = cursor.get("no_new_claims", 0)
         citation_count = 0
         eligible_candidate_count = 0
         candidates_filtered_empty = False
         cached_profile = None
         evidence_changed = True
         checkpoint_lock = asyncio.Lock()
+        queue = deque(cursor.get("queue", [build_query(seed)]))
+        active_query = cursor.get("active_query")
+        active_query_limit = cursor.get("active_query_limit")
+        retry_query_limit = active_query_limit if active_query else None
+        if active_query:
+            queries_done.discard(query_key(active_query))
+            metrics.queries_performed = max(0, metrics.queries_performed - 1)
+            queue.appendleft(active_query)
+            active_query = None
+        fallback_queued = cursor.get("fallback_queued", False)
+        role_completion_queued = cursor.get("role_completion_queued", False)
+        wikipedia_completion_queued = cursor.get("wikipedia_completion_queued", False)
+        last_planned_clues = None
 
         def result():
             nonlocal cached_profile, evidence_changed
@@ -221,18 +287,42 @@ class ResearchOrchestrator:
             )
 
         async def save():
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError()
             if checkpoint is not None:
                 async with checkpoint_lock:
+                    metrics.recovery["cursor"] = {
+                        "seen_urls": sorted(seen_urls),
+                        "seen_hashes": sorted(seen_hashes),
+                        "queries_done": sorted(queries_done),
+                        "discovered_urls": sorted(discovered_urls),
+                        "validated": [c.model_dump(mode="json") for c in validated_candidates.values()],
+                        "pending": [c.model_dump(mode="json") for c in pending_candidates.values()],
+                        "active": [c.model_dump(mode="json") for c in active_candidates.values()],
+                        "accepted_sources": sorted(accepted_sources),
+                        "applied_chunks": sorted(applied_chunks),
+                        "rejected_urls": sorted(rejected_urls),
+                        "no_new_claims": no_new_claims,
+                        "queue": list(queue),
+                        "active_query": active_query,
+                        "active_query_limit": active_query_limit,
+                        "fallback_queued": fallback_queued,
+                        "role_completion_queued": role_completion_queued,
+                        "wikipedia_completion_queued": wikipedia_completion_queued,
+                    }
                     # The store runs in a thread. Freeze mutable usage/evidence while
                     # other requests finish; sessions never cross network awaits.
                     current = result().model_copy(deep=True)
                     current.profile.research_status = "researching"
                     await checkpoint(current)
 
-        client.checkpoint = save
+        client.checkpoint = save if checkpoint is not None else None
 
         def stopped(*, include_target: bool = True):
-            if metrics.sources_fetched >= settings.MAX_SOURCES_PER_PERSON:
+            unfinished = any(
+                s.requested_url in pending_candidates or s.requested_url in active_candidates for s in sources
+            )
+            if metrics.sources_fetched >= settings.MAX_SOURCES_PER_PERSON and not unfinished:
                 metrics.stop_reason = "MAX_SOURCES"
                 return True
             if no_new_claims >= settings.MAX_SOURCES_WITHOUT_NEW_CLAIMS:
@@ -263,21 +353,25 @@ class ResearchOrchestrator:
             if canonical in seen_urls:
                 return
             seen_urls.add(canonical)
-            metrics.sources_fetched += 1
-            source = SourceRecord(
-                person_id=person_id,
-                requested_url=candidate.url,
-                final_url=candidate.url,
-                canonical_url=canonical,
-                domain=domain_key(canonical),
-                title=candidate.title,
-                source_type=candidate.source_type,
-                preferred_source=candidate.preferred_source,
-            )
-            sources.append(source)
+            active_candidates[candidate.url] = candidate
+            source = next((s for s in sources if s.requested_url == candidate.url), None)
+            if source is None:
+                metrics.sources_fetched += 1
+                source = SourceRecord(
+                    person_id=person_id,
+                    requested_url=candidate.url,
+                    final_url=candidate.url,
+                    canonical_url=canonical,
+                    domain=domain_key(canonical),
+                    title=candidate.title,
+                    source_type=candidate.source_type,
+                    preferred_source=candidate.preferred_source,
+                )
+                sources.append(source)
             evidence_changed = True
             before = len(claims)
             completed_extraction = False
+            interrupted = False
             timer = monotonic()
             try:
                 if isinstance(page, Outcome):
@@ -308,7 +402,9 @@ class ResearchOrchestrator:
                 if source.identity.rejected or source.identity.score < settings.SCORING.identity_minimum:
                     source.processing_status = "identity_rejected"
                     return
-                metrics.sources_accepted += 1
+                if source.source_id not in accepted_sources:
+                    accepted_sources.add(source.source_id)
+                    metrics.sources_accepted += 1
                 async with aclosing(
                     extract_chunks(
                         client,
@@ -321,6 +417,9 @@ class ResearchOrchestrator:
                     )
                 ) as extractions:
                     async for chunk, response in extractions:
+                        chunk_key = hashlib.sha256((source.source_id + chunk).encode()).hexdigest()
+                        if chunk_key in applied_chunks:
+                            continue
                         rejected_claims: Counter[str] = Counter()
                         adjusted_claims: Counter[str] = Counter()
                         extracted, reasons = validate_claims(
@@ -339,6 +438,7 @@ class ResearchOrchestrator:
                         metrics.error_codes.extend(
                             code for code in reasons if code not in metrics.error_codes
                         )
+                        applied_chunks.add(chunk_key)
                         if rejected_claims or adjusted_claims:
                             log_decision(
                                 "claim_validation",
@@ -355,10 +455,15 @@ class ResearchOrchestrator:
                 source.processing_status = "extracted"
                 completed_extraction = True
             except (FetchError, ValueError) as exc:
+                if isinstance(exc, FetchError) and getattr(exc, "infrastructure", False):
+                    interrupted = True
+                    _recover_infrastructure(exc)
                 source.processing_status = "failed"
                 source.error_code = "RETRIEVAL_FAILED" if isinstance(exc, FetchError) else "CONTENT_INVALID"
                 metrics.error_codes.append(source.error_code)
             except OpenRouterError as exc:
+                interrupted = bool(getattr(exc, "transient", False))
+                _recover_infrastructure(exc)
                 source.processing_status = "extraction_failed"
                 source.error_code = "EXTRACTION_PROVIDER_FAILED"
                 metrics.error_codes.append(source.error_code)
@@ -379,14 +484,19 @@ class ResearchOrchestrator:
                         response_body_received=exc.response_body_received,
                     ),
                 )
+            except (asyncio.CancelledError, RecoverableResearchError, BudgetExceeded):
+                interrupted = True
+                raise
             finally:
+                if not interrupted:
+                    active_candidates.pop(candidate.url, None)
                 evidence_changed = True
                 # Retrieval, duplicate and identity failures are not evidence that
                 # later ranked sources have low marginal value. Count only a source
                 # whose extraction completed and produced no new grounded claims.
                 if len(claims) > before:
                     no_new_claims = 0
-                elif completed_extraction:
+                elif completed_extraction and not any(c.source_id == source.source_id for c in claims):
                     no_new_claims += 1
                 await save()
                 logger.info(
@@ -415,11 +525,15 @@ class ResearchOrchestrator:
                     trace_rejected_urls.add(trace_url)
             for url in set(pending_candidates) & (seen_urls | rejected_urls):
                 pending_candidates.pop(url, None)
+            supplied_urls = {c.url for c in candidates}
             candidates = [
                 c
                 for c in deduplicate_candidates(candidates, settings)
                 if canonicalise_url(c.url) not in seen_urls | rejected_urls
             ]
+            retained_urls = {c.url for c in candidates}
+            for url in supplied_urls - retained_urls:
+                pending_candidates.pop(url, None)
             if not candidates:
                 if supplied_count:
                     candidates_filtered_empty = True
@@ -435,6 +549,14 @@ class ResearchOrchestrator:
                         ),
                     )
                 return 0
+            # Keep candidate IDs stable across a crash between paid validation
+            # and applying its durable receipt, including supplied URLs.
+            candidates = [pending_candidates.get(c.url, c) for c in candidates]
+            pending_candidates.update({c.url: c for c in candidates})
+            await save()
+            if metrics.sources_fetched >= settings.MAX_SOURCES_PER_PERSON:
+                existing_urls = {s.requested_url for s in sources}
+                candidates = [c for c in candidates if c.url in existing_urls]
             previous_discovered = len(discovered_urls)
             discovered_urls.update(canonicalise_url(candidate.url) for candidate in candidates)
             count("candidates_discovered", len(discovered_urls) - previous_discovered)
@@ -479,6 +601,7 @@ class ResearchOrchestrator:
                         seed, candidate
                     ):
                         rejected_urls.add(candidate.url)
+                        pending_candidates.pop(candidate.url, None)
                         continue
                     # Duplicate suggestions remain advisory; equality removes evidence.
                     candidate.source_type = decision.source_type
@@ -486,6 +609,7 @@ class ResearchOrchestrator:
                     validated_candidates[candidate.url] = candidate
                 if not source_policy_allows(candidate.url, source_type=candidate.source_type):
                     rejected_urls.add(candidate.url)
+                    pending_candidates.pop(candidate.url, None)
                     continue
                 eligible.append(candidate)
                 if limit is not None:
@@ -525,7 +649,11 @@ class ResearchOrchestrator:
                 if stopped(include_target=False):
                     return 0
                 return min(
-                    settings.MAX_CONCURRENT_FETCHES, settings.MAX_SOURCES_PER_PERSON - metrics.sources_fetched
+                    settings.MAX_CONCURRENT_FETCHES,
+                    max(
+                        1 if any(s.requested_url in pending_candidates for s in sources) else 0,
+                        settings.MAX_SOURCES_PER_PERSON - metrics.sources_fetched,
+                    ),
                 )
 
             if selected and not stopped(include_target=False):
@@ -559,7 +687,8 @@ class ResearchOrchestrator:
                         SourceCandidate(url=p.requested_url, origin="configured_structured") for p in pages
                     ]
                     await validate_and_process(candidates, {p.requested_url: p for p in pages})
-                except FetchError:
+                except FetchError as exc:
+                    _recover_infrastructure(exc)
                     metrics.error_codes.append("STRUCTURED_RETRIEVAL_FAILED")
             preferred = [
                 SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
@@ -567,14 +696,9 @@ class ResearchOrchestrator:
             ]
             if preferred and not stopped(include_target=False):
                 await validate_and_process(preferred)
-            if not stopped():
+            if not stopped(include_target=not bool(pending_candidates)):
                 # Start with the exact name and supplied clues. Pay for further planning
                 # only after useful already-discovered candidates have been processed.
-                queue = deque([build_query(seed)])
-                fallback_queued = False
-                role_completion_queued = False
-                wikipedia_completion_queued = False
-                last_planned_clues = None
                 important_completion_fields = {
                     ProfileField.organisation,
                     ProfileField.job_title,
@@ -645,16 +769,22 @@ class ResearchOrchestrator:
                             list(pending_candidates.values()), limit=settings.SOURCES_PER_ROUND
                         )
                         continue
-                    if metrics.queries_performed >= settings.MAX_SEARCH_QUERIES_PER_PERSON:
+                    if (
+                        metrics.queries_performed >= settings.MAX_SEARCH_QUERIES_PER_PERSON
+                        and retry_query_limit is None
+                    ):
                         metrics.stop_reason = "MAX_QUERIES"
                         break
-                    if metrics.web_search_calls_reserved >= settings.MAX_SOURCE_MODEL_TOOL_CALLS:
+                    if (
+                        metrics.web_search_calls_reserved >= settings.MAX_SOURCE_MODEL_TOOL_CALLS
+                        and retry_query_limit is None
+                    ):
                         metrics.stop_reason = "MAX_SEARCH_TOOL_CALLS"
                         break
                     remaining_results = (
                         settings.MAX_TOTAL_SEARCH_RESULTS_PER_PERSON - metrics.search_results_reserved
                     )
-                    if remaining_results <= 0:
+                    if remaining_results <= 0 and retry_query_limit is None:
                         metrics.stop_reason = "MAX_SEARCH_RESULTS"
                         break
                     if not queue:
@@ -799,6 +929,7 @@ class ResearchOrchestrator:
                                     seed, list(clues), dict(context, unresolved_fields=unresolved)
                                 )
                         except OpenRouterError as exc:
+                            _recover_infrastructure(exc)
                             error_code = _source_advisor_error_code(exc)
                             metrics.error_codes.append(error_code)
                             logger.error(
@@ -858,7 +989,13 @@ class ResearchOrchestrator:
                     query = queue.popleft()
                     key = query_key(query)
                     if key in queries_done:
+                        active_query = None
                         continue
+                    active_query = query
+                    active_query_limit = retry_query_limit or min(
+                        settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results
+                    )
+                    retry_query_limit = None
                     queries_done.add(key)
                     metrics.queries_performed += 1
                     count("search_queries")
@@ -867,10 +1004,12 @@ class ResearchOrchestrator:
                             candidates = await client.search(
                                 self.search,
                                 query,
-                                min(settings.MAX_SEARCH_RESULTS_PER_QUERY, remaining_results),
+                                active_query_limit,
                                 context,
                             )
                     except SearchProviderError as exc:
+                        _recover_infrastructure(exc)
+                        active_query = None
                         metrics.error_codes.append(exc.error_code)
                         logger.error(
                             "web_search_failed",
@@ -888,6 +1027,9 @@ class ResearchOrchestrator:
                             ),
                         )
                         continue
+                    pending_candidates.update({candidate.url: candidate for candidate in candidates})
+                    active_query = None
+                    await save()
                     citation_count += len(candidates)
                     logger.info(
                         "web_search_completed",
@@ -931,8 +1073,17 @@ class ResearchOrchestrator:
         except BudgetExceeded as exc:
             metrics.stop_reason = str(exc)
         except OpenRouterError as exc:
-            metrics.error_codes.append(_source_advisor_error_code(exc))
-            metrics.stop_reason = "PROVIDER_FAILED"
+            if getattr(exc, "response_uncertain", False):
+                metrics.stop_reason = "PROVIDER_RESPONSE_UNCERTAIN"
+            else:
+                if getattr(exc, "transient", False):
+                    await save()
+                    _recover_infrastructure(exc)
+                metrics.error_codes.append(_source_advisor_error_code(exc))
+                metrics.stop_reason = "PROVIDER_FAILED"
+        except RecoverableResearchError:
+            await save()
+            raise
         if not metrics.error_codes and not metrics.stop_reason:
             if metrics.queries_performed and citation_count == 0:
                 metrics.stop_reason = "NO_SEARCH_CITATIONS"

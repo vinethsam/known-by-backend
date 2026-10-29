@@ -11,6 +11,7 @@ import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
+from sqlalchemy.exc import OperationalError
 
 from alembic import command
 from app.api.routes import create_app
@@ -20,7 +21,14 @@ from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import ResearchOrchestrator
 from app.retrieval.service import FetchError, RetrievalService, RetrievedPage, StaticFetcher
-from app.schemas import PersonSeed, ProfileField, SourceCandidate
+from app.schemas import (
+    FieldDecision,
+    PersonProfile,
+    PersonSeed,
+    ProfileField,
+    ResearchResult,
+    SourceCandidate,
+)
 from app.worker import process_lease, run_worker
 
 
@@ -105,7 +113,16 @@ def fake_services(
         calls["fetched"].append(target)
         assert request.headers["X-Worker-Secret"] == "fake-worker-key"
         if target in failed_fetch_urls:
-            return httpx.Response(500, json={"error": "fixture retrieval failure"})
+            return httpx.Response(
+                200,
+                json={
+                    "requested_url": target,
+                    "final_url": target,
+                    "status": 502,
+                    "content_type": "text/html",
+                    "html": "",
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -474,7 +491,7 @@ async def test_wikipedia_fallback_survives_source_planner_failure(tmp_path, monk
         search_urls=results_for_round,
         page_text="Jane Doe has a public biography.",
         extraction_mapping={"full_name": "Jane Doe"},
-        plan_status=503,
+        plan_status=400,
     )
 
     result = await pipeline.research(
@@ -641,6 +658,132 @@ async def test_batch_worker_reuses_retrieval_and_stops(tmp_path, monkeypatch):
         p.result.profile.coverage == 85.71 and p.result.profile.legacy_coverage == 100
         for p in store.get_results(job.job_id).people
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_checkpoint_and_finish_without_restarting_research(tmp_path, monkeypatch):
+    settings = configured(tmp_path, PERSON_TIMEOUT_SECONDS=0.4)
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe", organisation="Example Foundation")])
+    pipeline, _ = fake_services(settings, store, monkeypatch)
+    attempts = {"research": 0, "checkpoint": 0, "finish_task": 0, "fail_task": 0}
+
+    async def research(_job_id, person_id, _seed, checkpoint, **_kwargs):
+        attempts["research"] += 1
+        result = ResearchResult(
+            profile=PersonProfile(
+                person_id=person_id,
+                input_name="Jane Doe",
+                status="review_required",
+                fields={field: FieldDecision() for field in ProfileField},
+                profile_confidence=50,
+                coverage=50,
+                review_required=True,
+            )
+        )
+        await checkpoint(result)
+        return result
+
+    monkeypatch.setattr(pipeline, "research", research)
+    for name in ("checkpoint", "finish_task"):
+        original = getattr(store, name)
+
+        def interrupted(*args, _name=name, _original=original):
+            attempts[_name] += 1
+            if attempts[_name] == 1:
+                raise OperationalError("redacted", {}, ConnectionError("connection reset"))
+            return _original(*args)
+
+        monkeypatch.setattr(store, name, interrupted)
+    original_fail = store.fail_task
+
+    def fail(*args):
+        attempts["fail_task"] += 1
+        return original_fail(*args)
+
+    monkeypatch.setattr(store, "fail_task", fail)
+    async with asyncio.timeout(5):
+        await process_lease(store, pipeline, store.claim_task("worker"), settings)
+    assert attempts["research"] == 1
+    assert attempts["checkpoint"] >= 2 and attempts["finish_task"] == 2
+    assert attempts["fail_task"] == 0
+    assert store.get_job(job.job_id).status == "completed"
+    assert store.get_job(job.job_id).counts["review_required"] == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_recovers_startup_heartbeat_and_uncertain_claim(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_CONCURRENT_PEOPLE=1)
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe", organisation="Example Foundation")])
+    pipeline, _ = fake_services(settings, store, monkeypatch)
+    attempts = {"ready": 0, "heartbeat": 0, "claim_task": 0}
+    tokens = []
+    monkeypatch.setattr("app.worker.random.uniform", lambda *_args: 0.01)
+    for name in attempts:
+        original = getattr(store, name)
+
+        def interrupted(*args, _name=name, _original=original, **kwargs):
+            attempts[_name] += 1
+            if _name == "claim_task":
+                tokens.append(args[1])
+            if attempts[_name] == 1:
+                if _name == "claim_task":
+                    _original(*args, **kwargs)
+                raise OperationalError("redacted", {}, ConnectionError("connection refused"))
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, interrupted)
+    stop = asyncio.Event()
+    worker = asyncio.create_task(run_worker(settings, store, pipeline, stop))
+    try:
+        async with asyncio.timeout(5):
+            while (await asyncio.to_thread(store.get_job, job.job_id)).status != "completed":
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.wait_for(worker, 2)
+    assert all(attempts[name] >= 2 for name in attempts)
+    assert tokens[0] == tokens[1]
+    assert len(store.get_results(job.job_id).people) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_stops_during_database_wait_and_cancellation_still_fences_results(tmp_path, monkeypatch):
+    settings = configured(tmp_path, MAX_CONCURRENT_PEOPLE=1)
+    store = migrated_store(settings)
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+    attempts = 0
+    calls_before_disconnect = None
+    original_checkpoint = store.checkpoint
+
+    def disconnected(lease, result):
+        nonlocal attempts, calls_before_disconnect
+        if any(source.processing_status == "processed" for source in result.sources):
+            attempts += 1
+            if calls_before_disconnect is None:
+                calls_before_disconnect = len(calls["models"])
+            raise OperationalError("redacted", {}, ConnectionError("connection reset"))
+        return original_checkpoint(lease, result)
+
+    monkeypatch.setattr(store, "checkpoint", disconnected)
+    stop = asyncio.Event()
+    worker = asyncio.create_task(run_worker(settings, store, pipeline, stop))
+    try:
+        async with asyncio.timeout(5):
+            while not attempts:
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.wait_for(worker, 2)
+    assert calls["fetched"]
+    assert len(calls["models"]) == calls_before_disconnect
+    assert store.get_job(job.job_id).counts["failed"] == 0
+    monkeypatch.setattr(store, "checkpoint", original_checkpoint)
+    assert store.cancel_job(job.job_id)
+    assert store.get_job(job.job_id).status == "cancelled"
+    assert store.claim_task("replacement") is None
 
 
 @pytest.mark.asyncio
@@ -922,6 +1065,29 @@ def test_api_health_ready_auth_and_immediate_job(tmp_path):
         assert results["people"][0]["result"] is None
         assert client.get(f"/v1/jobs/{uuid4()}", headers=AUTH).status_code == 404
         assert client.post(f"/v1/jobs/{job_id}/cancel", headers=AUTH).json()["status"] == "cancelled"
+
+
+def test_api_database_disconnect_returns_recoverable_sanitized_response(tmp_path, monkeypatch):
+    client, store = api_client(tmp_path)
+    created = store.create_job([PersonSeed(full_name="Jane Doe")])
+    original_get_job = store.get_job
+
+    def disconnected(_job_id):
+        raise OperationalError(
+            "private statement", {"seed": "private seed"}, ConnectionError("connection reset")
+        )
+
+    monkeypatch.setattr(store, "get_job", disconnected)
+    with client:
+        response = client.get(f"/v1/jobs/{created.job_id}", headers=AUTH)
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "5"
+        assert response.json()["code"] == "DATABASE_UNAVAILABLE"
+        assert "private" not in response.text
+        monkeypatch.setattr(store, "get_job", original_get_job)
+        recovered = client.get(f"/v1/jobs/{created.job_id}", headers=AUTH)
+        assert recovered.status_code == 200
+        assert recovered.json()["counts"]["queued"] == 1
 
 
 @pytest.mark.parametrize("kind", ["csv", "xlsx"])

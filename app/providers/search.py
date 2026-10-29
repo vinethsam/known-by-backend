@@ -33,11 +33,21 @@ class SearchProviderError(RuntimeError):
         usage: list[UsageRecord] | None = None,
         error_code: str = "OPENROUTER_PROVIDER_ERROR",
         http_status: int | None = None,
+        retryable: bool = False,
+        transient: bool = False,
+        retry_after_seconds: float | None = None,
+        response_uncertain: bool = False,
+        infrastructure: bool = False,
     ) -> None:
         super().__init__(message)
         self.usage = usage or []
         self.error_code = error_code
         self.http_status = http_status
+        self.retryable = retryable
+        self.transient = transient
+        self.retry_after_seconds = retry_after_seconds
+        self.response_uncertain = response_uncertain
+        self.infrastructure = infrastructure
 
 
 class SearchProvider(Protocol):
@@ -83,6 +93,11 @@ class OpenRouterSearchProvider:
                 usage=exc.usage,
                 error_code=exc.error_code,
                 http_status=exc.http_status,
+                retryable=exc.retryable,
+                transient=exc.transient,
+                retry_after_seconds=exc.retry_after_seconds,
+                response_uncertain=exc.response_uncertain,
+                infrastructure=exc.infrastructure,
             ) from exc
         results = self._parse_results(data, count)
         logger.info(

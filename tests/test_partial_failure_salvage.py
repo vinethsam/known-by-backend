@@ -1,5 +1,6 @@
 """Partial failures preserve independently valid, grounded, identity-safe evidence."""
 
+import asyncio
 from datetime import date
 
 import pytest
@@ -9,6 +10,103 @@ from test_pipeline_api import configured, fake_services, migrated_store
 from app.research.claims import validate_claims
 from app.schemas import ExtractedClaim, ExtractionResponse, PersonSeed, ProfileField, SourceType
 from app.worker import process_lease
+
+
+@pytest.mark.asyncio
+async def test_resume_last_permitted_source_reuses_applied_chunk_and_paid_receipts(tmp_path, monkeypatch):
+    settings = configured(
+        tmp_path,
+        MAX_SOURCES_PER_PERSON=1,
+        MAX_SEARCH_QUERIES_PER_PERSON=1,
+        MAX_SOURCE_MODEL_TOOL_CALLS=1,
+        SOURCES_PER_ROUND=1,
+        TARGET_FIELD_CONFIDENCE=100,
+    )
+    store = migrated_store(settings)
+    url = "https://employer.example.org/jane"
+    seed = PersonSeed(full_name="Jane Doe", organisation="Example Foundation", preferred_urls=[url])
+    pipeline, calls = fake_services(settings, store, monkeypatch)
+    snapshots = []
+
+    async def checkpoint(result):
+        if not snapshots and result.claims and result.profile.metrics.recovery["cursor"]["active"]:
+            snapshots.append(result.model_copy(deep=True))
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.research("resume-job", "resume-person", seed, checkpoint)
+    saved = snapshots[0]
+    paid_calls = len(calls["models"])
+    claim_ids = [claim.claim_id for claim in saved.claims]
+    assert saved.profile.metrics.sources_fetched == settings.MAX_SOURCES_PER_PERSON
+    assert saved.profile.metrics.recovery["cursor"]["applied_chunks"]
+
+    async def resumed_checkpoint(_result):
+        pass
+
+    result = await pipeline.research("resume-job", "resume-person", seed, resumed_checkpoint, resume=saved)
+    assert len(calls["models"]) == paid_calls
+    assert result.profile.metrics.llm_calls == saved.profile.metrics.llm_calls
+    assert result.profile.metrics.claims_extracted == saved.profile.metrics.claims_extracted
+    assert result.profile.metrics.sources_fetched == result.profile.metrics.sources_accepted == 1
+    assert [claim.claim_id for claim in result.claims] == claim_ids
+    assert result.sources[0].processing_status == "extracted"
+    assert result.profile.metrics.stop_reason == "MAX_SOURCES"
+    await pipeline.retrieval.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_cached_search_and_validation_receipts_keep_candidates_without_new_paid_calls(
+    tmp_path, monkeypatch
+):
+    settings = configured(
+        tmp_path,
+        MAX_SOURCES_PER_PERSON=1,
+        MAX_SEARCH_QUERIES_PER_PERSON=1,
+        MAX_SOURCE_MODEL_TOOL_CALLS=1,
+        MAX_TOTAL_SEARCH_RESULTS_PER_PERSON=3,
+        MAX_SEARCH_RESULTS_PER_QUERY=3,
+        SOURCES_PER_ROUND=1,
+        TARGET_FIELD_CONFIDENCE=100,
+    )
+    store = migrated_store(settings)
+    url = "https://employer.example.org/jane"
+    seed = PersonSeed(full_name="Jane Doe", organisation="Example Foundation")
+    pipeline, calls = fake_services(settings, store, monkeypatch, search_urls=[url])
+    snapshots = []
+
+    async def checkpoint(result):
+        recovery = result.profile.metrics.recovery
+        completed = [receipt for receipt in recovery["requests"].values() if receipt["state"] == "completed"]
+        search_saved = not snapshots and recovery["cursor"]["active_query"] and completed
+        validation_saved = len(snapshots) == 1 and any(
+            isinstance(receipt.get("result"), list)
+            and receipt["result"]
+            and isinstance(receipt["result"][0], dict)
+            and "decisions" in receipt["result"][0]
+            for receipt in completed
+        )
+        if search_saved or validation_saved:
+            snapshots.append(result.model_copy(deep=True))
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.research("resume-job", "resume-person", seed, checkpoint)
+    assert calls["advisor_requests"] == 0
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.research("resume-job", "resume-person", seed, checkpoint, resume=snapshots[0])
+    assert len(calls["queries"]) == calls["advisor_requests"] == 1
+    candidate = snapshots[1].profile.metrics.recovery["cursor"]["pending"][0]
+    search_receipt = next(iter(snapshots[0].profile.metrics.recovery["requests"].values()))
+    assert candidate["candidate_id"] == search_receipt["result"][0]["candidate_id"]
+    result = await pipeline.research("resume-job", "resume-person", seed, checkpoint, resume=snapshots[1])
+    assert len(calls["queries"]) == calls["advisor_requests"] == 1
+    assert len(calls["models"]) == result.profile.metrics.llm_calls == 3
+    assert result.profile.metrics.queries_performed == result.profile.metrics.web_search_calls_reserved == 1
+    assert result.profile.metrics.sources_fetched == 1
+    assert result.sources[0].processing_status == "extracted"
+    assert result.profile.coverage > 0
+    await pipeline.retrieval.close()
 
 
 @pytest.mark.asyncio

@@ -6,17 +6,20 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
+from time import monotonic
 from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.limits import RequestSizeLimitMiddleware
 from app.config import Settings, get_settings
 from app.db import Store
 from app.db.library import DatabaseResultFileStorage
+from app.db.store import is_transient_database_error
 from app.export.artifacts import build_export_artifact, export_media_type
 from app.export.batch import BatchParseError, parse_batch
 from app.export.formats import ExportLimitError
@@ -64,6 +67,7 @@ def create_app(
     application = FastAPI(title="People Research API", version="1.0.0", lifespan=lifespan)
     application.add_middleware(RequestSizeLimitMiddleware, limit=settings.MAX_UPLOAD_BYTES + 65536)
     application.state.settings, application.state.store = settings, store
+    last_database_warning = -60.0
 
     async def authorize(authorization: str | None = Header(default=None)):
         if settings.API_ACCESS_TOKEN:
@@ -123,7 +127,22 @@ def create_app(
         )
 
     @application.exception_handler(Exception)
+    @application.exception_handler(SQLAlchemyError)
     async def internal_error(request, exc):
+        nonlocal last_database_warning
+        if is_transient_database_error(exc):
+            await asyncio.to_thread(store.invalidate_connections)
+            if monotonic() - last_database_warning >= 60:
+                logger.warning("database_connectivity_lost", extra={"error_code": "DATABASE_UNAVAILABLE"})
+                last_database_warning = monotonic()
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Connection interrupted. Research will resume automatically.",
+                    "code": "DATABASE_UNAVAILABLE",
+                },
+                headers={"Retry-After": "5"},
+            )
         logger.error("api_request_failed", extra={"error_code": type(exc).__name__})
         return JSONResponse(status_code=500, content={"detail": "Internal service error"})
 

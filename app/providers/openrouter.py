@@ -7,9 +7,13 @@ import inspect
 import json
 import math
 import random
+import socket
+import ssl
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from typing import Any, Self, TypeVar
 
@@ -60,6 +64,10 @@ class OpenRouterError(RuntimeError):
         request_sent: bool = False,
         response_received: bool = False,
         response_body_received: bool = False,
+        transient: bool = False,
+        retry_after_seconds: float | None = None,
+        response_uncertain: bool = False,
+        infrastructure: bool = False,
     ) -> None:
         super().__init__(message)
         self.usage = usage or []
@@ -71,6 +79,10 @@ class OpenRouterError(RuntimeError):
         self.request_sent = request_sent
         self.response_received = response_received
         self.response_body_received = response_body_received
+        self.transient = transient
+        self.retry_after_seconds = retry_after_seconds
+        self.response_uncertain = response_uncertain
+        self.infrastructure = infrastructure
 
 
 class OpenRouterResponseTooLarge(OpenRouterError):
@@ -216,6 +228,7 @@ class OpenRouterClient:
             response_body_received = False
             http_status: int | None = None
             data: Any = None
+            retry_after_seconds: float | None = None
             try:
                 request = self.client.build_request(
                     "POST",
@@ -227,6 +240,7 @@ class OpenRouterClient:
                 response = await self.client.send(request, stream=True)
                 response_received = True
                 http_status = response.status_code
+                retry_after_seconds = self._retry_after_seconds(response.headers.get("Retry-After"))
                 try:
                     data = await self._read_json_response(response)
                 except OpenRouterError as exc:
@@ -257,18 +271,44 @@ class OpenRouterClient:
                     raise provider_error
                 parsed = parse(data)
                 usage.success = True
+            except asyncio.CancelledError:
+                # Cancellation does not establish that a dispatched request was
+                # uncharged. Keep its reservation and durable in-flight marker.
+                failure = OpenRouterError(
+                    "OpenRouter request interrupted",
+                    error_code=OPENROUTER_TRANSPORT_ERROR,
+                    transient=True,
+                    response_uncertain=request_sent,
+                    exception_type="CancelledError",
+                )
+                raise
             except httpx.TimeoutException as exc:
+                safe_to_repeat = isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
+                if safe_to_repeat:
+                    # No request body was written; this reservation may safely
+                    # be released by the durable budget layer.
+                    request_sent = False
                 failure = OpenRouterError(
                     "OpenRouter request timed out",
                     error_code=OPENROUTER_TIMEOUT,
-                    retryable=True,
+                    retryable=safe_to_repeat,
+                    transient=True,
+                    infrastructure=True,
+                    response_uncertain=not safe_to_repeat,
                     exception_type=type(exc).__name__,
                 )
             except httpx.TransportError as exc:
+                transient = not self._permanent_transport_error(exc)
+                safe_to_repeat = transient and isinstance(exc, httpx.ConnectError)
+                if isinstance(exc, httpx.ConnectError):
+                    request_sent = False
                 failure = OpenRouterError(
                     "OpenRouter transport failed",
                     error_code=OPENROUTER_TRANSPORT_ERROR,
-                    retryable=True,
+                    retryable=safe_to_repeat,
+                    transient=transient,
+                    infrastructure=transient,
+                    response_uncertain=transient and not safe_to_repeat,
                     exception_type=type(exc).__name__,
                 )
             except OpenRouterError as exc:
@@ -313,6 +353,8 @@ class OpenRouterClient:
                     failure.request_sent = request_sent
                     failure.response_received = response_received
                     failure.response_body_received = failure.response_body_received or response_body_received
+                    if failure.transient:
+                        failure.retry_after_seconds = retry_after_seconds
                 if usage is None:
                     usage = self._usage_from_failure(
                         role=role,
@@ -332,14 +374,16 @@ class OpenRouterClient:
             if failure is None:
                 assert parsed is not None
                 return parsed, attempt_usage
-            if not self._should_retry_openrouter_error(failure):
+            if not self._should_retry_openrouter_error(failure) or (
+                failure.retry_after_seconds is not None and failure.retry_after_seconds > 30
+            ):
                 failure.usage = attempt_usage
                 raise failure
             last_error = failure
 
             if attempt >= self.settings.OPENROUTER_MAX_RETRIES:
                 break
-            await self._sleep(self._retry_delay(attempt))
+            await self._sleep(max(self._retry_delay(attempt), failure.retry_after_seconds or 0))
 
         assert last_error is not None
         raise OpenRouterError(
@@ -353,6 +397,10 @@ class OpenRouterClient:
             request_sent=last_error.request_sent,
             response_received=last_error.response_received,
             response_body_received=last_error.response_body_received,
+            transient=last_error.transient,
+            retry_after_seconds=last_error.retry_after_seconds,
+            response_uncertain=last_error.response_uncertain,
+            infrastructure=last_error.infrastructure,
         ) from last_error
 
     def _model_for_role(self, role: str) -> str:
@@ -450,7 +498,7 @@ class OpenRouterClient:
 
     @staticmethod
     def _retryable_status(status_code: int) -> bool:
-        return status_code == 429 or 500 <= status_code <= 599
+        return status_code in {408, 429} or 500 <= status_code <= 599
 
     def _http_error(self, status_code: int) -> OpenRouterError:
         return OpenRouterError(
@@ -458,6 +506,8 @@ class OpenRouterClient:
             error_code=OPENROUTER_HTTP_ERROR,
             http_status=status_code,
             retryable=self._retryable_status(status_code),
+            transient=self._retryable_status(status_code),
+            infrastructure=self._retryable_status(status_code),
         )
 
     @classmethod
@@ -472,17 +522,52 @@ class OpenRouterClient:
         if provider_error is None:
             return None
         provider_code = provider_error.get("code") if isinstance(provider_error, dict) else None
+        if isinstance(provider_code, str) and provider_code.isdigit():
+            provider_code = int(provider_code)
         retryable = (
             cls._retryable_status(provider_code)
             if isinstance(provider_code, int) and not isinstance(provider_code, bool)
-            else True
+            else False
         )
         return OpenRouterError(
             "OpenRouter provider returned an error",
             error_code=OPENROUTER_PROVIDER_ERROR,
             http_status=http_status,
             retryable=retryable,
+            transient=retryable,
+            infrastructure=retryable,
         )
+
+    @staticmethod
+    def _permanent_transport_error(exc: BaseException) -> bool:
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(
+                current, (httpx.UnsupportedProtocol, httpx.LocalProtocolError, ssl.SSLCertVerificationError)
+            ):
+                return True
+            if isinstance(current, socket.gaierror) and current.errno != socket.EAI_AGAIN:
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return max(0.0, seconds) if math.isfinite(seconds) else None
 
     @staticmethod
     def _should_retry_openrouter_error(exc: OpenRouterError) -> bool:

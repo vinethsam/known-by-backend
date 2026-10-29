@@ -23,10 +23,11 @@ from app.retrieval.contracts import (
     FetchConfigurationError,
     FetchError,
     FetchTimeoutError,
+    FetchTransientError,
     RetrievedPage,
     content_type_allowed,
 )
-from app.retrieval.urls import URLValidationError, resolve_public_addresses
+from app.retrieval.urls import TemporaryDNSFailure, URLValidationError, resolve_public_addresses
 
 ALLOWED_BROWSER_CONTENT_TYPES = ALLOWED_TARGET_CONTENT_TYPES + (
     "application/ecmascript",
@@ -82,6 +83,10 @@ async def validate_target(url: str, settings: object) -> str:
 
     try:
         return await validate_public_url(url, settings)
+    except TemporaryDNSFailure as exc:
+        raise FetchTransientError(
+            "Public DNS resolution is temporarily unavailable", infrastructure=True
+        ) from exc
     except URLValidationError as exc:
         raise FetchError(str(exc) or "URL is not eligible for retrieval") from exc
 

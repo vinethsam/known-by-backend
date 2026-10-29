@@ -7,11 +7,12 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import event, select, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import OperationalError
 
 from alembic import command
 from app.config import Settings
 from app.db.models import EvidenceClaimRow, PersonTaskRow, ProfileRow, SourceRow, UsageRecordRow
-from app.db.store import Store
+from app.db.store import Store, is_transient_database_error
 from app.schemas import (
     EvidenceClaim,
     FieldDecision,
@@ -280,6 +281,89 @@ def test_lease_recovery_fencing_and_max_attempts(tmp_path):
 
     job = store.get_job(created.job_id)
     assert job.status == JobStatus.failed
+
+
+@pytest.mark.parametrize(
+    ("message", "state", "invalidated", "expected"),
+    [
+        ("server closed the connection unexpectedly", None, False, True),
+        ("temporary DNS failure", "08001", False, True),
+        ("database shutting down", "57P01", False, True),
+        ("stale connection", None, True, True),
+        ("password authentication failed", "28P01", True, False),
+        ("missing table", "42P01", False, False),
+        ("malformed query", None, False, False),
+    ],
+)
+def test_database_error_retry_classification(message, state, invalidated, expected):
+    class DriverError(Exception):
+        sqlstate = state
+
+    error = OperationalError("redacted", {}, DriverError(message), connection_invalidated=invalidated)
+    assert is_transient_database_error(error) is expected
+    assert not is_transient_database_error(ValueError("connection reset"))
+
+
+def test_recovery_wait_preserves_completed_people_and_checkpoint(tmp_path):
+    store = _store(tmp_path)
+    created = store.create_job([PersonSeed(full_name="Ada Lovelace"), PersonSeed(full_name="Grace Hopper")])
+    completed = store.claim_task("worker", "completed-claim")
+    completed_result = _result(completed.person_id)
+    assert store.finish_task(completed, completed_result)
+    # A lost commit acknowledgement can be retried without changing the result.
+    assert store.finish_task(completed, completed_result)
+    pending = store.claim_task("worker", "pending-claim")
+    assert store.claim_task("worker", "pending-claim").person_id == pending.person_id
+    checkpoint = _result(pending.person_id)
+    checkpoint.usage[0].job_id = pending.job_id
+    checkpoint.profile.metrics.recovery = {
+        "requests": {"opaque-key": {"state": "completed", "result": "private"}}
+    }
+    assert store.checkpoint(pending, checkpoint)
+    assert store.get_results(created.job_id).people[1].result.profile.metrics.recovery == {}
+    assert store.defer_task(pending, "PROVIDER_UNAVAILABLE", retry_after=20)
+    assert store.defer_task(pending, "PROVIDER_UNAVAILABLE", retry_after=20)
+    view = store.get_job(created.job_id)
+    assert view.counts[PersonStatus.completed.value] == 1
+    assert view.counts[PersonStatus.queued.value] == 1
+    assert view.recovery_state == "reconnecting"
+    assert view.recovery_reason == "PROVIDER_UNAVAILABLE"
+    assert view.retry_at > utcnow()
+    assert store.claim_task("other-worker") is None
+    with store.session_factory.begin() as session:
+        task = session.get(PersonTaskRow, pending.person_id)
+        assert task.attempts == 0
+        task.lease_expires_at = utcnow() - timedelta(seconds=1)
+    resumed = store.claim_task("other-worker")
+    assert resumed.person_id == pending.person_id
+    assert resumed.checkpoint.model_dump() == checkpoint.model_dump()
+    assert store.get_job(created.job_id).recovery_state == "resuming"
+    assert not store.checkpoint(pending, checkpoint)
+    assert store.checkpoint(resumed, resumed.checkpoint)
+    assert store.get_job(created.job_id).recovery_state is None
+    assert store.cancel_job(created.job_id)
+    assert not store.defer_task(resumed, "DATABASE_UNAVAILABLE")
+    assert not store.finish_task(resumed, checkpoint)
+    assert store.get_job(created.job_id).counts[PersonStatus.completed.value] == 1
+
+
+def test_exhausted_worker_interruptions_remain_recoverable(tmp_path):
+    store = _store(tmp_path, WORKER_MAX_ATTEMPTS=1)
+    created = store.create_job([PersonSeed(full_name="Grace Hopper")])
+    original = store.claim_task("worker")
+    for _ in range(3):
+        with store.session_factory.begin() as session:
+            session.get(PersonTaskRow, original.person_id).lease_expires_at = utcnow() - timedelta(seconds=1)
+        assert store.claim_task("replacement") is None
+        view = store.get_job(created.job_id)
+        assert view.counts[PersonStatus.failed.value] == 0
+        assert view.recovery_state == "reconnecting"
+        with store.session_factory.begin() as session:
+            session.get(PersonTaskRow, original.person_id).lease_expires_at = utcnow() - timedelta(seconds=1)
+        recovered = store.claim_task("replacement")
+        assert recovered.person_id == original.person_id
+    assert not store.renew_lease(original)
+    assert not store.fail_task(original, "RESEARCH_FAILED")
 
 
 def test_checkpoint_is_fenced_and_replaced_on_reclaim(tmp_path):
