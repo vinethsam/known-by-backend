@@ -109,7 +109,7 @@ def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
                         _, _, column, row_index = range_boundaries(element.get("r"))
                         if row_index > settings.MAX_BATCH_ROWS + 1:
                             raise BatchParseError(
-                                f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+                                f"XLSX cells exceed configured row limit; maximum {settings.MAX_BATCH_ROWS} data records"
                             )
                         if column > settings.MAX_INPUT_COLUMNS:
                             raise BatchParseError("XLSX cells exceed configured columns")
