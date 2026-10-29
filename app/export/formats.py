@@ -8,7 +8,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
@@ -21,9 +21,15 @@ from app.schemas import JobResults, ProfileField
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 ProvenanceMode = Literal["none", "field"]
 _JSON_FORMULA_ESCAPES = str.maketrans({char: f"\\u{ord(char):04x}" for char in "=+-@"})
+MAX_EXPORT_ROWS = 500
+COMBINED_EDUCATION_REASON = "EDUCATION_RECORDS_COMBINED_FOR_EXPORT_LIMIT"
 
 
-class ExportCellLimitError(ValueError):
+class ExportLimitError(ValueError):
+    """The full result cannot fit the standardized artifact limits."""
+
+
+class ExportCellLimitError(ExportLimitError):
     """A standardized cell cannot be represented losslessly in both formats."""
 
 
@@ -72,7 +78,79 @@ def _flatten_results(
 ) -> tuple[Iterator[dict[str, Any]], list[str]]:
     # Input columns and the legacy provenance switch no longer alter normal files.
     # Full raw input remains in storage/API; the artifact contains standardized data.
-    return _iter_rows(results), list(standard_columns())
+    if len(results.people) > MAX_EXPORT_ROWS:
+        raise ExportLimitError(
+            "Export supports at most 500 people; the complete research remains available in record details"
+        )
+    expanded = sum(
+        max(1, len(person.result.profile.records)) if person.result else 1 for person in results.people
+    )
+    return _export_rows(results, compact=expanded > MAX_EXPORT_ROWS), list(standard_columns())
+
+
+def _export_rows(results: JobResults, *, compact: bool) -> Iterator[dict[str, Any]]:
+    if not compact:
+        yield from _iter_rows(results)
+        return
+    for person in results.people:
+        # Only one person's education rows are buffered. Durable API/history
+        # records are never replaced by this explicitly marked export projection.
+        rows = list(_iter_rows(results.model_copy(update={"people": [person]})))
+        yield _combine_education_rows(rows) if len(rows) > 1 else rows[0]
+
+
+def _combine_education_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    combined = rows[0].copy()
+    combined["_review_fields"] = set().union(*(row["_review_fields"] for row in rows))
+    for field in RESEARCH_FIELDS:
+        key = field.value
+        decisions = [row for row in rows if row.get(key)]
+        values = {row.get(key, "") for row in rows}
+        numbered = bool(decisions) and (
+            key in {"university_name", "degree_type", "subject"} or len(values) > 1
+        )
+        if numbered:
+            combined[key] = "\n".join(f"{index}. {row.get(key) or '—'}" for index, row in enumerate(rows, 1))
+            combined["_review_fields"].add(key)
+        scores = [row[f"{key}_confidence"] for row in decisions]
+        combined[f"{key}_confidence"] = min(scores) if scores else 0
+        combined[f"{key}_source_urls"] = _compact_urls(
+            url for row in rows for url in row.get(f"{key}_source_urls", "").split("; ")
+        )
+        supplied = list(
+            dict.fromkeys(
+                value for row in rows for value in json.loads(row.get(f"{key}_supplied_values", "[]"))
+            )
+        )
+        combined[f"{key}_supplied_values"] = _provenance_json(supplied)
+        combined[f"{key}_input_confidence"] = 100 if supplied else ""
+        states = {row[f"{key}_provenance_status"] for row in decisions}
+        combined[f"{key}_provenance_status"] = (
+            next(iter(states)) if len(states) == 1 else "mixed" if states else ""
+        )
+        reasons = list(
+            dict.fromkeys(
+                reason
+                for row in rows
+                for reason in row.get(f"{key}_review_reasons", "").split("; ")
+                if reason
+            )
+        )
+        if numbered:
+            reasons.append(COMBINED_EDUCATION_REASON)
+        combined[f"{key}_review_required"] = (
+            any(row.get(f"{key}_review_required") for row in rows) or key in combined["_review_fields"]
+        )
+        combined[f"{key}_review_reasons"] = "; ".join(dict.fromkeys(reasons))
+    for key in ("profile_confidence", "coverage", "legacy_coverage"):
+        combined[key] = min(row[key] for row in rows)
+    combined["review_required"] = True
+    combined["record_status"] = (
+        combined["status"] if combined["status"] in {"failed", "cancelled"} else "review_required"
+    )
+    reasons = [reason for row in rows for reason in row.get("review_reasons", "").split("; ") if reason]
+    combined["review_reasons"] = "; ".join(dict.fromkeys([*reasons, COMBINED_EDUCATION_REASON]))
+    return combined
 
 
 def _iter_rows(results: JobResults) -> Iterator[dict[str, Any]]:
@@ -235,6 +313,10 @@ def _export_xlsx(
         for column_index, column in enumerate(columns, start=1):
             value = row.get(column, "")
             sheet.cell(row=row_index, column=column_index, value=_xlsx_cell(value))
+            if isinstance(value, str) and "\n" in value:
+                sheet.cell(row=row_index, column=column_index).alignment = Alignment(
+                    wrap_text=True, vertical="top"
+                )
             widths[column_index - 1] = max(widths[column_index - 1], len(str(value)))
         for value_column, confidence_column in field_columns:
             value = row.get(value_column)

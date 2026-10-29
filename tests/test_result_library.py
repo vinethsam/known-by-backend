@@ -21,6 +21,7 @@ from app.db import Store
 from app.db.library import DatabaseResultFileStorage
 from app.db.models import JobRow, PersonTaskRow, SavedResultFileRow, SourceRow, UsageRecordRow
 from app.export.artifacts import build_export_artifact
+from app.export.formats import ExportCellLimitError
 from app.library import LibraryLimitError
 from app.schemas import (
     EvidenceClaim,
@@ -35,6 +36,7 @@ from app.schemas import (
 )
 
 AUTH = {"Authorization": "Bearer shared-test-token"}
+ADMIN_AUTH = {"Authorization": "Bearer library-admin-test-token"}
 STARTED = datetime(2026, 9, 29, 2, 41, tzinfo=timezone.utc)
 
 
@@ -55,6 +57,7 @@ def library_context(tmp_path):
             "APP_ENV": "test",
             "DATABASE_URL": f"sqlite:///{tmp_path / f'library-{len(stores)}.db'}",
             "API_ACCESS_TOKEN": "shared-test-token",
+            "LIBRARY_DELETE_TOKEN": "library-admin-test-token",
             "PLAYWRIGHT_ENABLED": False,
         }
         values.update(overrides)
@@ -157,19 +160,23 @@ def test_explicit_save_matches_normal_export_with_same_human_filename(library_co
         )
         assert saved.status_code == 201, saved.text
         metadata = saved.json()
-        assert metadata["filename"] == expected_name
+        assert metadata["filename"] == "Forbes-2000_2026-09-29_0241.xlsx"
         assert job_id not in metadata["filename"]
         assert metadata["list_name"] == "Forbes 2000"
         assert metadata["research_started_at"] == "2026-09-29T02:41:00Z"
-        assert metadata["format"] == format
+        assert metadata["format"] == "xlsx"
+        assert metadata["available_formats"] == ["csv", "xlsx"]
+        assert metadata["can_delete"] is False
         assert saved.headers["location"] == f"/v1/library/files/{metadata['file_id']}"
-        download = client.get(saved.headers["location"], headers=AUTH)
+        download = client.get(saved.headers["location"], params={"format": format}, headers=AUTH)
         assert download.status_code == 200
         assert download.headers["content-disposition"] == normal.headers["content-disposition"]
         assert expected_name in download.headers["content-disposition"]
         assert download.headers["cache-control"] == "private, no-store"
         assert download.headers["x-content-type-options"] == "nosniff"
-        assert metadata["size_bytes"] == len(download.content)
+        csv = client.get(saved.headers["location"], params={"format": "csv"}, headers=AUTH)
+        xlsx = client.get(saved.headers["location"], params={"format": "xlsx"}, headers=AUTH)
+        assert metadata["size_bytes"] == len(csv.content) + len(xlsx.content)
         if format == "csv":
             assert download.content == normal.content
             assert "LIST_NAME" not in download.text and "YALI" not in download.text
@@ -178,7 +185,7 @@ def test_explicit_save_matches_normal_export_with_same_human_filename(library_co
         assert client.get("/v1/library/files", headers=AUTH).json() == [metadata]
 
 
-def test_authorized_team_members_share_list_download_and_delete(library_context):
+def test_team_members_share_reads_but_only_privileged_token_can_delete(library_context):
     _, store, _, app = library_context()
     job_id = _completed_job(store)
     with TestClient(app) as creator:
@@ -187,10 +194,46 @@ def test_authorized_team_members_share_list_download_and_delete(library_context)
         with TestClient(app) as teammate:
             assert teammate.get("/v1/library/files", headers=AUTH).json() == [saved]
             assert teammate.get(path, headers=AUTH).status_code == 200
-            assert teammate.delete(path, headers=AUTH).status_code == 204
+            assert teammate.delete(path, headers=AUTH).status_code == 403
+            privileged = teammate.get("/v1/library/files", headers=ADMIN_AUTH).json()
+            assert privileged[0]["can_delete"] is True
+            assert teammate.get(path, headers=ADMIN_AUTH).status_code == 200
+            assert teammate.get(f"{path}/records", headers=ADMIN_AUTH).status_code == 200
+            assert teammate.get(f"/v1/jobs/{job_id}", headers=ADMIN_AUTH).status_code == 401
+            assert teammate.delete(path, headers=ADMIN_AUTH).status_code == 204
         assert creator.get(path, headers=AUTH).status_code == 404
         assert creator.get("/v1/library/files", headers=AUTH).json() == []
-        assert creator.delete(path, headers=AUTH).status_code == 404
+        assert creator.delete(path, headers=ADMIN_AUTH).status_code == 404
+
+
+def test_deletion_is_disabled_without_a_distinct_privileged_token(library_context):
+    _, store, _, app = library_context(LIBRARY_DELETE_TOKEN=None)
+    job_id = _completed_job(store)
+    with TestClient(app) as client:
+        saved = client.post(f"/v1/jobs/{job_id}/library", json={}, headers=AUTH).json()
+        assert saved["can_delete"] is False
+        assert client.delete(f"/v1/library/files/{saved['file_id']}", headers=AUTH).status_code == 403
+    with pytest.raises(ValueError, match="must differ"):
+        Settings(_env_file=None, API_ACCESS_TOKEN="same", LIBRARY_DELETE_TOKEN="same")
+
+
+def test_second_format_failure_never_retains_half_an_entry(library_context, monkeypatch):
+    _, store, storage, app = library_context()
+    job_id = _completed_job(store)
+    snapshots = []
+
+    def render(results, columns, job, format, **kwargs):
+        snapshots.append(results)
+        if format == "xlsx":
+            raise ExportCellLimitError("Second format cannot be rendered")
+        return build_export_artifact(results, columns, job, format, **kwargs)
+
+    monkeypatch.setattr("app.api.routes.build_export_artifact", render)
+    with TestClient(app) as client:
+        saved = client.post(f"/v1/jobs/{job_id}/library", json={}, headers=AUTH)
+        assert saved.status_code == 422
+    assert len(snapshots) == 2 and snapshots[0] is snapshots[1]
+    assert storage.list_files() == []
 
 
 def test_legacy_social_evidence_cannot_reenter_results_exports_or_saved_library(library_context):
@@ -257,7 +300,7 @@ def test_legacy_social_evidence_cannot_reenter_results_exports_or_saved_library(
             headers=AUTH,
         )
         assert saved.status_code == 201
-        retained = client.get(saved.headers["location"], headers=AUTH)
+        retained = client.get(saved.headers["location"], params={"format": "csv"}, headers=AUTH)
         assert retained.content == normal.content
         assert "linkedin.com" not in retained.text
         assert "Unverified Social Org" not in retained.text

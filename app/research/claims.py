@@ -8,7 +8,7 @@ from collections.abc import MutableMapping
 from datetime import date
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION
-from app.research.identity import claim_is_eligible_for_source
+from app.research.identity import claim_is_eligible_for_source, expanded_subject_matches
 from app.research.normalisation import (
     comparison_key,
     name_key,
@@ -37,10 +37,15 @@ def origin_is_explicit(value: str, evidence: str, subject_name: str) -> bool:
     """Require the named person's own origin statement in the quoted evidence."""
 
     country = re.escape(comparison_key(value))
-    subject = re.escape(name_key(subject_name))
+    name_tokens = name_key(subject_name).split()
+    subject = re.escape(" ".join(name_tokens))
+    if len(name_tokens) == 2 and all(len(token) > 1 for token in name_tokens):
+        subject = rf"{re.escape(name_tokens[0])}(?:\s+\w+){{0,2}}\s+{re.escape(name_tokens[-1])}"
     quote = comparison_key(evidence)
     relation = (
         r"(?:country of origin(?: is)?|(?:is|was) (?:originally )?from|"
+        r"(?:is|was) an? (?:(?!(?:citizen|resident|national|student|graduate|visitor|"
+        r"delegate|representative|employee|ambassador|not|never)\b)\w+\s+){1,5}from|"
         r"(?:is|was) (?:a )?native of|(?:originally )?hails? from|"
         r"(?:originally )?comes? from|originates? from|originally from|(?:was )?born and raised in)"
     )
@@ -87,7 +92,12 @@ def validate_claims(
     claims, reasons = [], []
     content = literal_key(chunk)
     for claim in response.claims:
-        if name_key(claim.subject_name) != name_key(seed.full_name):
+        if name_key(claim.subject_name) != name_key(seed.full_name) and not (
+            not source.identity.rejected
+            and source.identity.signals.get("matched_seed_anchors")
+            and expanded_subject_matches(seed, claim.subject_name, chunk)
+            and literal_key(claim.subject_name) in literal_key(claim.evidence)
+        ):
             rejected("CLAIM_SUBJECT_MISMATCH")
             continue
         if literal_key(claim.evidence) not in content:

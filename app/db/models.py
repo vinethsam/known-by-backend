@@ -175,6 +175,10 @@ class SavedResultFileRow(Base):
     # copied into metadata and there is deliberately no foreign key to jobs.
     list_name: Mapped[str | None] = mapped_column(Text)
     content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+    # New entries retain XLSX in content and its original CSV beside it. Null
+    # companion columns identify legacy single-format entries without rewriting them.
+    csv_content: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    csv_size_bytes: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         CheckConstraint("format IN ('csv', 'xlsx')", name="ck_saved_result_files_format"),

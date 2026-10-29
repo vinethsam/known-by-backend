@@ -936,6 +936,10 @@ def classify_relationship(
     ) or re.fullmatch(r"administrat(?:eur|rice)(?: independant(?:e)?)?", title_key)
     if board_title:
         return RelationshipType.board_role
+    if re.search(
+        r"\b(committee|commission|advisory council|steering group)\b", organisation_key
+    ) and re.fullmatch(r"(?:member|chair|chairman|chairwoman|chairperson)(?: of .+)?", title_key):
+        return RelationshipType.advisory_role
     if re.search(r"\b(adviser|advisor|advisory|council member)\b", title_key):
         return RelationshipType.advisory_role
     if classify_public_office(organisation, title, source_types=source_types) is not None:
@@ -948,7 +952,7 @@ def classify_relationship(
         return RelationshipType.current_academic_role
     if re.search(
         r"\b(chief .+ officer|chief executive|ceo|cfo|cio|cto|managing director|executive director|"
-        r"founder|co founder|president)\b",
+        r"founder|co founder|executive chair(?:man|woman|person)?|president)\b",
         title_key,
     ):
         return RelationshipType.current_executive_role

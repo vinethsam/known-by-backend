@@ -175,12 +175,12 @@ installation. It does not make paid provider calls or prove Chromium can launch.
 Verify the existing Cloudflare Worker's upstream URL/redirect protections and
 Chromium sandbox support on the target runtime.
 
-The shared library adds migration `202609290001` for retained CSV/XLSX bytes and
-minimal file metadata. Run `alembic upgrade head` in the web pre-deploy step and
-redeploy web and worker from the same revision. Country of Origin and
-`legacy_coverage` use existing profile JSON, so this refinement needs no new database
-migration; it does add columns to normal and saved-file exports. Back up saved files
-with the PostgreSQL database.
+Migration `202610280001` adds nullable CSV companion storage to the existing shared
+library table so one entry retains both original formats. Existing saved bytes and
+IDs are preserved. Run `alembic upgrade head` in the web pre-deploy step and redeploy
+web and worker from the same revision. Back up saved files with the PostgreSQL
+database. Optional `LIBRARY_DELETE_TOKEN` enables privileged Database deletion; it
+must differ from the ordinary team token. When unset, deletion remains disabled.
 
 ## Configuration
 
@@ -269,8 +269,10 @@ and every returned claim still passes deterministic grounding checks.
 
 Send the configured bearer token on research, library, and `/process` requests. The
 library requires `API_ACCESS_TOKEN` even in development and is unavailable without it.
-The existing single-token access model gives authorized team members the same library
-permissions. API schemas are available at `/docs`; health and readiness are public.
+The team token permits library reads and saves, but never deletion. A distinct
+optional `LIBRARY_DELETE_TOKEN` grants privileged library access using the same
+Bearer header; it does not grant access to research endpoints. API schemas are
+available at `/docs`; health and readiness are public.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |

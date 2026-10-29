@@ -19,7 +19,7 @@ from app.db import Store
 from app.db.library import DatabaseResultFileStorage
 from app.export.artifacts import build_export_artifact, export_media_type
 from app.export.batch import BatchParseError, parse_batch
-from app.export.formats import ExportCellLimitError
+from app.export.formats import ExportLimitError
 from app.export.naming import content_disposition
 from app.library import LibraryLimitError, ResultFileStorage, SavedResultFile, SaveResultRequest
 from app.library_preview import LibraryPreviewError, SavedRecordsPage, preview_saved_file
@@ -75,14 +75,33 @@ def create_app(
 
     secured = [Depends(authorize)]
 
+    def can_delete_library(authorization) -> bool:
+        token = settings.LIBRARY_DELETE_TOKEN
+        return bool(
+            token
+            and token.get_secret_value().strip()
+            and settings.API_ACCESS_TOKEN
+            and token.get_secret_value() != settings.API_ACCESS_TOKEN.get_secret_value()
+            and authorization
+            and hmac.compare_digest(authorization.encode(), ("Bearer " + token.get_secret_value()).encode())
+        )
+
     async def authorize_library(authorization: str | None = Header(default=None)):
         # Local deployments may omit auth for ordinary API debugging. Retained
         # shared files must never become public even in that configuration.
         if not settings.API_ACCESS_TOKEN or not settings.API_ACCESS_TOKEN.get_secret_value().strip():
             raise HTTPException(503, "Shared library requires API_ACCESS_TOKEN")
-        await authorize(authorization)
+        # The privileged credential is scoped to library routes. Ordinary
+        # research authorization continues to accept only API_ACCESS_TOKEN.
+        if not can_delete_library(authorization):
+            await authorize(authorization)
 
     library_secured = [Depends(authorize_library)]
+
+    async def authorize_library_delete(authorization: str | None = Header(default=None)):
+        await authorize_library(authorization)
+        if not can_delete_library(authorization):
+            raise HTTPException(403, "Saved result deletion requires privileged access")
 
     async def accept_jobs():
         if not await asyncio.to_thread(store.ready):
@@ -192,7 +211,7 @@ def create_app(
             raise HTTPException(409, "Job is already finished")
         return await get_job(job_id)
 
-    async def job_export(job_id, format, provenance, *, require_completed=False):
+    async def job_exports(job_id, formats, provenance, *, require_completed=False):
         job = await get_job(job_id)
         saveable_statuses = {JobStatus.completed, JobStatus.partial}
         if require_completed and job.status not in saveable_statuses:
@@ -213,17 +232,25 @@ def create_app(
         ):
             raise HTTPException(409, "Completed result is unavailable")
         columns = await asyncio.to_thread(store.get_columns, str(job_id))
+
+        def render():
+            # Both formats use this exact result snapshot before any storage
+            # call. A failed render cannot leave half a saved entry.
+            return [
+                build_export_artifact(
+                    results,
+                    columns,
+                    job,
+                    format,
+                    provenance=provenance,
+                    low_confidence_threshold=settings.SCORING.review_threshold,
+                )
+                for format in formats
+            ]
+
         try:
-            return await asyncio.to_thread(
-                build_export_artifact,
-                results,
-                columns,
-                job,
-                format,
-                provenance=provenance,
-                low_confidence_threshold=settings.SCORING.review_threshold,
-            )
-        except ExportCellLimitError as exc:
+            return await asyncio.to_thread(render)
+        except ExportLimitError as exc:
             raise HTTPException(422, str(exc)) from None
 
     @application.get("/v1/jobs/{job_id}/export", dependencies=secured)
@@ -232,7 +259,7 @@ def create_app(
         format: Literal["csv", "xlsx"] = Query(default="csv"),
         provenance: Literal["none", "field"] = Query(default="none"),
     ):
-        artifact = await job_export(job_id, format, provenance)
+        artifact = (await job_exports(job_id, [format], provenance))[0]
         return Response(
             content=artifact.content,
             media_type=export_media_type(artifact.format),
@@ -245,28 +272,37 @@ def create_app(
         status_code=201,
         dependencies=library_secured,
     )
-    async def save_result(job_id: UUID, request: SaveResultRequest, response: Response):
-        artifact = await job_export(job_id, request.format, request.provenance, require_completed=True)
+    async def save_result(
+        job_id: UUID,
+        request: SaveResultRequest,
+        response: Response,
+        authorization: str | None = Header(default=None),
+    ):
+        csv, xlsx = await job_exports(job_id, ["csv", "xlsx"], request.provenance, require_completed=True)
         try:
-            saved = await asyncio.to_thread(library.save, artifact)
+            saved = await asyncio.to_thread(library.save_pair, csv, xlsx)
         except LibraryLimitError as exc:
             raise HTTPException(413, str(exc)) from None
         response.headers["Location"] = f"/v1/library/files/{saved.file_id}"
         response.headers["Cache-Control"] = "private, no-store"
-        return saved
+        return saved.model_copy(update={"can_delete": can_delete_library(authorization)})
 
     @application.get("/v1/library/files", response_model=list[SavedResultFile], dependencies=library_secured)
     async def list_saved_results(
         response: Response,
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
+        authorization: str | None = Header(default=None),
     ):
         response.headers["Cache-Control"] = "private, no-store"
-        return await asyncio.to_thread(library.list_files, limit=limit, offset=offset)
+        files = await asyncio.to_thread(library.list_files, limit=limit, offset=offset)
+        return [item.model_copy(update={"can_delete": can_delete_library(authorization)}) for item in files]
 
     @application.get("/v1/library/files/{file_id}", dependencies=library_secured)
-    async def download_saved_result(file_id: UUID):
-        saved = await asyncio.to_thread(library.get, str(file_id))
+    async def download_saved_result(
+        file_id: UUID, format: Literal["csv", "xlsx"] | None = Query(default=None)
+    ):
+        saved = await asyncio.to_thread(library.get, str(file_id), format)
         if saved is None:
             raise HTTPException(404, "Saved result not found")
         return Response(
@@ -288,6 +324,7 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
         q: str = Query(default="", max_length=200),
+        authorization: str | None = Header(default=None),
     ):
         saved = await asyncio.to_thread(library.get, str(file_id))
         if saved is None:
@@ -306,9 +343,12 @@ def create_app(
             raise HTTPException(422, str(exc)) from None
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        page.file.can_delete = can_delete_library(authorization)
         return page
 
-    @application.delete("/v1/library/files/{file_id}", status_code=204, dependencies=library_secured)
+    @application.delete(
+        "/v1/library/files/{file_id}", status_code=204, dependencies=[Depends(authorize_library_delete)]
+    )
     async def delete_saved_result(file_id: UUID):
         if not await asyncio.to_thread(library.delete, str(file_id)):
             raise HTTPException(404, "Saved result not found")

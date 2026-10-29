@@ -7,33 +7,40 @@ export never save anything to the library.
 
 ## API
 
-All routes require `Authorization: Bearer <API_ACCESS_TOKEN>`. The library is disabled
-with HTTP 503 if the token is not configured, including in development. KnownBy has
-one shared team token and no individual-user or ownership roles: everyone authorized
-by that token can access and delete every library file. No user identity is invented
-or inferred from the token. Missing or incorrect credentials return 401.
+All routes require a Bearer token. The library is disabled with HTTP 503 if
+`API_ACCESS_TOKEN` is not configured, including in development. The ordinary team
+token permits reads and saves, but direct DELETE requests return 403. KnownBy has
+no individual-user or ownership roles, so the conservative deletion rule uses an
+optional, distinct `LIBRARY_DELETE_TOKEN` through the existing Bearer mechanism.
+When unset, deletion is disabled for everyone. Equal team and privileged tokens
+are rejected as invalid configuration. The privileged token can read, save, preview,
+download, and delete library entries; it does not authorize research endpoints.
+Missing or incorrect credentials return 401. No user identity is inferred from a
+shared token. Metadata includes server-computed `can_delete`; hiding the frontend
+action is additional presentation, not the authorization boundary.
 
 | Method | Route | Result |
 | --- | --- | --- |
-| POST | `/v1/jobs/{job_id}/library` | Save one export and return its metadata with HTTP 201 |
+| POST | `/v1/jobs/{job_id}/library` | Save both formats as one entry; return metadata with HTTP 201 |
 | GET | `/v1/library/files?limit=50&offset=0` | Metadata, newest first; maximum page size 100 |
-| GET | `/v1/library/files/{file_id}` | Download the retained artifact |
+| GET | `/v1/library/files/{file_id}?format=csv` (or `xlsx`) | Download original saved bytes of that format |
 | GET | `/v1/library/files/{file_id}/records?limit=50&offset=0&q=` | Read-only paginated record preview, maximum page size 100 |
-| DELETE | `/v1/library/files/{file_id}` | Permanently remove that artifact; HTTP 204 |
+| DELETE | `/v1/library/files/{file_id}` | Privileged deletion of the entry and both formats; HTTP 204 |
 
 The explicit save body is:
 
 ```json
-{"format": "xlsx", "provenance": "none"}
+{"provenance": "none"}
 ```
 
-`format` is `xlsx` (default) or `csv`; `provenance` is `none` (default) or `field`,
-matching normal export options. Unknown fields, formats, and provenance modes return
-422. There is no upload endpoint: clients cannot store arbitrary bytes, URLs, scrape
-artifacts, or substitute exported rows. The backend reads an actual completed job and
-generates the artifact using the same renderer and scoring threshold as its ordinary
-download. A save is explicit each time; repeating it intentionally creates another
-saved file, subject to the same limits.
+An empty body object is also accepted. `provenance` is `none` (default) or `field`,
+matching normal export options. A legacy `format=csv|xlsx` body is accepted but no
+longer selects a single format: every new save retains both. Unknown fields or
+invalid options return 422. There is no upload endpoint. Both artifacts are rendered
+from one in-memory result snapshot before any database write. One transaction
+inserts one logical entry containing both byte sequences; a rendering, quota, or
+storage failure cannot report success for a partial save. Repeating an explicit save
+intentionally creates another complete entry, subject to the same limits.
 
 Jobs with `status=completed` or `status=partial` and retained results can be saved after every person is terminal. `partial` means processing completed with issues. Completed results
 may contain review flags; the user's explicit request is the decision to retain the
@@ -51,11 +58,15 @@ uses `KnownBy`. Sanitization preserves safe readable Unicode, uses hyphens, stri
 controls and path characters, and bounds the list portion. Internal job IDs never
 appear as the filename. See [export contracts](exports.md).
 
-Metadata includes only file ID, filename, format, saved time, research start time,
-byte size, and optional originating list name. The file itself contains the ordinary
+Metadata includes file ID, filename, default format, saved time, research start time,
+total byte size, optional originating list name, `available_formats`, and `can_delete`.
+New entries list both CSV and XLSX; old entries list only their original format.
+Without a format query, downloads preserve the original/default format (XLSX for
+new entries). An unavailable legacy format returns 404; it is never regenerated.
+The file itself contains the ordinary
 standardized export, with supplied values and research provenance kept distinct. Administrative input columns are excluded. No separate
 HTML, Markdown, search/model responses, claims, or confidence objects are copied into
-library storage. Listing retrieves metadata without loading the binary file. Library
+library storage. Listing retrieves metadata without loading either binary file. Library
 responses are private and disable browser/proxy caching.
 
 Saved CSV and XLSX files have the same fixed column contract as a normal download:
@@ -83,7 +94,9 @@ page. Reads are bounded by the configured file-size and uncompressed-workbook li
 512 columns and 100,000 rows. Browser memory holds at most 100 records. Formula cells
 are inert strings; macros, external links and formulas are not executed. Malformed or
 oversized previews return 422 while the unchanged original remains downloadable.
-Previews require the same team authentication as listing, download and deletion.
+Previews require the same library authentication as listing and download. Deletion
+additionally requires the privileged token and confirmation in the file-list menu;
+the record viewer has no deletion action.
 
 ## Storage and limits
 
@@ -98,13 +111,22 @@ contract without changing research or the API.
 | `LIBRARY_MAX_TOTAL_BYTES` | 250,000,000 |
 | `LIBRARY_MAX_FILES` | 500 |
 
-Exceeding any limit returns 413 without storing a partial file. Save and delete
+The file limit applies to each format; total-byte quota counts both byte sequences,
+while the file-count quota counts logical entries. Exceeding any limit returns 413
+without storing a partial entry. Save and delete
 operations serialize quota checks in the database so simultaneous API replicas cannot
 overrun the shared limits. Deleting a file releases its size/count allocation. No
 duplicate temporary files are written to disk.
 
-Migration `202609290001` creates only `saved_result_files`. It has no foreign key to
+Migration `202609290001` creates only `saved_result_files`; additive migration
+`202610280001` adds nullable `csv_content` and `csv_size_bytes` companion columns.
+Existing IDs, formats, filenames and bytes remain unchanged. New entries store XLSX
+in the original content column and CSV in the companion column. Run `alembic upgrade
+head` before deploying this backend revision. It has no foreign key to
 jobs, caches, people, or evidence. Normal job/cache cleanup therefore cannot delete an
 intentionally saved export; only an explicit library delete or database administration
 removes it. PostgreSQL backups must include this table. Downgrading this migration
 drops the table and its saved files, so export/backup retained artifacts first.
+Downgrading only the companion-column migration removes new entries' CSV copies
+while retaining their original XLSX and correcting their byte totals; back up both
+formats before any downgrade.

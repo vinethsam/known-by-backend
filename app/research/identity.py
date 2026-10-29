@@ -47,6 +47,11 @@ def _clue_field(label: str) -> str:
 
 def _clue_key(label: str, value: str) -> str:
     label = _clue_field(label)
+    if label in _INSTITUTION_FIELDS:
+        # Acronyms and explanatory translations in seed labels are optional
+        # descriptions, not words that every independent biography must repeat.
+        value = re.sub(r"\s*\((?:[A-Z][A-Z.]{1,10}|the [^()]+)\)", "", value)
+        value = value.replace("&", " and ")
     key = comparison_key(value)
     if label in _INSTITUTION_FIELDS:
         key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc|corporation|corp)$", "", key)
@@ -182,11 +187,28 @@ def _clue_is_near_name(label: str, value: str, text: str, target: str) -> bool:
     def close(context: str) -> bool:
         tokens = _clue_key(label, context).split()
         name_starts = _phrase_starts(tokens, target_tokens)
+        # A fully spelled first/surname may surround an additional middle name.
+        # This is permitted only alongside the specific institutional anchor;
+        # it does not admit a partial name or replace the source identity gate.
+        if (
+            _clue_field(label) in _INSTITUTION_FIELDS
+            and len(target_tokens) == 2
+            and all(len(token) > 1 for token in target_tokens)
+        ):
+            name_starts.extend(
+                index
+                for index, token in enumerate(tokens)
+                if token == target_tokens[0]
+                and any(
+                    tokens[end] == target_tokens[-1] for end in range(index + 2, min(index + 4, len(tokens)))
+                )
+            )
         clue_starts = _phrase_starts(tokens, clue_tokens)
         return any(abs(name - clue) <= 40 for name in name_starts for clue in clue_starts)
 
     # Narrative pages must associate the clue in the same sentence. Short adjacent
     # lines also cover common profile headers such as name / title / institution.
+    text = re.sub(r"\b([A-Za-z])\.(?=\s*[A-Za-z](?:\.|\b))", r"\1", text)
     if any(close(segment) for segment in re.split(r"[.!?;\r\n]+", text)):
         return True
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -228,6 +250,24 @@ def _explicitly_negated_clue(label: str, value: str, text: str, target: str) -> 
 
 def contains_phrase(text: str, phrase: str) -> bool:
     return bool(phrase) and f" {phrase} " in f" {text} "
+
+
+def expanded_subject_matches(seed: PersonSeed, subject_name: str, text: str) -> bool:
+    """A middle-name expansion requires literal full-name and institutional context."""
+    target, candidate = name_key(seed.full_name).split(), name_key(subject_name).split()
+    return bool(
+        len(target) == 2
+        and all(len(token) > 1 for token in target)
+        and 3 <= len(candidate) <= 4
+        and candidate[0] == target[0]
+        and candidate[-1] == target[-1]
+        and contains_phrase(comparison_key(text), " ".join(candidate))
+        and any(
+            _clue_field(label) in _INSTITUTION_FIELDS
+            and _clue_is_near_name(label, value, text, name_key(seed.full_name))
+            for label, value in seed_identity_anchors(seed).items()
+        )
+    )
 
 
 def candidate_has_seed_identity_context(seed: PersonSeed, candidate: SourceCandidate) -> bool:
@@ -288,8 +328,16 @@ def assess_identity(
     exact = contains_phrase(key, target)
     opening = re.split(r"[.!?;\r\n]+", text.strip(), maxsplit=1)[0]
     named_biography_opening = len(opening.split()) <= 12 and contains_phrase(comparison_key(opening), target)
-    subject_matches = subject_name is None or name_key(subject_name) == target
+    subject_matches = (
+        subject_name is None
+        or name_key(subject_name) == target
+        or expanded_subject_matches(seed, subject_name, text)
+    )
     anchors = seed_identity_anchors(seed)
+    expanded_name_with_anchor = not exact and any(
+        _clue_field(label) in _INSTITUTION_FIELDS and _clue_is_near_name(label, value, text, target)
+        for label, value in anchors.items()
+    )
     signals = {
         "exact_name": exact,
         "subject_matches": subject_matches,
@@ -302,7 +350,9 @@ def assess_identity(
     }
     if named_biography_opening:
         signals["named_biography_opening"] = True
-    if not exact or not subject_matches:
+    if expanded_name_with_anchor:
+        signals["institution_anchored_name_variant"] = True
+    if not (exact or expanded_name_with_anchor) or not subject_matches:
         return IdentityMatch(rejected=True, signals=signals, reason_codes=["IDENTITY_MISMATCH"])
     clues = _seed_clues(seed)
     matched_values: dict[str, float] = {}
@@ -545,7 +595,6 @@ def _coherent_unanchored_source_ids(
             or claim.identity_relevance < policy.identity_minimum
             or claim.directness != "explicit"
             or claim.field != ProfileField.organisation
-            or claim.is_current is not True
             or claim.normalisation_certainty < 0.8
             # A full-name biography heading may introduce a following pronoun
             # sentence; a partial name elsewhere on a mixed page cannot do so.

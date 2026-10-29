@@ -13,7 +13,7 @@ from app.db.models import JobRow, PersonTaskRow
 from app.export.formats import ExportCellLimitError
 from app.export.schema import RESEARCH_FIELDS, standard_columns
 from app.library_preview import LibraryPreviewError, preview_saved_file
-from tests.test_result_library import AUTH, _artifact, _completed_job
+from tests.test_result_library import ADMIN_AUTH, AUTH, _artifact, _completed_job
 from tests.test_result_library import library_context as library_context
 
 
@@ -47,7 +47,8 @@ def test_saved_records_lifecycle_is_shared_paginated_and_unchanged(library_conte
             assert filtered["total"] == 1 and filtered["records"][0]["full_name"] == "John Doe"
             assert colleague.get(f"{path}/records?q=absent", headers=AUTH).json()["records"] == []
             assert colleague.get(path, headers=AUTH).content == original
-            assert colleague.delete(path, headers=AUTH).status_code == 204
+            assert colleague.delete(path, headers=AUTH).status_code == 403
+            assert colleague.delete(path, headers=ADMIN_AUTH).status_code == 204
         assert client.get(f"{path}/records", headers=AUTH).status_code == 404
 
 

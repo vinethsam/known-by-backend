@@ -13,6 +13,7 @@ from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 
+from app.export.formats import COMBINED_EDUCATION_REASON
 from app.export.schema import RESEARCH_FIELDS, standard_columns
 from app.library import SavedFileContent, SavedResultFile
 from app.research.normalisation import normalise_display
@@ -170,7 +171,12 @@ def preview_saved_file(
                 record[key] = _cell(cells[position]) if position < len(cells) else ""
             for field in RESEARCH_FIELDS:
                 value = record.get(field.value)
-                if isinstance(value, str) and value and not value.startswith(("=", "+", "@")):
+                if (
+                    isinstance(value, str)
+                    and value
+                    and not value.startswith(("=", "+", "@"))
+                    and COMBINED_EDUCATION_REASON not in str(record.get("review_reasons", ""))
+                ):
                     record[field.value] = normalise_display(field, value)
             if search and not any(
                 search in str(record.get(field.value, "")).casefold() for field in RESEARCH_FIELDS

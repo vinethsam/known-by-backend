@@ -10,6 +10,7 @@ from app.schemas import Contract
 
 
 class SaveResultRequest(Contract):
+    # Accepted for older clients; every new API save retains both formats.
     format: ExportFormat = "xlsx"
     provenance: ProvenanceMode = "none"
 
@@ -22,6 +23,8 @@ class SavedResultFile(Contract):
     research_started_at: datetime
     size_bytes: int
     list_name: str | None = None
+    available_formats: list[ExportFormat] = []
+    can_delete: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,8 +42,10 @@ class ResultFileStorage(Protocol):
 
     def save(self, artifact: ExportArtifact) -> SavedResultFile: ...
 
+    def save_pair(self, csv: ExportArtifact, xlsx: ExportArtifact) -> SavedResultFile: ...
+
     def list_files(self, *, limit: int, offset: int) -> list[SavedResultFile]: ...
 
-    def get(self, file_id: str) -> SavedFileContent | None: ...
+    def get(self, file_id: str, format: ExportFormat | None = None) -> SavedFileContent | None: ...
 
     def delete(self, file_id: str) -> bool: ...

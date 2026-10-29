@@ -90,6 +90,8 @@ def _value_key(field_name: ProfileField, value: str) -> str:
     key = comparison_key(
         normalise_display(field_name, value) if field_name == ProfileField.job_title else value
     )
+    if field_name == ProfileField.subject:
+        return re.sub(r"\s+degree$", "", key)
     if field_name != ProfileField.university_name:
         return key
     tokens = [token for token in key.split() if token not in {"the", "of"}]
@@ -107,6 +109,14 @@ def _claim_value_key(claim: EvidenceClaim) -> str:
 def _university_base_key(value: str) -> str | None:
     """Return a base only for an explicitly qualified institution value."""
 
+    department = re.match(
+        r"^(?:school|faculty|department|college)\b.+?\s+at\s+"
+        r"(.+\b(?:university|college|institute)\b.*)$",
+        value,
+        re.IGNORECASE,
+    )
+    if department:
+        return _value_key(ProfileField.university_name, department.group(1))
     parts = re.split(r"\s*[,;]\s*", value, maxsplit=1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         return None
@@ -120,6 +130,32 @@ def _claims_equivalent(left: EvidenceClaim, right: EvidenceClaim) -> bool:
         return True
     if left.field != ProfileField.university_name:
         return False
+
+    def acronym_matches(short: str, expanded: str) -> bool:
+        short = short.replace(".", "").strip()
+        words = comparison_key(expanded).split()
+        significant = [word for word in words if word not in {"the", "of", "and", "for"}]
+        return bool(
+            short.isupper()
+            and 2 <= len(short) <= 8
+            and len(significant) > 1
+            and {"university", "college", "institute", "academy", "school"}.intersection(words)
+            and short.casefold() == "".join(word[0] for word in significant)
+        )
+
+    if acronym_matches(left.raw_value, right.raw_value) or acronym_matches(right.raw_value, left.raw_value):
+        return True
+    # A historical name must be explicitly connected to its successor in the
+    # evidence. Shared location or generic institution words are insufficient.
+    for evidence in (left.evidence_text, right.evidence_text):
+        for first, second in ((left.raw_value, right.raw_value), (right.raw_value, left.raw_value)):
+            if re.search(
+                rf"\b{re.escape(comparison_key(first))}\s+(?:(?:is|was)\s+)?"
+                rf"(?:now|formerly|previously)(?:\s+known\s+as|\s+called)?\s+"
+                rf"{re.escape(comparison_key(second))}\b",
+                comparison_key(evidence),
+            ):
+                return True
     left_base = _university_base_key(left.raw_value)
     right_base = _university_base_key(right.raw_value)
     # A qualified form can match its exact unqualified form. Two different
@@ -292,11 +328,25 @@ def _definitely_distinct_education(bundle: _FactBundle, cluster: _EvidenceCluste
             return True
 
         def credential_dates(claims: list[EvidenceClaim]) -> set[str]:
-            markers = {claim.end_date.isoformat() for claim in claims if claim.end_date}
+            # Compare the actual years, not prose such as "graduated in 2009"
+            # versus "2009" or an ISO date for that same qualification.
+            markers = {str(claim.end_date.year) for claim in claims if claim.end_date}
+            if markers:
+                return markers
             for claim in claims:
-                temporal = comparison_key(claim.temporal_context or "")
-                if re.search(r"\b(?:18|19|20)\d{2}\b", temporal):
-                    markers.add(temporal)
+                temporal = claim.temporal_context or ""
+                years = set(re.findall(r"\b(?:18|19|20)\d{2}\b", temporal))
+                if len(years) == 1:
+                    markers.update(years)
+                    continue
+                ranges = re.findall(
+                    r"\b((?:18|19|20)\d{2})\s*(?:[-–—/]|\bto\b)\s*"
+                    r"((?:18|19|20)\d{2})\b",
+                    temporal,
+                    flags=re.IGNORECASE,
+                )
+                if len(ranges) == 1 and years == set(ranges[0]) and ranges[0][0] < ranges[0][1]:
+                    markers.add(ranges[0][1])
             return markers
 
         bundle_dates = credential_dates(bundle.claims)
@@ -939,17 +989,18 @@ def _employment_decisions(
                 r"\b(?:architectural practice|architecture firm|law practice|design studio)\b", quote
             )
         ownership = re.search(r"\b(founder|co founder|principal|owner|partner)\b", comparison_key(titles))
-        founding = re.search(r"\b(founded|co founded|established|set up)\b", quote)
+        founding = re.search(
+            r"\b(founded|co founded|established|set up)\b|"
+            r"\b(?:began|opened|started)\s+(?:(?:his|her|their)\s+)?(?:own\s+)?(?:practice|firm|studio)\b",
+            quote,
+        )
         # Require grounded ownership/practice context; supplied affiliation alone
         # never establishes professional primacy or currentness.
         return bool(practice and (ownership or founding))
 
-    clusters = [
-        cluster
-        for cluster in _employment_clusters(eligible_claims, include_historical=True)
-        if principal_practice(cluster)
-        or any(claim.is_current is not False and claim.end_date is None for claim in cluster.claims)
-    ]
+    # Retain an ended senior role as a historical candidate. Previously all
+    # non-practice history disappeared while unmarked early appointments survived.
+    clusters = _employment_clusters(eligible_claims, include_historical=True)
     active_practice = any(
         principal_practice(cluster)
         and any(claim.is_current is not False and claim.end_date is None for claim in cluster.claims)
@@ -991,6 +1042,14 @@ def _employment_decisions(
             titles or None,
             source_types={sources[claim.source_id].source_type for claim in cluster.claims},
         )
+        if re.fullmatch(r"(?:member|chair|chairman|chairwoman|chairperson)", comparison_key(titles)) and any(
+            re.search(
+                r"\b(?:committee|commission|advisory council|steering group)\b",
+                comparison_key(claim.evidence_text),
+            )
+            for claim in cluster.claims
+        ):
+            return RelationshipType.advisory_role
         if kind == RelationshipType.current_academic_role and active_practice:
             return RelationshipType.secondary_academic_role
         return kind
@@ -1018,6 +1077,22 @@ def _employment_decisions(
         return int(any(comparison_key(value).removeprefix("the ") not in generic for value in values))
 
     rank_cache: dict[int, tuple] = {}
+    all_historical = all(
+        claim.is_current is False or claim.end_date is not None
+        for cluster in clusters
+        for claim in cluster.claims
+    )
+
+    def career_date(cluster: _EvidenceCluster) -> date:
+        dates = [claim.end_date for claim in cluster.claims if claim.end_date]
+        dates.extend(
+            date(int(year), 12, 31)
+            for claim in cluster.claims
+            for year in re.findall(r"\b(?:18|19|20)\d{2}\b", claim.temporal_context or "")
+        )
+        return max(dates, default=date.min)
+
+    latest_career_date = max((career_date(cluster) for cluster in clusters), default=date.min)
 
     def rank(cluster: _EvidenceCluster) -> tuple:
         if id(cluster) in rank_cache:
@@ -1061,8 +1136,13 @@ def _employment_decisions(
             for claim in cluster_claims
         )
         recent_primary = int(
-            freshness >= 3
-            and (explicitly_current or grounded_present_role)
+            (
+                freshness >= 3
+                and (explicitly_current or grounded_present_role)
+                or all_historical
+                and latest_career_date != date.min
+                and career_date(cluster) == latest_career_date
+            )
             and kind
             in {
                 RelationshipType.current_government_office,
@@ -1135,8 +1215,22 @@ def _employment_decisions(
         selected_rank = rank(selected)
         sanity_reason = "secure_current_primary_office"
     unresolved: list[_EvidenceCluster] = []
+    concurrent: list[_EvidenceCluster] = []
     alternatives = [cluster for cluster in clusters if cluster is not selected]
     for cluster in alternatives:
+        if (
+            any(claim.is_current is True and claim.end_date is None for claim in selected.claims)
+            and any(claim.is_current is True and claim.end_date is None for claim in cluster.claims)
+            and any(
+                re.search(
+                    r"\b(?:concurrently|simultaneously|while continuing|continues to)\b",
+                    comparison_key(claim.evidence_text),
+                )
+                for claim in [*selected.claims, *cluster.claims]
+            )
+        ):
+            concurrent.append(cluster)
+            continue
         candidate_rank = rank(cluster)
         same_current_state = candidate_rank[:6] == selected_rank[:6]
         same_observation = (
@@ -1221,6 +1315,14 @@ def _employment_decisions(
             reason_codes=reasons,
         )
         decisions[field_name].scoring_components["relationship_type"] = relationship_type(selected).value
+        if concurrent:
+            decisions[field_name].scoring_components["concurrent_relationships"] = [
+                {
+                    "values": sorted({claim.raw_value for claim in cluster.claims}),
+                    "claim_ids": sorted({claim.claim_id for claim in cluster.claims}),
+                }
+                for cluster in concurrent
+            ]
         decisions[field_name].scoring_components["relationship_temporal_status"] = (
             "historical"
             if historical_selection

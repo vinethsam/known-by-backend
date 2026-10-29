@@ -146,6 +146,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "test", "production"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     API_ACCESS_TOKEN: SecretStr | None = None
+    LIBRARY_DELETE_TOKEN: SecretStr | None = None
     DATABASE_URL: str = "sqlite:///./research.db"
     STATIC_FETCH_WORKER_URL: str | None = None
     STATIC_FETCH_WORKER_SECRET: SecretStr | None = None
@@ -192,7 +193,7 @@ class Settings(BaseSettings):
     TARGET_FIELD_CONFIDENCE: float = Field(default=85, ge=0, le=100)
     MAX_SOURCES_WITHOUT_NEW_CLAIMS: int = Field(default=3, ge=1)
     PERSON_TIMEOUT_SECONDS: float = Field(default=600, gt=0, le=3600)
-    MAX_BATCH_ROWS: int = Field(default=100, ge=1, le=1000)
+    MAX_BATCH_ROWS: int = Field(default=500, ge=1, le=500)
     MAX_UPLOAD_BYTES: int = Field(default=5_000_000, ge=1024, le=20_000_000)
     MAX_XLSX_UNCOMPRESSED_BYTES: int = Field(default=30_000_000, ge=1024)
     MAX_INPUT_COLUMNS: int = Field(default=100, ge=1, le=1000)
@@ -207,6 +208,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def valid_settings(self):
+        if self.LIBRARY_DELETE_TOKEN and self.LIBRARY_DELETE_TOKEN.get_secret_value().strip():
+            if self.API_ACCESS_TOKEN and (
+                self.LIBRARY_DELETE_TOKEN.get_secret_value() == self.API_ACCESS_TOKEN.get_secret_value()
+            ):
+                raise ValueError("LIBRARY_DELETE_TOKEN must differ from API_ACCESS_TOKEN")
         for model in (self.OPENROUTER_SOURCE_MODEL, self.OPENROUTER_EXTRACTION_MODEL):
             if model and (":online" in model.lower() or model.strip().startswith("@")):
                 raise ValueError("Use a plain model ID; online variants and presets can bypass tool budgets")

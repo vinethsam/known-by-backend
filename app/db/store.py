@@ -62,7 +62,7 @@ from app.schemas import (
 )
 from app.seed_context import seed_input_attributes
 
-EXPECTED_ALEMBIC_REVISION = "202609290001"
+EXPECTED_ALEMBIC_REVISION = "202610280001"
 SUCCESS_STATUSES = {PersonStatus.completed.value, PersonStatus.review_required.value}
 TERMINAL_STATUSES = SUCCESS_STATUSES | {PersonStatus.failed.value, PersonStatus.cancelled.value}
 

@@ -78,7 +78,9 @@ def _read_delimited(content: bytes, delimiter: str, settings: Settings) -> list[
     try:
         for row_number, row in enumerate(reader, start=1):
             if row_number > settings.MAX_BATCH_ROWS + 1:
-                raise BatchParseError("Batch file contains too many rows")
+                raise BatchParseError(
+                    f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+                )
             if len(row) > settings.MAX_INPUT_COLUMNS:
                 raise BatchParseError("Batch file contains too many columns")
             rows.append([_stringify_cell(value) for value in row])
@@ -105,8 +107,12 @@ def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
                 for _, element in iterparse(xml, events=("end",)):
                     if element.tag.endswith("}c") and element.get("r"):
                         _, _, column, row_index = range_boundaries(element.get("r"))
-                        if column > settings.MAX_INPUT_COLUMNS or row_index > settings.MAX_BATCH_ROWS + 1:
-                            raise BatchParseError("XLSX cells exceed configured rows or columns")
+                        if row_index > settings.MAX_BATCH_ROWS + 1:
+                            raise BatchParseError(
+                                f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+                            )
+                        if column > settings.MAX_INPUT_COLUMNS:
+                            raise BatchParseError("XLSX cells exceed configured columns")
                     element.clear()
         sheet.reset_dimensions()
         rows: list[list[str]] = []
@@ -115,7 +121,9 @@ def _read_xlsx(content: bytes, settings: Settings) -> list[list[str]]:
             start=1,
         ):
             if row_number > settings.MAX_BATCH_ROWS + 1:
-                raise BatchParseError("Batch file contains too many rows")
+                raise BatchParseError(
+                    f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+                )
             values = [_stringify_cell(cell.value) for cell in row]
             if len(values) > settings.MAX_INPUT_COLUMNS:
                 raise BatchParseError("Batch file contains too many columns")
@@ -199,7 +207,9 @@ def _rows_to_batch(rows: list[list[str]], name_column: str | None, settings: Set
         if len(values) < len(header):
             values.extend([""] * (len(header) - len(values)))
         if len(prepared_rows) >= settings.MAX_BATCH_ROWS:
-            raise BatchParseError("Batch file contains too many rows")
+            raise BatchParseError(
+                f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+            )
         prepared_rows.append((zero_based, values))
 
     inference = _infer_columns(header, [values for _, values in prepared_rows], name_column)
@@ -421,4 +431,6 @@ def _validate_xlsx_dimensions(sheet, settings: Settings) -> None:
     if maximum_column > settings.MAX_INPUT_COLUMNS:
         raise BatchParseError("Batch file contains too many columns")
     if maximum_row > settings.MAX_BATCH_ROWS + 1:
-        raise BatchParseError("Batch file contains too many rows")
+        raise BatchParseError(
+            f"Batch file contains too many rows; maximum {settings.MAX_BATCH_ROWS} data records"
+        )
