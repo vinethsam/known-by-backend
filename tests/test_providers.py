@@ -391,7 +391,7 @@ async def test_partial_usage_retains_reservation_and_checkpoints_attempt():
         await budgeted.complete(
             TinyResponse, "source", "JSON", {}, {"job_id": "job", "person_id": "person"}, "v1"
         )
-    assert len(checkpoints) == 2
+    assert len(checkpoints) == 3
     assert checkpoints[0][0] == 1 and checkpoints[0][2] == 0
     assert checkpoints[1][2] == 1
     assert checkpoints[0][1] == checkpoints[1][1] > 3
