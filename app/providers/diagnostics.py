@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import unicodedata
@@ -58,37 +59,48 @@ def _error_details(data: Any, secret: str) -> dict[str, Any]:
     }
 
 
-class _DiagnosticStream(httpx.AsyncByteStream):
-    """Observe bytes already read by the production bounded response parser."""
+class _DiagnosticClient(OpenRouterClient):
+    """Observe the decoded envelope after the existing bounded parser reads it."""
 
-    def __init__(self, inner, limit, details, secret):
-        self.inner, self.limit, self.details, self.secret = inner, limit, details, secret
-        self.parts: list[bytes] = []
-        self.size = 0
-        self.oversized = False
+    def __init__(self, settings, http, details, secret):
+        super().__init__(settings, http)
+        self.details, self.secret = details, secret
 
-    async def __aiter__(self):
-        async for chunk in self.inner:
-            self.size += len(chunk)
-            if self.size <= self.limit:
-                self.parts.append(chunk)
-            else:
-                self.oversized = True
-                self.parts.clear()
-            yield chunk
+    async def _read_json_response(self, response):
+        original_iterator = response.aiter_bytes
+        prefix = bytearray()
 
-    async def aclose(self):
+        async def observe_decoded(*args, **kwargs):
+            async for chunk in original_iterator(*args, **kwargs):
+                if len(prefix) < 8192:
+                    prefix.extend(chunk[: 8192 - len(prefix)])
+                yield chunk
+
+        response.aiter_bytes = observe_decoded
         try:
-            if not self.oversized:
-                try:
-                    data = json.loads(b"".join(self.parts))
-                except (ValueError, UnicodeDecodeError):
-                    pass
-                else:
-                    self.details.update(_error_details(data, self.secret))
+            data = await super()._read_json_response(response)
+        except OpenRouterError:
+            text = prefix.decode("utf-8", errors="replace")
+            title = re.search(r"<title\b[^>]*>(.*?)</title\s*>", text, re.IGNORECASE | re.DOTALL)
+            if title:
+                plain_title = html.unescape(re.sub(r"<[^>]*>", " ", title.group(1)))
+                self.details["html_title"] = sanitize_diagnostic(plain_title, self.secret, 200)
+            if str(self.details.get("cf_mitigated", "")).casefold() == "challenge":
+                category = "cloudflare_challenge"
+            elif "cloudflare" in text.casefold() and (
+                "blocked" in text.casefold() or "attention required" in text.casefold()
+            ):
+                category = "cloudflare_access_denied_page"
+            else:
+                category = "html_error_page" if title else "non_json_error_response"
+            self.details["response_category"] = category
+            raise
+        else:
+            self.details.update(_error_details(data, self.secret))
+            return data
         finally:
-            self.parts.clear()
-            await self.inner.aclose()
+            response.aiter_bytes = original_iterator
+            prefix.clear()
 
 
 async def run_diagnostic(settings: Settings | None = None, *, transport=None) -> dict[str, Any]:
@@ -108,13 +120,19 @@ async def run_diagnostic(settings: Settings | None = None, *, transport=None) ->
 
     async def observe(response):
         details["http_status"] = response.status_code
+        for header, field in (
+            ("content-type", "response_content_type"),
+            ("content-encoding", "response_content_encoding"),
+            ("server", "server"),
+            ("cf-mitigated", "cf_mitigated"),
+        ):
+            details[field] = sanitize_diagnostic(response.headers.get(header), secret, 120)
         request_id = (
             response.headers.get("x-request-id")
             or response.headers.get("x-openrouter-request-id")
             or response.headers.get("cf-ray")
         )
         details["request_id"] = sanitize_diagnostic(request_id, secret, 128)
-        response.stream = _DiagnosticStream(response.stream, settings.MAX_RESPONSE_BYTES, details, secret)
 
     usage = []
     try:
@@ -124,7 +142,7 @@ async def run_diagnostic(settings: Settings | None = None, *, transport=None) ->
             transport=transport,
             event_hooks={"response": [observe]},
         ) as http:
-            client = OpenRouterClient(settings, http)
+            client = _DiagnosticClient(settings, http, details, secret)
             try:
                 data, usage = await client.web_search(DIAGNOSTIC_QUERY, 1, {"diagnostic": "provider_access"})
             except OpenRouterError as exc:
