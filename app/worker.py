@@ -17,7 +17,7 @@ from app.logging import configure_logging
 from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import RecoverableResearchError, ResearchOrchestrator
-from app.research.telemetry import person_performance, stage
+from app.research.telemetry import person_performance, record_person_result, stage
 from app.retrieval.service import RetrievalService
 from app.schemas import PersonStatus, utcnow
 
@@ -149,6 +149,8 @@ async def process_lease(store, orchestrator, lease, settings):
 async def _process_lease(store, orchestrator, lease, settings):
     clock = ResearchClock()
     latest = getattr(lease, "checkpoint", None)
+    final_result = None
+    outcome = None
 
     async def persist(method, *args):
         with stage("persistence_ms"):
@@ -162,6 +164,7 @@ async def _process_lease(store, orchestrator, lease, settings):
             raise LeaseLost()
 
     async def work():
+        nonlocal final_result
         if isinstance(orchestrator, ResearchOrchestrator):
             result = await orchestrator.research(
                 lease.job_id,
@@ -172,6 +175,7 @@ async def _process_lease(store, orchestrator, lease, settings):
             )
         else:
             result = await orchestrator.research(lease.job_id, lease.person_id, lease.seed, checkpoint)
+        final_result = result
         if result.profile.coverage == 0:
             failure_reason = (
                 result.profile.metrics.failure_reason
@@ -181,9 +185,11 @@ async def _process_lease(store, orchestrator, lease, settings):
             result.profile.status = PersonStatus.failed
             for record in result.profile.records:
                 record.status = PersonStatus.failed
+            record_person_result(result)
             if not await persist(store.fail_task, lease, failure_reason, result):
                 raise LeaseLost()
         else:
+            record_person_result(result)
             if not await persist(store.finish_task, lease, result):
                 raise LeaseLost()
 
@@ -199,13 +205,16 @@ async def _process_lease(store, orchestrator, lease, settings):
             if done:
                 break
             if not await persist(store.renew_lease, lease):
+                outcome = "lease_lost"
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 return
         await task
     except LeaseLost:
+        outcome = "lease_lost"
         logger.info("lease_lost", extra={"job_id": lease.job_id, "person_id": lease.person_id})
     except RecoverableResearchError as exc:
+        outcome = "retrying"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         outage_attempt = 0
@@ -224,14 +233,17 @@ async def _process_lease(store, orchestrator, lease, settings):
             },
         )
     except TimeoutError:
+        outcome = "timed_out"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await persist(store.fail_task, lease, "PERSON_TIMEOUT")
     except asyncio.CancelledError:
+        outcome = "cancelled"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         raise
     except Exception as exc:
+        outcome = "failed"
         # A lease-renewal/database error can occur while research is still live.
         # Stop owned network/model work before recording the terminal failure.
         task.cancel()
@@ -250,6 +262,8 @@ async def _process_lease(store, orchestrator, lease, settings):
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if final_result is not None or latest is not None:
+            record_person_result(final_result or latest, outcome=outcome)
 
 
 async def run_worker(settings=None, store=None, orchestrator=None, stop_event=None):

@@ -435,6 +435,13 @@ class ResearchMetrics(Contract):
     tokens_used: int = 0
     tokens_budgeted: int = 0
     cost: float = 0
+    retrieval_cache_hits: int = 0
+    retrieval_cache_misses: int = 0
+    extraction_cache_hits: int = 0
+    request_cache_hits: int = 0
+    # Derived from the retained attempt ledger; actual cost stays unknown when
+    # any attempt lacks provider accounting. Never used for budget admission.
+    accounting: dict[str, Any] = Field(default_factory=dict)
     stop_reason: str | None = None
     failure_reason: str | None = None
     error_codes: list[str] = Field(default_factory=list)

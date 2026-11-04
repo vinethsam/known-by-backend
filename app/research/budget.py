@@ -23,21 +23,29 @@ class BudgetedModel:
         self.checkpoint = None
         self._budget_lock = asyncio.Lock()
         self._requests = self.metrics.recovery.setdefault("requests", {})
+        self.provider_unavailable = False
+        self.provider_unavailable_status = None
 
     def _key(self, operation):
         return hashlib.sha256(json.dumps(operation, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
     async def _request(self, key, call, decode, encode):
-        if self.checkpoint is None:
-            return await call()
+        # This client is scoped to one person and its fixed model configuration.
+        # Reuse exact completed receipts even for callers without persistence.
+        # Keep existing receipt hashes so recovering older in-flight requests
+        # cannot accidentally issue a second paid request.
         receipt = self._requests.get(key)
         if receipt:
             if receipt.get("state") == "completed":
+                self.metrics.request_cache_hits += 1
+                count("request_cache_hits")
                 return decode(receipt["result"])
             if receipt.get("state") != "retryable":
                 # A crash or lost acknowledgement left no durable reply. Never
                 # blindly repeat a request that may already have incurred a charge.
                 raise BudgetExceeded("PROVIDER_RESPONSE_UNCERTAIN")
+        if self.provider_unavailable:
+            raise BudgetExceeded("PROVIDER_UNAVAILABLE")
         self._requests[key] = {"state": "in_flight"}
         try:
             value = await call()
@@ -119,6 +127,8 @@ class BudgetedModel:
 
     def _callbacks(self, reserve: int, *, search_results: int = 0, request_key=None):
         async def before_attempt(attempt):
+            if self.provider_unavailable:
+                raise BudgetExceeded("PROVIDER_UNAVAILABLE")
             if search_results:
                 if self.metrics.web_search_calls_reserved >= self.settings.MAX_SOURCE_MODEL_TOOL_CALLS:
                     raise BudgetExceeded("MAX_SEARCH_TOOL_CALLS")
@@ -146,6 +156,9 @@ class BudgetedModel:
 
         async def on_usage(record):
             self.usage.append(record)
+            if record.http_status in {401, 402, 403}:
+                self.provider_unavailable = True
+                self.provider_unavailable_status = record.http_status
             if request_key and record.success:
                 self._requests[request_key]["acknowledged"] = True
             actual = record.prompt_tokens + record.completion_tokens

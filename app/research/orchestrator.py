@@ -14,7 +14,7 @@ from app.config import Settings
 from app.processing import document_metadata, process_content
 from app.providers.openrouter import OPENROUTER_SCHEMA_ERROR, OpenRouterError
 from app.providers.search import SearchProviderError
-from app.providers.source_advisor import SourceAdvisor
+from app.providers.source_advisor import SourceAdvisor, SourceDecision
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.claims import deduplicate_claims, validate_claims
 from app.research.concurrency import Outcome, ordered_window
@@ -31,7 +31,7 @@ from app.research.discovery import (
     rank_candidates,
     source_authority,
 )
-from app.research.extraction import extract_chunks
+from app.research.extraction import extract_chunks, extraction_chunk_key
 from app.research.identity import (
     assess_identity,
     candidate_has_seed_identity_context,
@@ -39,7 +39,13 @@ from app.research.identity import (
     eligible_identity_source_ids,
 )
 from app.research.reconciliation import reconcile
-from app.research.telemetry import count, person_performance, stage
+from app.research.telemetry import (
+    bind_research_metrics,
+    count,
+    person_performance,
+    record_person_result,
+    stage,
+)
 from app.retrieval.service import FetchError, RetrievedPage
 from app.retrieval.urls import canonicalise_url, domain_key, source_policy_allows, source_record_allowed
 from app.schemas import (
@@ -184,6 +190,7 @@ class ResearchOrchestrator:
         resume = resume.model_copy(deep=True) if resume is not None else None
         started = resume.profile.started_at if resume else utcnow()
         metrics = resume.profile.metrics if resume else ResearchMetrics()
+        bind_research_metrics(metrics)
         metrics.stop_reason = metrics.failure_reason = None
         usage, sources, claims = (resume.usage, resume.sources, resume.claims) if resume else ([], [], [])
         client = BudgetedModel(self.model, settings, metrics, usage)
@@ -239,7 +246,8 @@ class ResearchOrchestrator:
         fallback_queued = cursor.get("fallback_queued", False)
         role_completion_queued = cursor.get("role_completion_queued", False)
         wikipedia_completion_queued = cursor.get("wikipedia_completion_queued", False)
-        last_planned_clues = None
+        planned_inputs = set(cursor.get("planned_inputs", []))
+        reusable_extractions = dict(cursor.get("reusable_extractions", {}))
 
         def result():
             nonlocal cached_profile, evidence_changed
@@ -309,6 +317,8 @@ class ResearchOrchestrator:
                         "fallback_queued": fallback_queued,
                         "role_completion_queued": role_completion_queued,
                         "wikipedia_completion_queued": wikipedia_completion_queued,
+                        "planned_inputs": sorted(planned_inputs),
+                        "reusable_extractions": reusable_extractions,
                     }
                     # The store runs in a thread. Freeze mutable usage/evidence while
                     # other requests finish; sessions never cross network awaits.
@@ -319,6 +329,9 @@ class ResearchOrchestrator:
         client.checkpoint = save if checkpoint is not None else None
 
         def stopped(*, include_target: bool = True):
+            if client.provider_unavailable:
+                metrics.stop_reason = "PROVIDER_UNAVAILABLE"
+                return True
             unfinished = any(
                 s.requested_url in pending_candidates or s.requested_url in active_candidates for s in sources
             )
@@ -402,6 +415,30 @@ class ResearchOrchestrator:
                 if source.identity.rejected or source.identity.score < settings.SCORING.identity_minimum:
                     source.processing_status = "identity_rejected"
                     return
+                reuse_key = extraction_chunk_key(
+                    "",
+                    "\n\n".join(chunks),
+                    person_id=person_id,
+                    source_url=page.final_url,
+                    model=settings.OPENROUTER_EXTRACTION_MODEL or "",
+                )
+                prior = next(
+                    (item for item in sources if item.source_id == reusable_extractions.get(reuse_key)), None
+                )
+                if (
+                    prior is not None
+                    and prior.source_id != source.source_id
+                    and prior.processing_status == "extracted"
+                    and not prior.identity.rejected
+                    and prior.published_at == source.published_at
+                    and prior.authority_score >= source.authority_score
+                    and prior.identity.score >= source.identity.score
+                    and (not prior.identity.ambiguous or source.identity.ambiguous)
+                ):
+                    source.processing_status = "duplicate"
+                    metrics.extraction_cache_hits += len(chunks)
+                    count("extraction_cache_hits", len(chunks))
+                    return
                 if source.source_id not in accepted_sources:
                     accepted_sources.add(source.source_id)
                     metrics.sources_accepted += 1
@@ -414,10 +451,17 @@ class ResearchOrchestrator:
                         dict(context, source_id=source.source_id),
                         self._extraction_slots,
                         settings.MAX_CONCURRENT_EXTRACTIONS,
+                        applied_chunks=applied_chunks,
                     )
                 ) as extractions:
                     async for chunk, response in extractions:
-                        chunk_key = hashlib.sha256((source.source_id + chunk).encode()).hexdigest()
+                        chunk_key = extraction_chunk_key(
+                            source.source_id,
+                            chunk,
+                            person_id=person_id,
+                            source_url=page.final_url,
+                            model=settings.OPENROUTER_EXTRACTION_MODEL or "",
+                        )
                         if chunk_key in applied_chunks:
                             continue
                         rejected_claims: Counter[str] = Counter()
@@ -453,6 +497,7 @@ class ResearchOrchestrator:
                         await save()
                 claims = deduplicate_claims(claims)
                 source.processing_status = "extracted"
+                reusable_extractions[reuse_key] = source.source_id
                 completed_extraction = True
             except (FetchError, ValueError) as exc:
                 if isinstance(exc, FetchError) and getattr(exc, "infrastructure", False):
@@ -563,10 +608,45 @@ class ResearchOrchestrator:
             metrics.sources_discovered = len(discovered_urls)
             new_candidates = [c for c in candidates if c.url not in validated_candidates]
             by_id = {}
-            if new_candidates:
+            uncertain = []
+            for candidate in new_candidates:
+                _, authority = source_authority(candidate.source_type, candidate.url, settings.SCORING)
+                source_type = SourceType(authority["source_type"])
+                metadata_identity = assess_identity(
+                    seed,
+                    f"{candidate.title}\n{candidate.snippet}",
+                    settings.SCORING,
+                    source_type=source_type,
+                )
+                if (
+                    not metadata_identity.rejected
+                    and not metadata_identity.signals.get("contradicted_clues")
+                    and authority.get("domain_override")
+                    and source_type
+                    in {
+                        SourceType.first_party,
+                        SourceType.government,
+                        SourceType.employer,
+                        SourceType.university,
+                        SourceType.professional_body,
+                    }
+                    and candidate_has_seed_identity_context(seed, candidate)
+                ):
+                    # Operator classification plus locally linked name/institution
+                    # makes metadata planning redundant. Fetched-body identity and
+                    # claim grounding still have to pass the unchanged gates.
+                    by_id[candidate.candidate_id] = SourceDecision(
+                        candidate_id=candidate.candidate_id,
+                        source_type=source_type,
+                        relevance="likely",
+                    )
+                    count("deterministic_validations")
+                else:
+                    uncertain.append(candidate)
+            if uncertain:
                 try:
                     with stage("source_validation_ms"):
-                        decisions, _ = await advisor.validate(seed, new_candidates, context)
+                        decisions, _ = await advisor.validate(seed, uncertain, context)
                 except OpenRouterError as exc:
                     error_code = _source_advisor_error_code(exc)
                     logger.error(
@@ -589,7 +669,7 @@ class ResearchOrchestrator:
                         ),
                     )
                     raise
-                by_id = {d.candidate_id: d for d in decisions}
+                by_id.update({d.candidate_id: d for d in decisions})
             eligible = []
             for candidate in candidates:
                 cached = validated_candidates.get(candidate.url)
@@ -690,10 +770,13 @@ class ResearchOrchestrator:
                 except FetchError as exc:
                     _recover_infrastructure(exc)
                     metrics.error_codes.append("STRUCTURED_RETRIEVAL_FAILED")
-            preferred = [
-                SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
-                for url in seed.preferred_urls
-            ]
+            preferred = deduplicate_candidates(
+                [
+                    SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
+                    for url in [*seed.preferred_urls, *([seed.profile_link] if seed.profile_link else [])]
+                ],
+                settings,
+            )
             if preferred and not stopped(include_target=False):
                 await validate_and_process(preferred)
             if not stopped(include_target=not bool(pending_candidates)):
@@ -843,33 +926,6 @@ class ResearchOrchestrator:
                                 for fields in record_fields
                             )
                         ]
-                        seed_context = seed_context_values(seed)
-                        if set(seed_context) & {
-                            "university_name",
-                            "degree_type",
-                            "subject",
-                            "historical_employer",
-                            "historical_job_title",
-                            "industry",
-                            "job_title",
-                        }:
-                            # Use a new supplied objective before paying for optional
-                            # model planning. Previously completed searches and the
-                            # existing stop/source/tool budgets still apply.
-                            observed = {}
-                            for field_name, decision in profile.fields.items():
-                                if decision.selected_claim_id and decision.value:
-                                    observed[field_name.value] = [decision.value]
-                            targeted = [
-                                query
-                                for query in build_context_queries(
-                                    seed, unresolved, evidence_context=observed
-                                )
-                                if query_key(query) not in queries_done
-                            ]
-                            if targeted and remaining_search_call_capacity() > 0:
-                                queue.append(targeted[0])
-                                continue
                         primary_fields = record_fields[0]
                         role = primary_fields[ProfileField.job_title]
                         organisation = primary_fields[ProfileField.organisation]
@@ -912,9 +968,63 @@ class ResearchOrchestrator:
                             if query_key(role_query) not in queries_done:
                                 queue.append(role_query)
                                 continue
-                        if clues == last_planned_clues:
+                        # Use evidence-aware deterministic objectives before optional
+                        # LLM planning, including education absent from input columns.
+                        observed = {}
+                        for field_name, decision in profile.fields.items():
+                            if field_name in ProfileField and decision.selected_claim_id and decision.value:
+                                observed[field_name.value] = [decision.value]
+                        context_available = bool(
+                            observed
+                            or set(seed_context_values(seed))
+                            & {
+                                "organisation",
+                                "job_title",
+                                "university_name",
+                                "degree_type",
+                                "subject",
+                                "historical_employer",
+                                "historical_job_title",
+                                "industry",
+                            }
+                        )
+                        objectives = build_context_queries(seed, unresolved, evidence_context=observed)
+                        education_fields = {
+                            ProfileField.university_name,
+                            ProfileField.degree_type,
+                            ProfileField.subject,
+                        }
+                        if all(
+                            has_researched_value(primary_fields[field])
+                            for field in (ProfileField.organisation, ProfileField.job_title)
+                        ) and any(
+                            not has_researched_value(fields[field])
+                            for fields in record_fields
+                            for field in education_fields
+                        ):
+                            # Another education source can fill absent credentials and
+                            # corroborate a known role; don't repeat broad employment first.
+                            objectives = [
+                                *build_context_queries(
+                                    seed,
+                                    [field.value for field in education_fields],
+                                    evidence_context=observed,
+                                ),
+                                *objectives,
+                            ]
+                        targeted = [
+                            query
+                            for query in objectives
+                            if context_available and query_key(query) not in queries_done
+                        ]
+                        if targeted and remaining_search_call_capacity() > 0:
+                            queue.append(targeted[0])
+                            continue
+                        plan_key = hashlib.sha256(
+                            json.dumps([clues, sorted(unresolved)], ensure_ascii=True).encode()
+                        ).hexdigest()
+                        if plan_key in planned_inputs:
                             break
-                        last_planned_clues = clues
                         important_unresolved = [
                             field_name.value
                             for field_name in sorted(
@@ -984,6 +1094,8 @@ class ResearchOrchestrator:
                         queue.extend(planned_queries[:planned_limit])
                         if reserve_wikipedia:
                             queue_wikipedia_query(important_unresolved)
+                        planned_inputs.add(plan_key)
+                        await save()
                         if not queue:
                             break
                     query = queue.popleft()
@@ -1026,6 +1138,9 @@ class ResearchOrchestrator:
                                 selected_source_count=0,
                             ),
                         )
+                        if exc.http_status in {401, 402, 403}:
+                            metrics.stop_reason = "PROVIDER_UNAVAILABLE"
+                            break
                         continue
                     pending_candidates.update({candidate.url: candidate for candidate in candidates})
                     active_query = None
@@ -1112,4 +1227,5 @@ class ResearchOrchestrator:
             source_records=sources,
             policy=settings.SCORING,
         )
+        record_person_result(final)
         return final

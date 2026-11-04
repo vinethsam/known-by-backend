@@ -37,14 +37,93 @@ zero for that field; the worker supplies the full attempt/persistence boundary.
 | `candidates_discovered`, `candidates_selected` | Unique candidates discovered and ranked candidates consumed |
 | `sources_requested`, `sources_retrieved` | Retrieval requests and returned pages, including cached pages |
 | `retrieval_cache_hits`, `retrieval_cache_misses` | Validated cache lookup outcomes |
+| `extraction_cache_hits`, `request_cache_hits` | Already-applied extraction chunks and exact completed provider receipts reused |
+| `deterministic_validations` | Candidate metadata decisions made before model-assisted validation |
 | `static_fetches`, `playwright_fallbacks` | Static attempts and eligible browser fallbacks |
 | `extraction_calls`, `extraction_chunks` | Model extraction attempts including retries, and chunks started |
 | `input_tokens`, `output_tokens` | Reported tokens across model attempts |
-| `provider_cost` | Sum of available provider-reported costs; missing cost is not a claim of free usage |
+| `provider_cost` | Lease-only subtotal of available provider-reported costs; see cumulative accounting for completeness |
 
 Actual reported web-search executions remain available in model usage records under
 `web_search_requests`; missing provider metadata remains unknown. Performance logs
 contain no seed text, source bodies, request headers, credentials, or environment dump.
+
+The nested `performance.research` object and retained `metrics.accounting` contain
+cumulative accounting across recovered leases. Usage IDs are deduplicated before
+counting model attempts, operation/model breakdowns, input/output tokens and reported
+cost. Budget reservations remain separate and unchanged. Reserved attempts without a
+durable reply make accounting incomplete. Proven pre-write connection/pool failures
+are excluded from model-call counts and do not create unknown provider charges.
+
+`reported_api_cost` is the known subtotal. `actual_api_cost` is null when any attempt
+has unknown cost; `cost_complete` and `unknown_cost_calls` make that distinction
+explicit. A null provider charge is never estimated or treated as free usage.
+Search accounting similarly retains a known request subtotal and null actual request
+count when provider tool metadata is incomplete.
+
+Independent supported/unresolved fields are measured across all credential records,
+requiring a researched selection, positive independent confidence and evidence
+support. Supplied input certainty cannot fill the metric. Existing confidence
+formulas and thresholds do not change. An enriched person has at least one supported
+professional or education field; name/profile-link-only results remain distinguishable.
+The independent field coverage rate uses all seven required fields and is separate
+from the existing six-researched-field profile coverage metric.
+
+`aggregate_person_summaries` calculates actual cost per attempted person, per enriched
+person and per independently supported field; calls per person; independent coverage;
+and retrieval reuse (`hits / (hits + misses)`). Rates use 0–1. Cost-per-enriched-person
+includes expenditure on unsuccessful attempts in its numerator. Unmeasured attempts
+make averages unknown instead of improving them through an artificial zero. Rejected
+input rows and cancellations before research are excluded from attempted-person
+denominators. Aggregation uses retained compact summaries rather than rereading all
+evidence or performing historical backfills.
+
+Repository fixture costs are synthetic. November 1–2 credit-exhaustion/HTTP 403
+batches are failed-provider diagnostics, not a successful cost or coverage baseline.
+Without representative successful provider accounting, live savings remain
+unverified; a 50% reduction is a target, not a measured outcome.
+
+## Phase 1 paid-call audit and deterministic work
+
+| Operation | Calling path | Configured model | When a request remains necessary |
+| --- | --- | --- | --- |
+| `web_search` | `BudgetedModel.search` → `OpenRouterSearchProvider.search` | `OPENROUTER_SOURCE_MODEL` | Each fresh search-index query; Python query construction does not replace search access |
+| `plan_search_queries` | `SourceAdvisor.plan` → `BudgetedModel.complete` | `OPENROUTER_SOURCE_MODEL` | Changed unresolved evidence after useful deterministic objectives are exhausted |
+| `validate_candidates` | `SourceAdvisor.validate` → `BudgetedModel.complete` | `OPENROUTER_SOURCE_MODEL` | Uncertain candidate metadata, including initials/name variations without sufficient institutional context |
+| `extract_claims` | `extract_chunks` → `BudgetedModel.complete` | `OPENROUTER_EXTRACTION_MODEL` | Each unapplied relevant text chunk after fetched-body identity admission |
+
+Request counts include provider retries; all retain existing per-person query/tool,
+source, token, time and model-attempt budgets. Provider-internal passes are not
+separately observable; token/cost totals use the provider's reported usage.
+
+Missing education now receives a deterministic targeted query, using supplied or
+independently selected context, before optional planning. Existing strong unpaired
+role completion stays first. Straightforward name/organisation/title/university
+queries and supplied profile URLs use normalized existing input. Equivalent queries
+are deduplicated. Planner input fingerprints survive recovery so unchanged unresolved
+inputs do not incur fresh planning. Difficult/name-only discovery retains the existing
+advisor and Wikipedia fallback. A definitive 401/402/403 stops new provider calls for
+that person attempt; a later resumed attempt can recover after credits/auth are fixed.
+
+Candidate validation can be deterministic only with an operator-configured domain
+classification and directly associated name/institution metadata without a detected
+contradiction. This is admission to retrieval, not identity confirmation. The fetched
+body, namesake checks, claim grounding, reconciliation and confidence remain required.
+
+Applied extraction chunks are skipped before submission, preserving original chunk
+indexes. Keys bind person, canonical source URL, exact text, source, model, prompt and
+rule version. Completed exact-request receipts also work without a checkpoint callback.
+Already retrieved pages still use the existing job cache and freshness/safety policy.
+A completed, identity-admitted redirect alias can reuse exactly equal processed text
+only at the same canonical URL, rules and publication metadata with no stronger new
+authority/identity signal. No claims are copied across people or independent domains.
+Existing Python boilerplate removal and relevant-section selection remain in use.
+
+Small mocked-provider checks demonstrate one suitable two-source case reducing total
+requests from four to three by removing its metadata-validation request with identical
+field values/confidence. A two-chunk recovery submits one remaining chunk, and an exact
+redirect alias needs one extraction instead of two. These are offline work-count checks,
+not measured live cost savings or proof of the 50% target.
 
 ## Conservative concurrency
 

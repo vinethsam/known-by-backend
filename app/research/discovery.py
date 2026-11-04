@@ -169,11 +169,20 @@ def build_context_queries(
         universities = values("university_name")
         degrees = values("degree_type") if fields is None or "degree_type" in fields else []
         subjects = values("subject") if fields is None or "subject" in fields else []
-        add(
-            universities or degrees or subjects,
-            (degrees or subjects) if universities else [],
-            "" if universities else "education",
-        )
+        anchors = universities or degrees or subjects
+        if fields is not None and not anchors:
+            # Once professional sources have been drained, missing education is
+            # a predictable objective even when no alma mater was supplied.
+            anchors = values("organisation", "current_employer", "government_office")
+            if anchors:
+                add(anchors, suffix="education university degree")
+            else:
+                queries.append(f'"{seed.full_name}" education university degree')
+        else:
+            suffix = "" if universities else "education"
+            if fields is not None and universities and not (degrees or subjects):
+                suffix = "education degree subject"
+            add(anchors, (degrees or subjects) if universities else [], suffix)
     if professional:
         add(values("historical_employer"), values("historical_job_title"), "career")
         add(values("organisation_affiliation", "alumni_organisation"), suffix="biography")

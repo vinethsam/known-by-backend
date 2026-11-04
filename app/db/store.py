@@ -47,6 +47,7 @@ from app.db.models import (
 from app.research.normalisation import finalize_display
 from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
 from app.research.source_policy import sanitize_research_result
+from app.research.telemetry import aggregate_person_summaries
 from app.schemas import (
     EvidenceClaim,
     JobCreated,
@@ -366,6 +367,7 @@ class Store:
             return rows == 1
 
     def finish_task(self, lease: Lease, result: ResearchResult) -> bool:
+        summary = None
         with self.session_factory.begin() as session:
             job = self._lock_job(session, lease.job_id)
             if not job or job.status == JobStatus.cancelled.value:
@@ -384,7 +386,17 @@ class Store:
             task.completed_at = now
             self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
-            return True
+            if job.status in {"completed", "partial", "failed"}:
+                summary = self._job_cost_summary(session, job.job_id)
+        if summary is not None:
+            logger.info(
+                "research_cost_summary",
+                extra={
+                    "job_id": lease.job_id,
+                    "performance": {"research_cost": summary},
+                },
+            )
+        return True
 
     def checkpoint(self, lease: Lease, result: ResearchResult) -> bool:
         with self.session_factory.begin() as session:
@@ -400,6 +412,7 @@ class Store:
             return True
 
     def fail_task(self, lease: Lease, error_code: str, result: ResearchResult | None = None) -> bool:
+        summary = None
         with self.session_factory.begin() as session:
             job = self._lock_job(session, lease.job_id)
             if not job or job.status == JobStatus.cancelled.value:
@@ -417,7 +430,17 @@ class Store:
             if result is not None:
                 self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
-            return True
+            if job.status in {"completed", "partial", "failed"}:
+                summary = self._job_cost_summary(session, job.job_id)
+        if summary is not None:
+            logger.info(
+                "research_cost_summary",
+                extra={
+                    "job_id": lease.job_id,
+                    "performance": {"research_cost": summary},
+                },
+            )
+        return True
 
     @staticmethod
     def _terminal_receipt(session: Session, lease: Lease, status: str, error_code: str | None = None) -> bool:
@@ -1017,6 +1040,26 @@ class Store:
             reason = resuming[0]
             return "resuming", reason if reason in RECOVERY_REASONS else "INFRASTRUCTURE_UNAVAILABLE", None
         return None, None, None
+
+    @staticmethod
+    def _job_cost_summary(session: Session, job_id: str) -> dict:
+        # One compact read only when the last person makes a job terminal. Never
+        # load page bodies/claims, backfill historical jobs or poll per person.
+        rows = session.execute(
+            select(PersonTaskRow.attempts, ProfileRow.data_json["metrics"]["accounting"])
+            .select_from(PersonTaskRow)
+            .outerjoin(ProfileRow, ProfileRow.person_id == PersonTaskRow.person_id)
+            .where(PersonTaskRow.job_id == job_id)
+        )
+        summaries, unmeasured = [], 0
+        for attempts, accounting in rows:
+            if not attempts:
+                continue
+            if isinstance(accounting, dict) and "cost_complete" in accounting:
+                summaries.append(accounting)
+            else:
+                unmeasured += 1
+        return aggregate_person_summaries(summaries, unmeasured_people=unmeasured)
 
     def _refresh_job_status(self, session: Session, job: JobRow) -> None:
         if job.status == JobStatus.cancelled.value:

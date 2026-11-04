@@ -17,7 +17,7 @@ from app.providers.openrouter import OpenRouterClient, OpenRouterError
 from app.providers.search import OpenRouterSearchProvider
 from app.research.budget import BudgetedModel, BudgetExceeded
 from app.research.concurrency import ordered_window
-from app.research.extraction import extract_chunks
+from app.research.extraction import extract_chunks, extraction_chunk_key
 from app.research.orchestrator import ResearchOrchestrator, _process_source
 from app.research.telemetry import COUNTERS, TIMINGS, count, person_performance, stage
 from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
@@ -277,6 +277,71 @@ async def test_ordered_window_is_bounded_isolates_errors_and_drains_on_exit():
 
 
 @pytest.mark.asyncio
+async def test_applied_extraction_is_skipped_before_call_without_reindexing_pending_chunks():
+    settings = configured(OPENROUTER_MAX_RETRIES=0)
+    metrics, usage, indexes = ResearchMetrics(), [], []
+    context = dict(CONTEXT, source_id="source-1")
+    url = "https://example.org/jane"
+    applied = {
+        extraction_chunk_key(
+            context["source_id"],
+            "first",
+            person_id=context["person_id"],
+            source_url=url,
+            model=settings.OPENROUTER_EXTRACTION_MODEL,
+        )
+    }
+
+    async def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"])["payload"]
+        indexes.append(payload["chunk_index"])
+        return response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BudgetedModel(OpenRouterClient(settings, http), settings, metrics, usage)
+        async with aclosing(
+            extract_chunks(
+                client,
+                PersonSeed(full_name="Jane Doe"),
+                ["first", "second"],
+                url,
+                context,
+                asyncio.Semaphore(1),
+                1,
+                applied_chunks=applied,
+            )
+        ) as chunks:
+            output = [chunk async for chunk, _ in chunks]
+    assert indexes == [1] and output == ["second"]
+    assert metrics.llm_calls == len(usage) == 1
+    assert metrics.extraction_cache_hits == 1
+
+
+def test_extraction_applied_key_is_identity_content_url_model_and_rule_scoped(monkeypatch):
+    import app.research.extraction as extraction
+
+    values = {
+        "source_id": "source-1",
+        "chunk": "Jane Doe graduated from Example University.",
+        "person_id": "person-1",
+        "source_url": "https://example.org/jane?utm_source=search#education",
+        "model": "configured-model",
+    }
+    key = extraction_chunk_key(**values)
+    assert extraction_chunk_key(**(values | {"source_url": "https://example.org/jane"})) == key
+    for name, replacement in (
+        ("source_id", "source-2"),
+        ("person_id", "person-2"),
+        ("source_url", "https://example.org/another-page"),
+        ("chunk", values["chunk"] + " New evidence."),
+        ("model", "another-model"),
+    ):
+        assert extraction_chunk_key(**(values | {name: replacement})) != key
+    monkeypatch.setattr(extraction, "EXTRACTION_PROMPT_VERSION", "changed-rules")
+    assert extraction_chunk_key(**values) != key
+
+
+@pytest.mark.asyncio
 async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
     settings = configured(OPENROUTER_MAX_RETRIES=0)
     metrics, usage = ResearchMetrics(), []
@@ -379,7 +444,9 @@ async def test_parallel_attempts_and_retries_cannot_overspend(cap):
 
         outcomes = await asyncio.gather(*(complete() for _ in range(8)), return_exceptions=True)
     assert requests == metrics.llm_calls == len(usage) == 2
-    assert all(isinstance(outcome, BudgetExceeded) for outcome in outcomes)
+    # Exact in-flight duplicates are fenced. The owning request can exhaust its
+    # bounded retries with a provider error without exceeding either budget.
+    assert all(isinstance(outcome, (BudgetExceeded, OpenRouterError)) for outcome in outcomes)
     assert metrics.tokens_budgeted == reserve * 2
     assert metrics.tokens_budgeted <= settings.MAX_TOKENS_PER_PERSON
 
@@ -699,3 +766,154 @@ def test_distinct_captured_json_pages_are_not_false_empty_body_duplicates():
     assert hashes[0] == hashes[2]
     assert "Example Foundation" in "".join(texts[0])
     assert "Example University" in "".join(texts[1])
+
+
+@pytest.mark.asyncio
+async def test_exact_in_memory_receipts_reuse_usage_and_provider_outage_stops_new_calls():
+    settings = configured(OPENROUTER_MAX_RETRIES=0)
+    metrics, usage = ResearchMetrics(), []
+    requests = 0
+
+    async def handler(request):
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            return httpx.Response(403, json={"error": {"message": "provider unavailable"}})
+        return response()
+
+    args = (ExtractionResponse, "extraction", "prompt", {"content": "first"}, CONTEXT, "v1")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BudgetedModel(OpenRouterClient(settings, http), settings, metrics, usage)
+        await client.complete(*args)
+        with pytest.raises(OpenRouterError):
+            await client.complete(*args[:3], {"content": "blocked"}, *args[4:])
+        assert client.provider_unavailable and client.provider_unavailable_status == 403
+        await client.complete(*args)
+        with pytest.raises(BudgetExceeded, match="PROVIDER_UNAVAILABLE"):
+            await client.complete(*args[:3], {"content": "another"}, *args[4:])
+    assert requests == len(usage) == metrics.llm_calls == 2
+    assert metrics.request_cache_hits == 1
+
+
+def test_cumulative_accounting_distinguishes_unknown_cost_input_certainty_and_credentials():
+    from app.research.telemetry import aggregate_person_summaries, bind_research_metrics, record_person_result
+    from app.schemas import (
+        EvidenceClaim,
+        FieldDecision,
+        PersonProfile,
+        ProfileField,
+        ProfileRecord,
+        ResearchResult,
+    )
+
+    supplied = FieldDecision(
+        value="Jane Doe", confidence=100, research_confidence=0, provenance_status="supplied"
+    )
+    organisation = FieldDecision(
+        value="Verified Institute",
+        confidence=81,
+        sources=["https://example.org/person"],
+        provenance_status="researched",
+        review_required=False,
+    )
+    university = FieldDecision(
+        value="Verified University",
+        confidence=91,
+        sources=["https://example.org/degree"],
+        provenance_status="researched",
+        review_required=False,
+    )
+    fields = {ProfileField.full_name: supplied, ProfileField.organisation: organisation}
+    second = ProfileRecord(
+        record_id="education",
+        fields={**fields, ProfileField.university_name: university},
+        profile_confidence=91,
+        coverage=33.33,
+        review_required=False,
+    )
+    profile = PersonProfile(
+        person_id="person",
+        input_name="Jane Doe",
+        fields=fields,
+        records=[second],
+        profile_confidence=81,
+        coverage=16.67,
+        review_required=False,
+    )
+    paid = UsageRecord(
+        job_id="job",
+        person_id="person",
+        role="source",
+        operation="web_search",
+        model="source-model",
+        prompt_version="v1",
+        prompt_tokens=10,
+        completion_tokens=20,
+        cost=0.12,
+        web_search_requests=1,
+    )
+    unknown = UsageRecord(
+        job_id="job",
+        person_id="person",
+        role="extraction",
+        operation="extract_claims",
+        model="extract-model",
+        prompt_version="v1",
+        prompt_tokens=30,
+        completion_tokens=40,
+    )
+    result = ResearchResult(profile=profile, usage=[paid, paid.model_copy(), unknown])
+    result.profile.metrics.llm_calls = 2
+    result.profile.metrics.retrieval_cache_hits = 1
+    with person_performance("job", "person"):
+        bind_research_metrics(result.profile.metrics)
+        count("retrieval_cache_hits")
+        count("retrieval_cache_misses", 2)
+        summary = record_person_result(result)
+    assert summary["model_calls"] == 2
+    assert summary["input_tokens"] == 40 and summary["output_tokens"] == 60
+    assert summary["reported_api_cost"] == 0.12
+    assert summary["actual_api_cost"] is None and not summary["cost_complete"]
+    assert summary["operations"]["web_search"]["actual_api_cost"] == 0.12
+    assert summary["operations"]["extract_claims"]["actual_api_cost"] is None
+    assert summary["independently_supported_fields"] == ["organisation", "university_name"]
+    assert "full_name" in summary["unresolved_required_fields"]
+    assert summary["sources_used_as_evidence"] == 2
+    assert summary["retrieval_cache_hits"] == summary["retrieval_cache_misses"] == 2
+    assert summary["source_reuse_rate"] == 0.5
+    assert result.profile.metrics.accounting == summary
+    aggregate = aggregate_person_summaries([summary])
+    assert aggregate["average_actual_cost_per_attempted_person"] is None
+    assert aggregate["average_model_calls_per_person"] == 2
+    assert aggregate["independent_field_coverage_rate"] == pytest.approx(2 / 7, abs=1e-6)
+    result.usage[-1].cost = 0.08
+    measured = record_person_result(result)
+    aggregate = aggregate_person_summaries([measured, measured])
+    assert aggregate["actual_api_cost"] == 0.4
+    assert aggregate["average_actual_cost_per_attempted_person"] == 0.2
+    assert aggregate["average_actual_cost_per_enriched_person"] == 0.2
+    assert aggregate["average_actual_cost_per_supported_field"] == 0.1
+    incomplete = aggregate_person_summaries([measured], unmeasured_people=1)
+    assert incomplete["attempted_people"] == 2 and incomplete["unmeasured_people"] == 1
+    assert incomplete["actual_api_cost"] is None
+    assert incomplete["average_model_calls_per_person"] is None
+    name = result.profile.records[0].fields[ProfileField.full_name]
+    name.research_confidence = 74
+    name.provenance_status = "corroborated"
+    name.scoring_components["seed_corroborating_claim_ids"] = ["name-claim"]
+    result.claims.append(
+        EvidenceClaim(
+            claim_id="name-claim",
+            person_id="person",
+            source_id="name-source",
+            field=ProfileField.full_name,
+            raw_value="Jane Doe",
+            normalised_value="jane doe",
+            evidence_text="Jane Doe works at Verified Institute.",
+            subject_name="Jane Doe",
+            extraction_model="extract-model",
+        )
+    )
+    assert "full_name" in record_person_result(result)["independently_supported_fields"]
+    result.claims[0].normalised_value = "other person"
+    assert "full_name" not in record_person_result(result)["independently_supported_fields"]
