@@ -181,8 +181,6 @@ def build_context_queries(
             add(values("industry"), suffix="career")
     if fields is None and not queries:
         add(values("country", "location", "program_year"), suffix="biography")
-    if fields is not None and "country_of_origin" in fields:
-        add(values("country_of_origin", "country", "location"), suffix="origin biography")
     return _unique(queries)
 
 

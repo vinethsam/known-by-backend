@@ -60,9 +60,7 @@ def supplied_attributes(
         conflicts = [
             claim
             for claim in claims
-            if claim.field == field
-            and claim not in corroborating
-            and (claim.source_id in contradicted_sources or field == ProfileField.country_of_origin)
+            if claim.field == field and claim not in corroborating and claim.source_id in contradicted_sources
         ]
         historical = field in {ProfileField.organisation, ProfileField.job_title} and any(
             claim.is_current is False or claim.end_date is not None for claim in corroborating
@@ -104,10 +102,14 @@ def attach_seed_provenance(
     """Project supplied values after scoring, keeping the research selection separate."""
     core = seed_core_values(seed)
     for field, decision in fields.items():
+        if field not in ProfileField:
+            continue
         if field != ProfileField.full_name and decision.provenance_status == "supplied":
             decision.value = decision.researched_value
     researched = {field: decision.value for field, decision in fields.items()}
     for field, decision in fields.items():
+        if field not in ProfileField:
+            continue
         supplied = [attribute for attribute in attributes if _field(attribute["field"]) == field.value]
         values = list(dict.fromkeys(attribute["value"] for attribute in supplied if attribute["value"]))
         if not values and core.get(field.value):
@@ -124,6 +126,10 @@ def attach_seed_provenance(
         decision.research_confidence = (
             (web_identity.confidence if matching_name else 0)
             if field == ProfileField.full_name
+            else decision.research_confidence
+            if decision.research_confidence is not None
+            else 0
+            if decision.provenance_status == "supplied"
             else decision.confidence
         )
         decision.researched_value = (
@@ -151,7 +157,7 @@ def attach_seed_provenance(
         elif (
             decision.value is not None
             and decision.provenance_status == "supplied"
-            and field in {ProfileField.organisation, ProfileField.job_title, ProfileField.country_of_origin}
+            and field in {ProfileField.organisation, ProfileField.job_title}
         ):
             decision.provenance_status = "conflicting"
         elif (
@@ -237,7 +243,14 @@ def project_stored_seed(profile, seed):
     attributes = profile.seed_attributes or seed_input_attributes(seed)
     for fields in [profile.fields, *(record.fields for record in profile.records)]:
         name = fields.get(ProfileField.full_name, FieldDecision()).model_copy(deep=True)
-        name.confidence = name.research_confidence or 0
+        name.confidence = (
+            name.research_confidence
+            if name.research_confidence is not None
+            else name.confidence
+            if name.supporting_claim_ids
+            and name.scoring_components.get("confidence_kind") != "seed_input_certainty"
+            else 0
+        )
         if name.research_confidence and name.provenance_status == "corroborated":
             # Stored provenance already records independent agreement; no new claim
             # identifiers or evidence are fabricated by this presentation adapter.

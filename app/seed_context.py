@@ -730,7 +730,6 @@ def seed_core_values(seed) -> dict[str, str]:
         field: value
         for field in (
             "full_name",
-            "country_of_origin",
             "organisation",
             "job_title",
             "university_name",

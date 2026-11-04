@@ -12,7 +12,7 @@ from app.config import ScoringPolicy, Settings
 from app.db.store import Store
 from app.export.batch import parse_batch
 from app.export.formats import ExportCellLimitError, export_results
-from app.export.schema import RESEARCH_FIELDS, standard_columns
+from app.export.schema import RESEARCH_FIELDS, record_columns, standard_columns
 from app.research.confidence import profile_scores
 from app.research.normalisation import normalise_display
 from app.research.reconciliation import reconcile
@@ -46,7 +46,7 @@ def result_for(seed):
     )
 
 
-def test_all_eight_prefixed_columns_project_after_failed_research_without_evidence():
+def test_all_seven_prefixed_columns_project_after_failed_research_without_evidence():
     values = {
         "ALUMNI_FULL_NAME": "john michael smith",
         "ALUMNI_COUNTRY_OF_ORIGIN": "ghana",
@@ -68,7 +68,6 @@ def test_all_eight_prefixed_columns_project_after_failed_research_without_eviden
     profile = results.people[0].result.profile
     expected = [
         "John Michael Smith",
-        "Ghana",
         "6a Architects",
         "Architect",
         "University of Ghana",
@@ -127,7 +126,7 @@ def test_excluded_supplied_profile_url_stays_in_details_without_becoming_a_findi
         assert decision.research_confidence == 0
         assert decision.sources == []
         assert decision.scoring_components["seed_projection_reason"] == "EXCLUDED_SOURCE_POLICY"
-    data = export_results(results, [], format)
+    data = export_results(results, [], format, retain_details=True)
     if format == "csv":
         row = next(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
     else:
@@ -147,7 +146,7 @@ def test_excluded_supplied_profile_url_stays_in_details_without_becoming_a_findi
 def test_geographic_seed_is_retained_without_becoming_origin(label):
     seed = PersonSeed(full_name="John Smith", input_metadata={"Full Name": "John Smith", label: "Ghana"})
     profile = result_for(seed).people[0].result.profile
-    assert profile.fields[ProfileField.country_of_origin].value is None
+    assert "country_of_origin" not in profile.fields
     assert next(item for item in profile.seed_attributes if item["column"] == label)["value"] == "Ghana"
 
 
@@ -193,13 +192,17 @@ def test_export_format_equivalence_review_fill_and_person_record_status():
     second.status = PersonStatus.completed
     person.result.profile.records.append(second)
     rows = list(
-        csv.DictReader(io.StringIO(export_results(results, ["LIST_NAME"], "csv").decode("utf-8-sig")))
+        csv.DictReader(
+            io.StringIO(
+                export_results(results, ["LIST_NAME"], "csv", retain_details=True).decode("utf-8-sig")
+            )
+        )
     )
-    workbook = load_workbook(io.BytesIO(export_results(results, ["LIST_NAME"], "xlsx")))
+    workbook = load_workbook(io.BytesIO(export_results(results, ["LIST_NAME"], "xlsx", retain_details=True)))
     sheet = workbook.active
     headers = [cell.value for cell in sheet[1]]
-    assert headers == list(standard_columns()) and len(headers) == 73
-    assert headers[:8] == [field.value for field in RESEARCH_FIELDS] and headers[-1] == "source_urls"
+    assert headers == list(record_columns())
+    assert headers[:7] == [field.value for field in RESEARCH_FIELDS] and headers[-1] == "source_urls"
     assert "LIST_NAME" not in headers
     assert {row["status"] for row in rows} == {"review_required"}
     # Both records share the same conflicting employment context, so an old
@@ -230,5 +233,193 @@ def test_oversize_standard_provenance_fails_explicitly_without_losing_original(f
     seed = PersonSeed(full_name="John Smith", input_metadata={"Organisation": raw})
     results = result_for(seed)
     with pytest.raises(ExportCellLimitError, match="32767"):
-        export_results(results, [], format)
+        export_results(results, [], format, retain_details=True)
     assert results.people[0].result.profile.seed_attributes[0]["value"] == raw
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_public_download_has_exact_headers_independent_scores_and_unique_sources(format):
+    results = result_for(PersonSeed(full_name="John Smith"))
+    fields = results.people[0].result.profile.records[0].fields
+    for index, field in enumerate(RESEARCH_FIELDS):
+        fields[field] = FieldDecision(
+            value="John Smith" if field == ProfileField.full_name else "Verified Value",
+            confidence=100,
+            input_confidence=100,
+            research_confidence=61 + index,
+            provenance_status="corroborated",
+            review_required=False,
+            sources=["https://example.org/evidence", "https://example.org/evidence#qualification"],
+        )
+    output = export_results(results, ["Nationality", "Country of Origin"], format)
+    if format == "csv":
+        rows = csv.reader(io.StringIO(output.decode("utf-8-sig")))
+        headers, values = next(rows), next(rows)
+    else:
+        workbook = load_workbook(io.BytesIO(output), read_only=True)
+        rows = workbook.active.values
+        headers, values = list(next(rows)), list(next(rows))
+        workbook.close()
+    assert headers == [
+        "Full Name",
+        "Organisation",
+        "Job Title",
+        "University Name",
+        "Degree Type",
+        "Subject",
+        "Profile Link",
+        "Full Name Confidence",
+        "Organisation Confidence",
+        "Job Title Confidence",
+        "University Confidence",
+        "Degree Confidence",
+        "Subject Confidence",
+        "Source URLs",
+    ]
+    assert [float(value) for value in values[7:13]] == [61, 62, 63, 64, 65, 66]
+    assert values[-1] == "https://example.org/evidence"
+    assert fields[ProfileField.organisation].confidence == 100
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_historical_saved_download_preserves_original_and_numbered_qualifications(format):
+    from app.library import SavedFileContent, SavedResultFile
+    from app.library_preview import download_saved_file, preview_saved_file
+    from app.schemas import utcnow
+
+    stream = io.StringIO()
+    writer = csv.writer(stream)
+    writer.writerow(
+        [
+            "full_name",
+            "country_of_origin",
+            "university_name",
+            "degree_type",
+            "subject",
+            "university_name_confidence",
+            "degree_type_confidence",
+            "subject_confidence",
+            "source_urls",
+        ]
+    )
+    writer.writerow(
+        [
+            "John Smith",
+            "Kenya",
+            "1. Lake University\n2. City University",
+            "1. Bachelor's Degree\n2. Master's Degree",
+            "1. Mathematics\n2. Physics",
+            81,
+            82,
+            83,
+            "https://example.org/education; https://example.org/education#degree; https://example.org/profile",
+        ]
+    )
+    content = stream.getvalue().encode()
+    saved = SavedFileContent(
+        SavedResultFile(
+            file_id="legacy",
+            filename="legacy.csv",
+            format="csv",
+            saved_at=utcnow(),
+            research_started_at=utcnow(),
+            size_bytes=len(content),
+        ),
+        content,
+    )
+    output = download_saved_file(saved, format)
+    if format == "csv":
+        rows = csv.reader(io.StringIO(output.decode("utf-8-sig")))
+        header, row = next(rows), next(rows)
+    else:
+        workbook = load_workbook(io.BytesIO(output), read_only=True)
+        rows = workbook.active.values
+        header, row = list(next(rows)), list(next(rows))
+        workbook.close()
+    assert header == list(standard_columns())
+    assert row[3:6] == [
+        "1. Lake University\n2. City University",
+        "1. Bachelor's Degree\n2. Master's Degree",
+        "1. Mathematics\n2. Physics",
+    ]
+    assert [float(value) for value in row[10:13]] == [81, 82, 83]
+    assert row[-1] == "https://example.org/education; https://example.org/profile"
+    assert preview_saved_file(saved).records[0]["degree_type"] == row[4]
+    assert saved.content == content
+
+
+def test_origin_is_decode_only_and_never_an_active_extraction_field():
+    from pydantic import ValidationError
+
+    from app.schemas import ExtractionResponse, PersonProfile
+
+    original = (
+        result_for(PersonSeed(full_name="John Smith", country_of_origin="Kenya")).people[0].result.profile
+    )
+    payload = original.model_dump(mode="json")
+    payload["fields"]["country_of_origin"] = FieldDecision(value="Kenya", confidence=87).model_dump()
+    historical = PersonProfile.model_validate(payload)
+    assert historical.fields["country_of_origin"].value == "Kenya"
+    assert historical.model_dump(mode="json")["fields"]["country_of_origin"]["confidence"] == 87
+    assert "country_of_origin" not in original.fields
+    assert len(ProfileField) == 7
+    with pytest.raises(ValidationError):
+        ExtractionResponse.model_validate(
+            {
+                "claims": [
+                    {
+                        "field": "country_of_origin",
+                        "value": "Kenya",
+                        "evidence": "John Smith is from Kenya",
+                        "subject_name": "John Smith",
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_compact_export_keeps_credentials_associated_and_internal_details(monkeypatch, format):
+    import app.export.formats as formats
+
+    assert formats.MAX_EXPORT_ROWS == Settings(APP_ENV="test").MAX_BATCH_ROWS == 500
+    results = result_for(PersonSeed(full_name="John Smith"))
+    profile = results.people[0].result.profile
+    first = profile.records[0]
+    second = first.model_copy(deep=True)
+    for record, university, degree, subject, score in (
+        (first, "Lake University", "Bachelor's Degree", "Mathematics", 81),
+        (second, "City University", "Master's Degree", "Physics", 91),
+    ):
+        for field, value in (
+            (ProfileField.university_name, university),
+            (ProfileField.degree_type, degree),
+            (ProfileField.subject, subject),
+        ):
+            record.fields[field] = FieldDecision(
+                value=value,
+                confidence=score,
+                review_required=False,
+                sources=["https://example.org/" + subject.lower()],
+            )
+    profile.records = [first, second]
+    monkeypatch.setattr(formats, "MAX_EXPORT_ROWS", 1)
+    output = export_results(results, [], format)
+    if format == "csv":
+        rows = list(csv.reader(io.StringIO(output.decode("utf-8-sig"))))
+    else:
+        workbook = load_workbook(io.BytesIO(output), read_only=True)
+        rows = [list(row) for row in workbook.active.values]
+        workbook.close()
+    assert len(rows) == 2 and len(rows[0]) == 14
+    assert rows[1][3:6] == [
+        "1. Lake University\n2. City University",
+        "1. Bachelor's Degree\n2. Master's Degree",
+        "1. Mathematics\n2. Physics",
+    ]
+    assert [float(value) for value in rows[1][10:13]] == [81, 81, 81]
+    assert [record.fields[ProfileField.degree_type].confidence for record in profile.records] == [81, 91]
+    assert [record.fields[ProfileField.subject].sources for record in profile.records] == [
+        ["https://example.org/mathematics"],
+        ["https://example.org/physics"],
+    ]

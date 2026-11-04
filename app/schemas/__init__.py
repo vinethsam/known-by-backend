@@ -44,13 +44,17 @@ class Contract(BaseModel):
 
 class ProfileField(StrEnum):
     full_name = "full_name"
-    country_of_origin = "country_of_origin"
     organisation = "organisation"
     job_title = "job_title"
     university_name = "university_name"
     degree_type = "degree_type"
     subject = "subject"
     profile_link = "profile_link"
+
+
+# Decode discontinued fields only in retained records and evidence, never in
+# the model extraction schema or the active field registry.
+StoredProfileField = ProfileField | Literal["country_of_origin"]
 
 
 class SourceType(StrEnum):
@@ -327,7 +331,7 @@ class EvidenceClaim(Contract):
     claim_id: str = Field(default_factory=new_id)
     person_id: str
     source_id: str
-    field: ProfileField
+    field: StoredProfileField
     raw_value: str
     normalised_value: str
     normalisation_certainty: float = Field(default=1, ge=0, le=1)
@@ -392,24 +396,17 @@ def legacy_research_coverage(fields: dict[ProfileField, FieldDecision]) -> float
     )
 
 
-def _fill_profile_origin_and_coverage(profile: ProfileRecord | PersonProfile) -> None:
-    """Adapt stored pre-origin profiles without changing their source decisions."""
-
-    missing_origin = ProfileField.country_of_origin not in profile.fields
-    profile.fields.setdefault(ProfileField.country_of_origin, FieldDecision())
+def _fill_legacy_coverage(profile: ProfileRecord | PersonProfile) -> None:
+    """Fill absent compatibility metadata without rewriting historical decisions."""
     if profile.legacy_coverage is None:
         profile.legacy_coverage = legacy_research_coverage(profile.fields)
-    if missing_origin:
-        researched = (field for field in ProfileField if field != ProfileField.full_name)
-        present = sum(has_researched_value(profile.fields.get(field)) for field in researched)
-        profile.coverage = round(100 * present / (len(ProfileField) - 1), 2)
 
 
 class ProfileRecord(Contract):
     """One exportable record for a person, scoped to one education credential."""
 
     record_id: str = Field(min_length=1, max_length=240)
-    fields: dict[ProfileField, FieldDecision]
+    fields: dict[StoredProfileField, FieldDecision]
     profile_confidence: float = Field(ge=0, le=100)
     coverage: float = Field(ge=0, le=100)
     review_required: bool
@@ -420,7 +417,7 @@ class ProfileRecord(Contract):
 
     @model_validator(mode="after")
     def fill_legacy_field(self):
-        _fill_profile_origin_and_coverage(self)
+        _fill_legacy_coverage(self)
         return self
 
 
@@ -449,7 +446,7 @@ class PersonProfile(Contract):
     person_id: str
     input_name: str
     status: PersonStatus = PersonStatus.review_required
-    fields: dict[ProfileField, FieldDecision]
+    fields: dict[StoredProfileField, FieldDecision]
     profile_confidence: float = Field(ge=0, le=100)
     coverage: float = Field(ge=0, le=100)
     review_required: bool
@@ -466,7 +463,7 @@ class PersonProfile(Contract):
 
     @model_validator(mode="after")
     def fill_legacy_field(self):
-        _fill_profile_origin_and_coverage(self)
+        _fill_legacy_coverage(self)
         return self
 
 
@@ -545,7 +542,7 @@ class PersonResultView(Contract):
     status: PersonStatus
     error_code: str | None = None
     result: ResearchResult | None = None
-    supplied_fields: dict[ProfileField, FieldDecision] = Field(default_factory=dict)
+    supplied_fields: dict[StoredProfileField, FieldDecision] = Field(default_factory=dict)
     seed_attributes: list[dict[str, Any]] = Field(default_factory=list)
 
 

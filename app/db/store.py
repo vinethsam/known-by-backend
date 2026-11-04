@@ -825,7 +825,7 @@ class Store:
             dict(
                 job_id=job_id,
                 person_id=person_id,
-                field=field.value,
+                field=str(field),
                 data_json=decision.model_dump(mode="json"),
                 created_at=now,
             )
@@ -860,7 +860,7 @@ class Store:
                     job_id=job_id,
                     person_id=person_id,
                     source_id=claim.source_id,
-                    field=claim.field.value,
+                    field=str(claim.field),
                     data_json=claim.model_dump(mode="json"),
                     created_at=now,
                 )

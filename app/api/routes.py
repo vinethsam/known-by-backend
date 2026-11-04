@@ -25,7 +25,7 @@ from app.export.batch import BatchParseError, parse_batch
 from app.export.formats import ExportLimitError
 from app.export.naming import content_disposition
 from app.library import LibraryLimitError, ResultFileStorage, SavedResultFile, SaveResultRequest
-from app.library_preview import LibraryPreviewError, SavedRecordsPage, preview_saved_file
+from app.library_preview import LibraryPreviewError, SavedRecordsPage, download_saved_file, preview_saved_file
 from app.logging import configure_logging
 from app.processing import html_to_markdown
 from app.retrieval.service import FetchConfigurationError, FetchError, FetchTimeoutError, StaticFetcher
@@ -262,6 +262,7 @@ def create_app(
                     job,
                     format,
                     provenance=provenance,
+                    retain_details=require_completed,
                     low_confidence_threshold=settings.SCORING.review_threshold,
                 )
                 for format in formats
@@ -322,13 +323,29 @@ def create_app(
         file_id: UUID, format: Literal["csv", "xlsx"] | None = Query(default=None)
     ):
         saved = await asyncio.to_thread(library.get, str(file_id), format)
+        if saved is None and format is not None:
+            saved = await asyncio.to_thread(library.get, str(file_id))
         if saved is None:
             raise HTTPException(404, "Saved result not found")
+        chosen = format or saved.metadata.format
+        try:
+            content = await asyncio.to_thread(
+                download_saved_file,
+                saved,
+                chosen,
+                max_file_bytes=settings.LIBRARY_MAX_FILE_BYTES,
+                max_uncompressed_bytes=settings.MAX_XLSX_UNCOMPRESSED_BYTES,
+                low_confidence_threshold=settings.SCORING.review_threshold,
+            )
+        except (LibraryPreviewError, ExportLimitError) as exc:
+            raise HTTPException(422, str(exc)) from None
         return Response(
-            content=saved.content,
-            media_type=export_media_type(saved.metadata.format),
+            content=content,
+            media_type=export_media_type(chosen),
             headers={
-                "Content-Disposition": content_disposition(saved.metadata.filename),
+                "Content-Disposition": content_disposition(
+                    saved.metadata.filename.rsplit(".", 1)[0] + "." + chosen
+                ),
                 "Cache-Control": "private, no-store",
                 "X-Content-Type-Options": "nosniff",
             },

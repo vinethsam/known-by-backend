@@ -12,10 +12,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config import DEFAULT_REVIEW_THRESHOLD
-from app.export.schema import RESEARCH_FIELDS, standard_columns
+from app.export.schema import EXPORT_COLUMNS, RESEARCH_FIELDS, record_columns, standard_columns
 from app.research.normalisation import finalize_display
 from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
-from app.retrieval.urls import source_policy_allows, source_record_allowed
+from app.retrieval.urls import canonicalise_url, source_policy_allows, source_record_allowed
 from app.schemas import JobResults, ProfileField
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -51,11 +51,14 @@ def export_results(
     format: str,
     *,
     provenance: ProvenanceMode = "none",
+    retain_details: bool = False,
     low_confidence_threshold: float = DEFAULT_REVIEW_THRESHOLD,
 ) -> bytes:
     if provenance not in {"none", "field"}:
         raise ValueError("Unsupported provenance mode")
-    rows, output_columns = _flatten_results(results, columns, provenance=provenance)
+    rows, output_columns = _flatten_results(
+        results, columns, provenance=provenance, retain_details=retain_details
+    )
     rows = _validated_rows(rows, output_columns)
     normalized = format.lower()
     if normalized == "csv":
@@ -64,7 +67,7 @@ def export_results(
         return _export_xlsx(
             rows,
             output_columns,
-            field_columns=_field_column_pairs(),
+            field_columns=_field_column_pairs(retain_details=retain_details),
             low_confidence_threshold=low_confidence_threshold,
         )
     raise ValueError("Unsupported export format")
@@ -75,6 +78,7 @@ def _flatten_results(
     columns: list[str],
     *,
     provenance: ProvenanceMode = "none",
+    retain_details: bool = False,
 ) -> tuple[Iterator[dict[str, Any]], list[str]]:
     # Input columns and the legacy provenance switch no longer alter normal files.
     # Full raw input remains in storage/API; the artifact contains standardized data.
@@ -85,7 +89,26 @@ def _flatten_results(
     expanded = sum(
         max(1, len(person.result.profile.records)) if person.result else 1 for person in results.people
     )
-    return _export_rows(results, compact=expanded > MAX_EXPORT_ROWS), list(standard_columns())
+    rows = _export_rows(results, compact=expanded > MAX_EXPORT_ROWS)
+    if retain_details:
+        return rows, list(record_columns())
+    return standard_rows(rows), list(standard_columns())
+
+
+def standard_rows(rows):
+    for row in rows:
+        yield {
+            **{
+                label: row.get(key, 0 if key.endswith("_confidence") else "")
+                for key, label in EXPORT_COLUMNS.items()
+            },
+            "_review_fields": {EXPORT_COLUMNS.get(key, key) for key in row.get("_review_fields", ())},
+            "_supplied_fields": {
+                EXPORT_COLUMNS.get(field.value, field.value)
+                for field in RESEARCH_FIELDS
+                if row.get(f"{field.value}_provenance_status") == "supplied"
+            },
+        }
 
 
 def _export_rows(results: JobResults, *, compact: bool) -> Iterator[dict[str, Any]]:
@@ -119,7 +142,7 @@ def _combine_education_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         )
         supplied = list(
             dict.fromkeys(
-                value for row in rows for value in json.loads(row.get(f"{key}_supplied_values", "[]"))
+                value for row in rows for value in json.loads(row.get(f"{key}_supplied_values") or "[]")
             )
         )
         combined[f"{key}_supplied_values"] = _provenance_json(supplied)
@@ -243,18 +266,38 @@ def _validated_rows(rows, columns):
         yield row
 
 
-def _field_column_pairs() -> list[tuple[str, str]]:
-    return [(field.value, f"{field.value}_confidence") for field in RESEARCH_FIELDS]
+def _field_column_pairs(*, retain_details=False) -> list[tuple[str, str]]:
+    pairs = [(field.value, f"{field.value}_confidence") for field in RESEARCH_FIELDS]
+    if retain_details:
+        return pairs
+    return [
+        (EXPORT_COLUMNS[value], EXPORT_COLUMNS[score]) for value, score in pairs if score in EXPORT_COLUMNS
+    ]
 
 
 def _compact_source_urls(result) -> str:
+    sources = {source.source_id: source for source in result.sources if source_record_allowed(source)}
+    decisions = [
+        decision
+        for record in (result.profile.records or [result.profile])
+        for field, decision in record.fields.items()
+        if field in RESEARCH_FIELDS
+    ]
+    evidence = [url for decision in decisions for url in decision.sources]
+    evidence.extend(
+        sources[source_id].canonical_url or sources[source_id].final_url
+        for decision in decisions
+        for source_id in decision.supporting_source_ids
+        if source_id in sources
+    )
+    # Older records may retain aggregate sources without field attribution.
     return _compact_urls(
-        (
+        evidence
+        or (
             source.canonical_url or source.final_url or source.requested_url
-            for source in result.sources
-            if source_record_allowed(source)
-        ),
-        limit=10,
+            for source in sources.values()
+            if not source.identity.rejected
+        )
     )
 
 
@@ -263,9 +306,15 @@ def _compact_urls(values, *, limit: int | None = None) -> str:
     seen: set[str] = set()
     for value in values:
         url = str(value)
-        if not url or url in seen:
+        if not url or not source_policy_allows(url):
             continue
-        seen.add(url)
+        try:
+            key = canonicalise_url(url)
+        except ValueError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
         if source_policy_allows(url):
             urls.append(url)
             if limit is not None and limit > 0 and len(urls) >= limit:
@@ -328,11 +377,12 @@ def _export_xlsx(
                     and not isinstance(confidence, bool)
                     and confidence < low_confidence_threshold
                     and row.get(f"{value_column}_provenance_status") != "supplied"
+                    and value_column not in row.get("_supplied_fields", ())
                 )
             ):
                 sheet.cell(row=row_index, column=column_indexes[value_column]).fill = pale_yellow
                 sheet.cell(row=row_index, column=column_indexes[confidence_column]).fill = pale_yellow
-        if row.get("review_required"):
+        if row.get("review_required") and "review_required" in column_indexes:
             cell = sheet.cell(row=row_index, column=column_indexes["review_required"])
             cell.fill = pale_yellow
             cell.font = Font(bold=True)

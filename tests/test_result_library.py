@@ -176,7 +176,11 @@ def test_explicit_save_matches_normal_export_with_same_human_filename(library_co
         assert download.headers["x-content-type-options"] == "nosniff"
         csv = client.get(saved.headers["location"], params={"format": "csv"}, headers=AUTH)
         xlsx = client.get(saved.headers["location"], params={"format": "xlsx"}, headers=AUTH)
-        assert metadata["size_bytes"] == len(csv.content) + len(xlsx.content)
+        assert metadata["size_bytes"] == (
+            len(storage.get(metadata["file_id"], "csv").content)
+            + len(storage.get(metadata["file_id"], "xlsx").content)
+        )
+        assert csv.status_code == xlsx.status_code == 200
         if format == "csv":
             assert download.content == normal.content
             assert "LIST_NAME" not in download.text and "YALI" not in download.text
@@ -413,6 +417,7 @@ def test_library_survives_temporary_job_cleanup(library_context):
         saved = client.post(f"/v1/jobs/{job_id}/library", json={"format": "xlsx"}, headers=AUTH).json()
         path = f"/v1/library/files/{saved['file_id']}"
         content = client.get(path, headers=AUTH).content
+        stored_content = storage.get(saved["file_id"]).content
         with store.session_factory.begin() as session:
             session.execute(delete(JobRow).where(JobRow.job_id == job_id))
         assert store.get_job(job_id) is None
@@ -420,7 +425,7 @@ def test_library_survives_temporary_job_cleanup(library_context):
             assert session.scalar(select(func.count()).select_from(PersonTaskRow)) == 0
         assert client.get(path, headers=AUTH).content == content
         assert client.get("/v1/library/files", headers=AUTH).json() == [saved]
-        assert storage.get(saved["file_id"]).content == content
+        assert storage.get(saved["file_id"]).content == stored_content
 
 
 def test_saving_uses_no_provider_client_research_call_or_additional_usage(library_context, monkeypatch):

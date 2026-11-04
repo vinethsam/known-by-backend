@@ -337,7 +337,7 @@ class ResearchOrchestrator:
                         and decision.confidence >= settings.TARGET_FIELD_CONFIDENCE
                         and not decision.review_required
                         for field_name, decision in fields.items()
-                        if field_name != ProfileField.country_of_origin
+                        if field_name in ProfileField
                     )
                     for fields in record_fields
                 ):

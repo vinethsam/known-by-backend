@@ -1,50 +1,37 @@
-"""The stable research-export header contract shared by all file formats."""
-
-from __future__ import annotations
+"""Separate the public download contract from retained record details."""
 
 from app.schemas import ProfileField
 
-# Keep the researched value columns together. Changing their presentation order
-# requires editing only this registry, not the CSV/XLSX or library code paths.
-RESEARCH_FIELDS: tuple[ProfileField, ...] = (
-    ProfileField.full_name,
-    ProfileField.country_of_origin,
-    ProfileField.organisation,
-    ProfileField.job_title,
-    ProfileField.university_name,
-    ProfileField.degree_type,
-    ProfileField.subject,
-    ProfileField.profile_link,
-)
+RESEARCH_FIELDS = tuple(ProfileField)
 
-SUMMARY_COLUMNS: tuple[str, ...] = (
-    "profile_confidence",
-    "coverage",
-    "legacy_coverage",
-    "review_required",
-    "review_reasons",
-    "status",
-    "record_status",
-    "error_code",
-    "source_urls",
-)
+# One mapping is used by CSV, XLSX and historical Library downloads.
+EXPORT_COLUMNS = {
+    "full_name": "Full Name",
+    "organisation": "Organisation",
+    "job_title": "Job Title",
+    "university_name": "University Name",
+    "degree_type": "Degree Type",
+    "subject": "Subject",
+    "profile_link": "Profile Link",
+    "full_name_confidence": "Full Name Confidence",
+    "organisation_confidence": "Organisation Confidence",
+    "job_title_confidence": "Job Title Confidence",
+    "university_name_confidence": "University Confidence",
+    "degree_type_confidence": "Degree Confidence",
+    "subject_confidence": "Subject Confidence",
+    "source_urls": "Source URLs",
+}
 
 
 def standard_columns() -> tuple[str, ...]:
-    """The complete export schema, independent of input and provenance options."""
+    return tuple(EXPORT_COLUMNS.values())
 
+
+def record_columns() -> tuple[str, ...]:
+    """Private Library storage keeps the existing detailed viewer functional."""
     return (
         *(field.value for field in RESEARCH_FIELDS),
         *(f"{field.value}_confidence" for field in RESEARCH_FIELDS),
-        *provenance_columns(),
-        *SUMMARY_COLUMNS,
-    )
-
-
-def provenance_columns() -> tuple[str, ...]:
-    """Standard provenance distinguishes supplied certainty from research confidence."""
-
-    return (
         *(
             f"{field.value}_{detail}"
             for field in RESEARCH_FIELDS
@@ -57,4 +44,13 @@ def provenance_columns() -> tuple[str, ...]:
                 "review_reasons",
             )
         ),
+        "profile_confidence",
+        "coverage",
+        "legacy_coverage",
+        "review_required",
+        "review_reasons",
+        "status",
+        "record_status",
+        "error_code",
+        "source_urls",
     )

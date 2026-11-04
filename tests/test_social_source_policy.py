@@ -243,8 +243,8 @@ def test_export_removes_legacy_social_profile_link_and_all_social_provenance():
     row = next(
         csv.DictReader(io.StringIO(export_results(job, [], "csv", provenance="field").decode("utf-8-sig")))
     )
-    assert row["profile_link"] == ""
-    assert row["profile_link_confidence"] == "0"
-    assert row["profile_link_source_urls"] == ""
-    assert row["organisation_source_urls"] == official.final_url
-    assert row["source_urls"] == official.final_url
+    assert row["Profile Link"] == ""
+    assert "Profile Link Confidence" not in row
+    assert social.final_url not in row["Source URLs"]
+    assert result.profile.fields[ProfileField.organisation].sources == [official.final_url]
+    assert row["Source URLs"] == official.final_url

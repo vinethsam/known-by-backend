@@ -12,7 +12,6 @@ from app.research.identity import claim_is_eligible_for_source, expanded_subject
 from app.research.normalisation import (
     comparison_key,
     name_key,
-    normalise_country_name,
     normalise_degree_candidates,
     normalise_value,
 )
@@ -31,38 +30,6 @@ def date_is_grounded(value: date, evidence: str) -> bool:
     for month in (value.strftime("%B"), value.strftime("%b")):
         forms.extend([f"{month} {value.day}, {value.year}", f"{value.day} {month} {value.year}"])
     return any(literal_key(form) in literal_key(evidence) for form in forms)
-
-
-def origin_is_explicit(value: str, evidence: str, subject_name: str) -> bool:
-    """Require the named person's own origin statement in the quoted evidence."""
-
-    country = re.escape(comparison_key(value))
-    name_tokens = name_key(subject_name).split()
-    subject = re.escape(" ".join(name_tokens))
-    if len(name_tokens) == 2 and all(len(token) > 1 for token in name_tokens):
-        subject = rf"{re.escape(name_tokens[0])}(?:\s+\w+){{0,2}}\s+{re.escape(name_tokens[-1])}"
-    quote = comparison_key(evidence)
-    relation = (
-        r"(?:country of origin(?: is)?|(?:is|was) (?:originally )?from|"
-        r"(?:is|was) an? (?:(?!(?:citizen|resident|national|student|graduate|visitor|"
-        r"delegate|representative|employee|ambassador|not|never)\b)\w+\s+){1,5}from|"
-        r"(?:is|was) (?:a )?native of|(?:originally )?hails? from|"
-        r"(?:originally )?comes? from|originates? from|originally from|(?:was )?born and raised in)"
-    )
-    direct = re.search(rf"\b{subject}(?:\s+s)?\s+{relation}\s+(?:the\s+)?{country}\b", quote)
-    reverse = re.search(
-        rf"\b{country}\s+(?:is|was)\s+{subject}\s+s\s+country of origin\b",
-        quote,
-    )
-    if not direct and not reverse:
-        return False
-    if re.search(
-        rf"\b(?:not|never)\s+(?:(?:originally\s+)?from|originates?\s+from|"
-        rf"hails?\s+from|comes?\s+from)\s+{country}\b",
-        quote,
-    ):
-        return False
-    return True
 
 
 def validate_claims(
@@ -108,13 +75,6 @@ def validate_claims(
         if literal_key(claim.value) not in literal_key(claim.evidence):
             rejected("UNGROUNDED_VALUE")
             continue
-        if claim.field == ProfileField.country_of_origin:
-            if normalise_country_name(claim.value) is None:
-                rejected("UNRECOGNIZED_COUNTRY")
-                continue
-            if not origin_is_explicit(claim.value, claim.evidence, seed.full_name):
-                rejected("ORIGIN_CONTEXT_UNSUPPORTED")
-                continue
         if not claim_is_eligible_for_source(seed, source, claim.field, claim.value, claim.evidence):
             rejected("DISPUTED_CLAIM_IDENTITY_CONTEXT")
             continue

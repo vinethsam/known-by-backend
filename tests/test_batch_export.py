@@ -11,7 +11,7 @@ from openpyxl import Workbook, load_workbook
 from app.config import Settings
 from app.export.batch import BatchParseError, normalize_header, parse_batch
 from app.export.formats import export_results
-from app.export.schema import provenance_columns, standard_columns
+from app.export.schema import record_columns, standard_columns
 from app.research.discovery import build_query
 from app.research.identity import research_seed_payload
 from app.schemas import (
@@ -326,10 +326,10 @@ def test_export_csv_is_formula_safe_and_collision_safe():
     data = export_results(_results(), ["name", "status"], "csv")
     rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
     assert "name" not in rows[0]
-    assert rows[0]["status"] == "completed"
+    assert "status" not in rows[0]
     assert "status (2)" not in rows[0]
-    assert rows[0]["full_name"] == "'=Ada"
-    assert rows[0]["source_urls"] == "https://example.com"
+    assert rows[0]["Full Name"] == "'=Ada"
+    assert rows[0]["Source URLs"] == "https://example.com"
     assert list(rows[0])[: len(standard_columns())] == list(standard_columns())
 
 
@@ -342,9 +342,9 @@ def test_export_xlsx_is_readable_and_formula_safe():
     workbook.close()
     assert headers[: len(standard_columns())] == list(standard_columns())
     assert "name" not in headers
-    assert row[headers.index("status")] == "completed"
+    assert "status" not in headers
     assert "status (2)" not in headers
-    assert row[headers.index("full_name")] == "'=Ada"
+    assert row[headers.index("Full Name")] == "'=Ada"
 
 
 def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
@@ -362,8 +362,8 @@ def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
     try:
         sheet = workbook.active
         headers = [cell.value for cell in sheet[1]]
-        note = sheet.cell(2, headers.index("job_title") + 1)
-        wide_note = sheet.cell(2, headers.index("subject") + 1)
+        note = sheet.cell(2, headers.index("Job Title") + 1)
+        wide_note = sheet.cell(2, headers.index("Subject") + 1)
         assert note.value == "'+" + "x" * 49
         # Preserve the existing widths based on raw input, before formula escaping.
         assert sheet.column_dimensions[note.column_letter].width == 52
@@ -376,7 +376,7 @@ def test_xlsx_widths_use_all_original_values_while_cells_remain_formula_safe():
 
 
 @pytest.mark.parametrize("format", ["csv", "xlsx"])
-def test_export_source_urls_keep_first_ten_allowed_unique_urls(format):
+def test_export_source_urls_keep_relevant_unique_urls(format):
     results = _results()
     person = results.people[0]
     urls = [f"https://example.com/source/{index}" for index in range(12)]
@@ -394,16 +394,16 @@ def test_export_source_urls_keep_first_ten_allowed_unique_urls(format):
     data = export_results(results, [], format)
     if format == "csv":
         row = next(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
-        source_urls = row["source_urls"]
+        source_urls = row["Source URLs"]
     else:
         workbook = load_workbook(io.BytesIO(data))
         try:
             sheet = workbook.active
             headers = [cell.value for cell in sheet[1]]
-            source_urls = sheet.cell(2, headers.index("source_urls") + 1).value
+            source_urls = sheet.cell(2, headers.index("Source URLs") + 1).value
         finally:
             workbook.close()
-    assert source_urls == "; ".join(urls[:10])
+    assert source_urls == "; ".join(dict.fromkeys(urls))
 
 
 def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
@@ -428,21 +428,21 @@ def test_xlsx_highlights_only_populated_fields_below_configured_confidence():
     def cell(column):
         return sheet.cell(2, headers.index(column) + 1)
 
-    assert cell("subject").fill.fgColor.rgb.endswith("FFF2CC")
-    assert cell("subject_confidence").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("Subject").fill.fgColor.rgb.endswith("FFF2CC")
+    assert cell("Subject Confidence").fill.fgColor.rgb.endswith("FFF2CC")
     assert "subject (2)" not in headers
-    assert cell("degree_type").fill.fill_type is None
-    assert cell("degree_type_confidence").fill.fill_type is None
-    assert cell("university_name").fill.fill_type is None
-    assert cell("university_name_confidence").fill.fill_type is None
-    assert cell("full_name").fill.fill_type is None
+    assert cell("Degree Type").fill.fill_type is None
+    assert cell("Degree Confidence").fill.fill_type is None
+    assert cell("University Name").fill.fill_type is None
+    assert cell("University Confidence").fill.fill_type is None
+    assert cell("Full Name").fill.fill_type is None
     workbook.close()
 
     custom = export_results(results, [], "xlsx", low_confidence_threshold=40)
     workbook = load_workbook(io.BytesIO(custom), data_only=False)
     sheet = workbook.active
     headers = [item.value for item in sheet[1]]
-    assert sheet.cell(2, headers.index("subject") + 1).fill.fgColor.rgb.endswith("FFF2CC")
+    assert sheet.cell(2, headers.index("Subject") + 1).fill.fgColor.rgb.endswith("FFF2CC")
     workbook.close()
 
 
@@ -504,7 +504,7 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
         record("Master's Degree", "University B", master_url, master_url, 89),
     ]
 
-    data = export_results(results, ["name", "status"], format, provenance="field")
+    data = export_results(results, ["name", "status"], format, provenance="field", retain_details=True)
     if format == "csv":
         rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
         headers = list(rows[0])
@@ -516,8 +516,8 @@ def test_field_provenance_export_expands_records_without_cross_record_sources(fo
         rows = [dict(zip(headers, values[index], strict=True)) for index in range(1, len(values))]
 
     assert len(rows) == 2
-    assert headers[: len(standard_columns())] == list(standard_columns())
-    assert set(provenance_columns()) <= set(headers)
+    assert headers[: len(record_columns())] == list(record_columns())
+    assert len(headers) == len(record_columns())
     assert headers[-1] == "source_urls"
     assert [row["degree_type"] for row in rows] == ["Bachelor's Degree", "Master's Degree"]
     assert all("name" not in row for row in rows)
@@ -585,7 +585,7 @@ def test_source_list_metadata_follows_each_derived_education_row_without_cross_l
         headers = list(values[0])
         rows = [dict(zip(headers, values[index], strict=True)) for index in range(1, len(values))]
 
-    assert [row["degree_type"] for row in rows] == [
+    assert [row["Degree Type"] for row in rows] == [
         "Bachelor's Degree",
         "Master's Degree",
         "Doctoral Degree",
@@ -621,7 +621,11 @@ def test_field_provenance_export_keeps_failed_person_and_formula_safety():
     results.people[0].status = PersonStatus.failed
     failed = list(
         csv.DictReader(
-            io.StringIO(export_results(results, ["name"], "csv", provenance="field").decode("utf-8-sig"))
+            io.StringIO(
+                export_results(results, ["name"], "csv", provenance="field", retain_details=True).decode(
+                    "utf-8-sig"
+                )
+            )
         )
     )
     assert len(failed) == 1
@@ -632,7 +636,11 @@ def test_field_provenance_export_keeps_failed_person_and_formula_safety():
     sourced.people[0].result.profile.fields[ProfileField.full_name].sources = ["=unsafe-cell"]
     rich = list(
         csv.DictReader(
-            io.StringIO(export_results(sourced, ["name"], "csv", provenance="field").decode("utf-8-sig"))
+            io.StringIO(
+                export_results(sourced, ["name"], "csv", provenance="field", retain_details=True).decode(
+                    "utf-8-sig"
+                )
+            )
         )
     )
     assert rich[0]["full_name_source_urls"] == "'=unsafe-cell"
@@ -649,7 +657,7 @@ def test_export_has_each_enrichment_once_and_keeps_input_columns_unchanged():
     assert len(rows[0]) == len(standard_columns())
     assert len(set(rows[0])) == len(rows[0])
     assert rows[0][: len(standard_columns())] == list(standard_columns())
-    assert rows[0][-1] == "source_urls"
+    assert rows[0][-1] == "Source URLs"
     assert columns == ["name", "status", "status (2)", "full_name"]
 
 
@@ -688,9 +696,9 @@ def test_export_escapes_headers_and_whitespace_prefixed_formulas(format):
         workbook = load_workbook(io.BytesIO(data), data_only=False)
         rows = list(workbook.active.values)
         workbook.close()
-    assert rows[0][-1] == "source_urls"
+    assert rows[0][-1] == "Source URLs"
     assert " =header" not in rows[0]
-    assert rows[1][list(rows[0]).index("profile_link")].startswith("' \t=")
+    assert rows[1][list(rows[0]).index("Profile Link")].startswith("' \t=")
 
 
 @pytest.mark.parametrize("hidden_cell", ["Z2", "A10000"])

@@ -1,6 +1,6 @@
 """Prompt text for claim extraction."""
 
-EXTRACTION_PROMPT_VERSION = "claims-v7"
+EXTRACTION_PROMPT_VERSION = "claims-v8"
 
 EXTRACTION_SYSTEM_PROMPT = """Extract concise person profile claims from supplied source text.
 
@@ -18,16 +18,6 @@ Use matching universities, qualifications, employers and historical affiliations
 the target from namesakes. An educational page need not repeat the current employer. A partial
 name and an unrelated institution are insufficient. Preserve which qualification, institution,
 subject and time period belong together; never combine separate seed and source relationships.
-
-Extract country_of_origin only from an explicit biographical statement that the
-person is from (including "is an architect from"), originally from, hails from,
-or is native to that country, or that
-it is their country of origin. Residence, citizenship or nationality alone,
-birthplace alone, an employer's country, and a university's location do not establish
-origin. Keep the literal country name in the evidence and omit the claim if unclear.
-The origin excerpt must directly link the person's full name (which may include an
-additional middle name) to that country;
-do not use a pronoun-only excerpt or another person's origin on a mixed page.
 
 Return only claims that are about the seeded person. Evidence must be short literal text from
 the supplied source and must contain the claim value verbatim. subject_name must name the seeded

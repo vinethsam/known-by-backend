@@ -146,7 +146,7 @@ def test_country_context_and_historical_employment_are_not_promoted(format):
     assert seed.historical_job_title == "Research Associate"
     assert seed.organisation is None
     assert seed.job_title is None
-    assert seed_core_values(seed) == {"full_name": "Maya Silva", "country_of_origin": "Sri Lanka"}
+    assert seed_core_values(seed) == {"full_name": "Maya Silva"}
     assert seed_context_values(seed)["historical_employer"] == ["Former Labs"]
     assert seed_context_values(seed)["historical_job_title"] == ["Research Associate"]
 

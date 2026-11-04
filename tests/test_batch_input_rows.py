@@ -101,8 +101,8 @@ def test_mixed_input_keeps_row_errors_and_only_valid_people_are_researched(tmp_p
             exported = [dict(zip(headers, row, strict=True)) for row in values]
             workbook.close()
         assert len(exported) == 4
-        assert exported[1]["error_code"] == "INVALID_PERSON_NAME"
-        assert exported[2]["error_code"] == "INVALID_PERSON_SEED"
+        assert results.people[1].error_code == "INVALID_PERSON_NAME"
+        assert results.people[2].error_code == "INVALID_PERSON_SEED"
         assert "University" not in exported[1]
         assert results.people[1].original_row["University"] == "Hill University"
         assert float(exported[1]["university_name_input_confidence"]) == 100

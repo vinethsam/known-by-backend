@@ -11,7 +11,7 @@ from openpyxl import Workbook
 
 from app.db.models import JobRow, PersonTaskRow
 from app.export.formats import ExportCellLimitError
-from app.export.schema import RESEARCH_FIELDS, standard_columns
+from app.export.schema import RESEARCH_FIELDS, record_columns
 from app.library_preview import LibraryPreviewError, preview_saved_file
 from tests.test_result_library import ADMIN_AUTH, AUTH, _artifact, _completed_job
 from tests.test_result_library import library_context as library_context
@@ -34,7 +34,7 @@ def test_saved_records_lifecycle_is_shared_paginated_and_unchanged(library_conte
             assert page["file"] == saved
             assert len(page["records"]) == 1
             first = page["records"][0]
-            assert tuple(first) == standard_columns()
+            assert tuple(first) == record_columns()
             assert first["full_name"] == "Jane Doe"
             assert first["job_title"] == "Programme Director"
             assert float(first["job_title_confidence"]) == 40
@@ -122,7 +122,8 @@ def test_legacy_csv_recognizes_friendly_headers_and_ignores_admin_columns(librar
         assert record["organisation"] == "IBM"
         assert record["job_title"] == "Chief Executive Officer"
         assert "LIST_NAME" not in record
-        assert client.get(path, headers=AUTH).content == content
+        assert client.get(path, headers=AUTH).status_code == 200
+        assert storage.get(saved.file_id).content == content
 
 
 @pytest.mark.parametrize("format", ["csv", "xlsx"])
@@ -200,13 +201,14 @@ def test_legacy_generated_export_ignores_duplicate_admin_status(library_context,
 @pytest.mark.parametrize(
     "content", [b"broken header\nno research", b"full_name,full_name\nJane,John", b'full_name\n"unterminated']
 )
-def test_malformed_preview_does_not_break_original_download(library_context, content):
+def test_malformed_saved_file_returns_error_and_preserves_original(library_context, content):
     _, store, storage, app = library_context()
     saved = storage.save(replace(_artifact(store, _completed_job(store)), content=content))
     with TestClient(app) as client:
         path = f"/v1/library/files/{saved.file_id}"
         assert client.get(path + "/records", headers=AUTH).status_code == 422
-        assert client.get(path, headers=AUTH).content == content
+        assert client.get(path, headers=AUTH).status_code == 422
+        assert storage.get(saved.file_id).content == content
 
 
 def test_xlsx_formulas_are_inert_and_zip_expansion_is_bounded(library_context):

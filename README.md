@@ -45,12 +45,10 @@ their specific error codes.
   is required. A name-only row follows the normal broad but bounded research path.
 - Iterative public-source discovery, seed-aware identity gating, canonical URL
   deduplication, bounded static-to-browser recovery, and within-job content caching.
-- Eight output field decisions: the validated input name plus seven evidence-derived
-  fields for country of origin, current organisation, current job title, university,
-  degree, subject, and a representative profile link. Country of Origin requires an
-  explicit biographical statement that the person is from a recognized country;
-  residence, citizenship, employer location, and university location alone do not
-  establish it. Conflicting origins remain unselected for review. The input name keeps
+- Seven output field decisions: the validated input name plus current organisation,
+  current job title, university, degree, subject and a representative profile link.
+  Country of Origin processing is discontinued; supplied geography remains optional
+  identity context and historical evidence stays stored. The input name keeps
   its identity with display casing normalized for output, carries deterministic 100%
   input certainty, and is excluded from research confidence and
   coverage; web identity assessment remains separate. Each output record also exposes
@@ -109,15 +107,11 @@ their specific error codes.
   so stronger official evidence wins conflicts.
 - Durable database jobs, separate workers, renewable leases, checkpoints, cancellation,
   bounded retries, and recorded model/tool usage with safe attempt diagnostics.
-- Rich JSON results and CSV/XLSX exports with spreadsheet formula protection. Every
-  export starts with the same eight research columns in this order: `full_name`,
-  `country_of_origin`, `organisation`, `job_title`, `university_name`, `degree_type`,
-  `subject`, `profile_link`. Confidence, coverage, review, status, error, and aggregate
-  provenance follow in fixed positions; optional field URLs follow that standard
-  prefix, then original input metadata. The additive
-  [field-provenance mode](docs/exports.md) includes the supporting URLs for every
-  selected field. XLSX marks only populated fields below the configured review
-  threshold, and their confidence cells, in pale yellow.
+- Rich JSON results retain confidence and field provenance. Every downloaded CSV/XLSX
+  uses the same [fourteen-column schema](docs/exports.md): seven values, six independent
+  research-confidence scores and deduplicated Source URLs. History and Database
+  downloads map supported older records without rewriting stored data. XLSX retains
+  formula protection and pale-yellow review highlighting.
 - Human-readable CSV/XLSX filenames use the first nonempty source-list value and the
   job start time in UTC, such as `Forbes-2000_2026-09-29_0241.xlsx`; repeated exports
   retain that filename. A shared internal [results library](docs/library.md) retains

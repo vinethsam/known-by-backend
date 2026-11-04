@@ -10,7 +10,8 @@ from openpyxl import load_workbook
 
 from app.config import ScoringPolicy
 from app.export.formats import export_results
-from app.export.schema import standard_columns
+from app.export.schema import record_columns as standard_columns
+from app.export.schema import standard_columns as download_columns
 from app.research.identity import assess_identity
 from app.research.normalisation import normalise
 from app.research.reconciliation import reconcile
@@ -205,33 +206,6 @@ def test_same_external_evidence_has_same_confidence_with_corroborating_extra_see
     assert richer.fields[ProfileField.degree_type].provenance_status == "corroborated"
 
 
-def test_conflicting_country_preserves_exact_seed_and_external_evidence_separately():
-    seed = PersonSeed(full_name=NAME, university_name="Lake University", country_of_origin="  Sri Lanka  ")
-    text = f"{NAME} graduated from Lake University. {NAME} is from Canada."
-    source = evidence_source(seed, text)
-    claim = evidence_claim(
-        "origin", ProfileField.country_of_origin, "Canada", quote=f"{NAME} is from Canada."
-    )
-    result = profile(seed, [claim], [source])
-    decision = result.fields[ProfileField.country_of_origin]
-
-    assert decision.value == "Canada"
-    assert decision.supplied_values == ["  Sri Lanka  "]
-    assert decision.provenance_status == "conflicting"
-    assert decision.input_confidence == 100
-    assert decision.research_confidence == decision.confidence > 0
-    assert decision.supporting_claim_ids == ["origin"]
-    assert decision.scoring_components["seed_conflicting_claim_ids"] == ["origin"]
-    assert decision.review_required
-    assert "SUPPLIED_VALUE_CONFLICT" in decision.review_reason_codes
-    assert result.records[0].review_required
-    assert "SUPPLIED_VALUE_CONFLICT" in result.records[0].review_reason_codes
-    supplied = next(item for item in result.seed_attributes if item["field"] == "country_of_origin")
-    assert supplied["value"] == "  Sri Lanka  "
-    assert supplied["conflicting_claim_ids"] == ["origin"]
-    assert supplied["source_urls"] == [source.canonical_url]
-
-
 def test_old_seed_employer_is_superseded_when_evidence_supports_a_current_career_change():
     seed = PersonSeed(full_name=NAME, organisation="Former Labs")
     source = evidence_source(
@@ -368,7 +342,9 @@ def test_optional_export_provenance_keeps_fixed_prefix_and_raw_seed_certainty(fo
             )
         ],
     )
-    output = export_results(results, list(seed.input_metadata), format, provenance="field")
+    output = export_results(
+        results, list(seed.input_metadata), format, provenance="field", retain_details=True
+    )
     if format == "csv":
         reader = csv.DictReader(io.StringIO(output.decode("utf-8-sig")))
         headers = reader.fieldnames
@@ -384,7 +360,7 @@ def test_optional_export_provenance_keeps_fixed_prefix_and_raw_seed_certainty(fo
     assert float(row["university_name_input_confidence"]) == 100
     assert float(row["university_name_confidence"]) == 0
     assert row["university_name"] == "Lake University"
-    assert json.loads(row["country_of_origin_supplied_values"]) == ["  Sri Lanka  "]
+    assert "country_of_origin" not in row
     assert "seed_input_metadata" not in row
     metadata = {item["column"]: item for item in result.seed_attributes}
     assert metadata["country_of_origin"]["value"] == "  Sri Lanka  "
@@ -410,7 +386,9 @@ def test_large_seed_provenance_round_trips_without_excel_cell_truncation(format)
             )
         ],
     )
-    output = export_results(results, list(seed.input_metadata), format, provenance="field")
+    output = export_results(
+        results, list(seed.input_metadata), format, provenance="field", retain_details=True
+    )
     if format == "csv":
         reader = csv.DictReader(io.StringIO(output.decode("utf-8-sig")))
         headers = reader.fieldnames
@@ -456,7 +434,7 @@ def test_unresearched_rows_preserve_input_certainty_and_long_metadata_without_re
             )
         ],
     )
-    output = export_results(results, list(original), format, provenance="field")
+    output = export_results(results, list(original), format, provenance="field", retain_details=True)
     if format == "csv":
         reader = csv.DictReader(io.StringIO(output.decode("utf-8-sig")))
         headers = reader.fieldnames
@@ -493,7 +471,7 @@ def test_unresearched_rows_preserve_input_certainty_and_long_metadata_without_re
     assert results.people[0].original_row == original
     default = export_results(results, list(original), "csv")
     default_reader = csv.DictReader(io.StringIO(default.decode("utf-8-sig")))
-    assert default_reader.fieldnames == list(standard_columns())
+    assert default_reader.fieldnames == list(download_columns())
     assert "University" not in next(default_reader)
 
 

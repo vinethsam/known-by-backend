@@ -36,6 +36,7 @@ def build_export_artifact(
     format: ExportFormat,
     *,
     provenance: ProvenanceMode = "none",
+    retain_details: bool = False,
     low_confidence_threshold: float = DEFAULT_REVIEW_THRESHOLD,
 ) -> ExportArtifact:
     return ExportArtifact(
@@ -48,6 +49,7 @@ def build_export_artifact(
             columns,
             format,
             provenance=provenance,
+            retain_details=retain_details,
             low_confidence_threshold=low_confidence_threshold,
         ),
     )

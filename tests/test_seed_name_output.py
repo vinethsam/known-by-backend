@@ -228,7 +228,7 @@ def test_every_education_record_repeats_seed_name_and_exports_input_certainty():
     rows = list(csv.DictReader(io.StringIO(exported.decode("utf-8-sig"))))
 
     assert len(rows) == 3
-    assert {row["full_name"] for row in rows} == {"Donald Trump"}
+    assert {row["Full Name"] for row in rows} == {"Donald Trump"}
     assert all("ALUMNI_FULL_NAME" not in row for row in rows)
-    assert {float(row["full_name_input_confidence"]) for row in rows} == {100.0}
-    assert {float(row["full_name_confidence"]) for row in rows} == {0.0}
+    assert "Full Name Input Confidence" not in rows[0]
+    assert {float(row["Full Name Confidence"]) for row in rows} == {0.0}
