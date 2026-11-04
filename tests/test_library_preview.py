@@ -236,7 +236,7 @@ def test_xlsx_formulas_are_inert_and_zip_expansion_is_bounded(library_context):
             target.writestr(
                 entry, b"<broken" if entry.filename == "xl/worksheets/sheet1.xml" else source.read(entry)
             )
-    with pytest.raises(LibraryPreviewError, match="cannot be previewed"):
+    with pytest.raises(LibraryPreviewError, match="cannot be read"):
         preview_saved_file(replace(retained, content=corrupted.getvalue()))
 
 

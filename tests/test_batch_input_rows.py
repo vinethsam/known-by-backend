@@ -17,7 +17,7 @@ from app.db.store import Store
 from app.export.batch import parse_batch
 from app.export.formats import export_results
 from app.research.reconciliation import reconcile
-from app.schemas import ResearchResult
+from app.schemas import ProfileField, ResearchResult
 
 
 def settings(tmp_path):
@@ -105,10 +105,10 @@ def test_mixed_input_keeps_row_errors_and_only_valid_people_are_researched(tmp_p
         assert results.people[2].error_code == "INVALID_PERSON_SEED"
         assert "University" not in exported[1]
         assert results.people[1].original_row["University"] == "Hill University"
-        assert float(exported[1]["university_name_input_confidence"]) == 100
-        assert exported[1]["university_name"] == "Hill University"
-        assert float(exported[1]["university_name_confidence"]) == 0
-        assert exported[1]["university_name_provenance_status"] == "supplied"
+        assert results.people[1].supplied_fields[ProfileField.university_name].input_confidence == 100
+        assert exported[1]["University Name"] == "Hill University"
+        assert float(exported[1]["University Confidence"]) == 0
+        assert results.people[1].supplied_fields[ProfileField.university_name].provenance_status == "supplied"
     finally:
         store.engine.dispose()
 

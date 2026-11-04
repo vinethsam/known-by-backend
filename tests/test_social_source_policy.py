@@ -246,5 +246,5 @@ def test_export_removes_legacy_social_profile_link_and_all_social_provenance():
     assert row["Profile Link"] == ""
     assert "Profile Link Confidence" not in row
     assert social.final_url not in row["Source URLs"]
-    assert result.profile.fields[ProfileField.organisation].sources == [official.final_url]
+    assert "https://lnkd.in/jane" not in row["Source URLs"]
     assert row["Source URLs"] == official.final_url

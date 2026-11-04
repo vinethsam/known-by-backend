@@ -147,9 +147,9 @@ def test_provenance_round_trip_preserves_original_controls_without_creating_evid
     supplied = next(item for item in attributes if item["field"] == "university_name")
     assert supplied["value"] == raw
     assert supplied["input_confidence"] == 100
-    assert json.loads(row["university_name_supplied_values"]) == [raw]
+    assert "university_name_supplied_values" not in row
     assert float(row["University Confidence"]) == 0
-    assert row["university_name"] == "Lake University Faculty Physics"
+    assert row["University Name"] == "Lake University Faculty Physics"
 
 
 def test_header_controls_are_sanitized_for_matching_without_losing_original_labels():
