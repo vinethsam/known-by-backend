@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import zipfile
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from pydantic import ValidationError
 
+from app.api.auth import AuthenticatedUser
 from app.api.routes import create_app
 from app.config import Settings
 from app.export.batch import BatchParseError, parse_batch
@@ -24,6 +26,152 @@ from app.schemas import ExtractionResponse, PersonSeed, SourceRecord
 
 def settings(**overrides):
     return Settings(_env_file=None, APP_ENV="test", **overrides)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "*",
+        "https://*.github.io",
+        "https://vinethsam.github.io/known-by",
+        "https://vinethsam.github.io/",
+        "https://user:password@example.org",
+        "https://example.org?",
+        "https://example.org#fragment",
+        "https://example.org\\path",
+        "https://example.org\n",
+        "https://example.org:invalid",
+    ],
+)
+def test_cors_rejects_non_origin_allowlist_entries(origin):
+    with pytest.raises(ValidationError):
+        settings(CORS_ALLOWED_ORIGINS=[origin])
+
+
+def test_cors_preserves_explicit_development_overrides_and_deduplicates():
+    assert settings().CORS_ALLOWED_ORIGINS == ["https://vinethsam.github.io"]
+    assert settings(
+        CORS_ALLOWED_ORIGINS=["http://localhost:5173", "https://EXAMPLE.org:443", "https://example.org"]
+    ).CORS_ALLOWED_ORIGINS == ["http://localhost:5173", "https://example.org"]
+
+
+@pytest.fixture
+def cors_client():
+    async def close():
+        pass
+
+    library = SimpleNamespace(list_files=lambda **kwargs: [], delete=lambda file_id: True)
+    app = create_app(
+        settings(
+            API_ACCESS_TOKEN="test-team",
+            LIBRARY_DELETE_TOKEN="test-delete",
+            GOOGLE_CLIENT_ID="123456-test.apps.googleusercontent.com",
+            GOOGLE_ALLOWED_EMAILS=["approved@example.org"],
+            MAX_UPLOAD_BYTES=1024,
+        ),
+        store=SimpleNamespace(engine=SimpleNamespace(dispose=lambda: None)),
+        fetcher=SimpleNamespace(close=close),
+        library=library,
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client, library
+
+
+def test_cors_preflight_is_exact_and_does_not_authorize_requests(cors_client):
+    client, _ = cors_client
+    origin = "https://vinethsam.github.io"
+    preflight = {
+        "Origin": origin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type,accept",
+    }
+    response = client.options("/v1/research/person", headers=preflight)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert "DELETE" in response.headers["access-control-allow-methods"]
+    assert "access-control-allow-credentials" not in response.headers
+    for headers in (
+        {**preflight, "Origin": "https://untrusted.example"},
+        {**preflight, "Access-Control-Request-Method": "PUT"},
+        {**preflight, "Access-Control-Request-Headers": "x-unapproved"},
+    ):
+        assert client.options("/v1/research/person", headers=headers).status_code == 400
+    response = client.get("/v1/library/files", headers={"Origin": origin})
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.headers["www-authenticate"] == "Bearer"
+    authorized = {"Origin": origin, "Authorization": "Bearer test-team"}
+    assert client.get("/v1/library/files", headers=authorized).status_code == 200
+    assert (
+        client.delete(
+            "/v1/library/files/00000000-0000-0000-0000-000000000000", headers=authorized
+        ).status_code
+        == 403
+    )
+    response = client.get("/v1/library/files", headers={"Origin": "https://untrusted.example"})
+    assert response.status_code == 401
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_headers_cover_request_limits_and_internal_errors(cors_client):
+    client, library = cors_client
+    headers = {"Origin": "https://vinethsam.github.io", "Authorization": "Bearer test-team"}
+    response = client.post(
+        "/v1/research/person", content=b"{}", headers={**headers, "Content-Length": str(1024 + 65537)}
+    )
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == headers["Origin"]
+
+    def failed_read(**kwargs):
+        raise RuntimeError("private internal error")
+
+    library.list_files = failed_read
+    response = client.get("/v1/library/files", headers=headers)
+    assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == headers["Origin"]
+    assert response.json() == {"detail": "Internal service error"}
+
+
+def test_cors_google_user_can_read_without_gaining_delete_or_machine_credentials(cors_client, monkeypatch):
+    client, _ = cors_client
+    verified = []
+
+    async def verify(credential):
+        verified.append(credential)
+        return AuthenticatedUser("google-subject", "approved@example.org", 4102444800, "Approved User")
+
+    monkeypatch.setattr(client.app.state.google_auth, "verify", verify)
+    origin = {"Origin": "https://vinethsam.github.io"}
+    response = client.get("/v1/auth/config", headers=origin)
+    assert response.status_code == 200
+    assert response.json() == {
+        "enabled": True,
+        "google_client_id": "123456-test.apps.googleusercontent.com",
+    }
+    assert client.get("/v1/auth/me", headers=origin).status_code == 401
+    user = {**origin, "Authorization": "Bearer user-id-token"}
+    response = client.get("/v1/auth/me", headers=user)
+    assert response.status_code == 200
+    assert response.json() == {
+        "authentication": "google",
+        "subject": "google-subject",
+        "email": "approved@example.org",
+        "name": "Approved User",
+        "expires_at": 4102444800,
+        "can_delete": False,
+    }
+    assert response.headers["access-control-allow-origin"] == origin["Origin"]
+    assert client.get("/v1/library/files", headers=user).status_code == 200
+    path = "/v1/library/files/00000000-0000-0000-0000-000000000000"
+    assert client.delete(path, headers=user).status_code == 403
+    verified_count = len(verified)
+    machine = {**origin, "Authorization": "Bearer test-team"}
+    response = client.get("/v1/auth/me", headers=machine)
+    assert response.status_code == 200
+    assert response.json() == {"authentication": "service", "can_delete": False}
+    assert len(verified) == verified_count
+    privileged = {**origin, "Authorization": "Bearer test-delete"}
+    assert client.delete(path, headers=privileged).status_code == 204
 
 
 def workbook_bytes():

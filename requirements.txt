@@ -4,6 +4,7 @@ pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 httpx>=0.28,<0.29
 httpcore==1.0.9
+google-auth>=2.40,<3
 beautifulsoup4>=4.12,<5
 markdownify>=1.1,<2
 playwright==1.62.0

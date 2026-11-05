@@ -14,7 +14,9 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.middleware.cors import CORSMiddleware
 
+from app.api.auth import AuthenticatedUser, GoogleAuthenticator, GoogleAuthError
 from app.api.limits import RequestSizeLimitMiddleware
 from app.config import Settings, get_settings
 from app.db import Store
@@ -34,6 +36,19 @@ from app.schemas import Contract, JobCreated, JobResults, JobStatus, JobView, Pe
 from schemas import FetchRequest, ProcessedPage
 
 logger = logging.getLogger(__name__)
+
+
+class BrowserAPI(FastAPI):
+    def build_middleware_stack(self):
+        # Wrap ServerErrorMiddleware too, so browsers can read error responses.
+        return CORSMiddleware(
+            super().build_middleware_stack(),
+            allow_origins=self.state.settings.CORS_ALLOWED_ORIGINS,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "Accept"],
+            expose_headers=["Content-Disposition", "Retry-After", "Location", "WWW-Authenticate"],
+        )
 
 
 class HealthResponse(Contract):
@@ -56,26 +71,40 @@ def create_app(
     store = store or Store(settings)
     fetcher = fetcher or StaticFetcher(settings)
     library = library or DatabaseResultFileStorage(store.session_factory, settings)
+    google_auth = GoogleAuthenticator(settings.GOOGLE_CLIENT_ID, settings.GOOGLE_ALLOWED_EMAILS)
 
     @asynccontextmanager
     async def lifespan(application):
         configure_logging(settings.LOG_LEVEL)
         yield
+        await google_auth.close()
         await fetcher.close()
         store.engine.dispose()
 
-    application = FastAPI(title="People Research API", version="1.0.0", lifespan=lifespan)
+    application = BrowserAPI(title="People Research API", version="1.0.0", lifespan=lifespan)
     application.add_middleware(RequestSizeLimitMiddleware, limit=settings.MAX_UPLOAD_BYTES + 65536)
     application.state.settings, application.state.store = settings, store
+    application.state.google_auth = google_auth
     last_database_warning = -60.0
 
     async def authorize(authorization: str | None = Header(default=None)):
         if settings.API_ACCESS_TOKEN:
             expected = "Bearer " + settings.API_ACCESS_TOKEN.get_secret_value()
-            if not authorization or not hmac.compare_digest(authorization.encode(), expected.encode()):
+            if authorization and hmac.compare_digest(authorization.encode(), expected.encode()):
+                return None
+        if authorization and authorization.startswith("Bearer ") and google_auth.enabled:
+            try:
+                return await google_auth.verify(authorization[len("Bearer ") :])
+            except GoogleAuthError as exc:
                 raise HTTPException(
-                    401, "Invalid or missing API access token", headers={"WWW-Authenticate": "Bearer"}
-                )
+                    exc.status_code, str(exc), headers={"WWW-Authenticate": "Bearer"}
+                ) from None
+        # Keep the existing unauthenticated local debugging mode. Google-enabled
+        # deployments require authentication even when the machine key is absent.
+        if settings.API_ACCESS_TOKEN or google_auth.enabled:
+            raise HTTPException(
+                401, "Invalid or missing API access token", headers={"WWW-Authenticate": "Bearer"}
+            )
 
     secured = [Depends(authorize)]
 
@@ -96,7 +125,7 @@ def create_app(
         if not settings.API_ACCESS_TOKEN or not settings.API_ACCESS_TOKEN.get_secret_value().strip():
             raise HTTPException(503, "Shared library requires API_ACCESS_TOKEN")
         # The privileged credential is scoped to library routes. Ordinary
-        # research authorization continues to accept only API_ACCESS_TOKEN.
+        # research authorization accepts the team token or an approved Google user.
         if not can_delete_library(authorization):
             await authorize(authorization)
 
@@ -149,6 +178,27 @@ def create_app(
     @application.get("/health", response_model=HealthResponse)
     async def health():
         return HealthResponse(status="ok")
+
+    @application.get("/v1/auth/config")
+    async def auth_config():
+        return {
+            "enabled": google_auth.enabled,
+            "google_client_id": google_auth.client_id if google_auth.enabled else None,
+        }
+
+    @application.get("/v1/auth/me")
+    async def auth_me(user: AuthenticatedUser | None = Depends(authorize)):
+        # No server credential, provider key or allowlist is exposed here.
+        if user is None:
+            return {"authentication": "service", "can_delete": False}
+        return {
+            "authentication": "google",
+            "subject": user.sub,
+            "email": user.email,
+            "name": user.name,
+            "expires_at": user.expires_at,
+            "can_delete": False,
+        }
 
     @application.get("/ready", response_model=ReadyResponse)
     async def ready():

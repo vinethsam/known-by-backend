@@ -181,7 +181,7 @@ must differ from the ordinary team token. When unset, deletion remains disabled.
 Environment-variable names are grouped below. [.env.example](.env.example) is the
 complete reference for bounds, timeouts, concurrency, retention, and scoring policy.
 
-- **Runtime and access:** `APP_ENV`, `PORT`, `LOG_LEVEL`, `API_ACCESS_TOKEN`, `DATABASE_URL`.
+- **Runtime and access:** `APP_ENV`, `PORT`, `LOG_LEVEL`, `API_ACCESS_TOKEN`, `GOOGLE_CLIENT_ID`, `GOOGLE_ALLOWED_EMAILS`, `CORS_ALLOWED_ORIGINS`, `DATABASE_URL`.
 - **OpenRouter:** `OPENROUTER_API_KEY`, `OPENROUTER_SOURCE_MODEL`,
   `OPENROUTER_EXTRACTION_MODEL`, `OPENROUTER_RESPONSE_FORMAT`.
 - **Static retrieval:** `STATIC_FETCH_WORKER_URL`, `STATIC_FETCH_WORKER_SECRET`,
@@ -268,9 +268,38 @@ optional `LIBRARY_DELETE_TOKEN` grants privileged library access using the same
 Bearer header; it does not grant access to research endpoints. API schemas are
 available at `/docs`; health and readiness are public.
 
+The static GitHub Pages frontend uses Google Identity Services rather than the
+server-held team token. Create a Google Web OAuth client with the authorized
+JavaScript origin `https://vinethsam.github.io` (no path), then set its public ID
+as `GOOGLE_CLIENT_ID` and an explicit JSON email list as `GOOGLE_ALLOWED_EMAILS`.
+For external/testing applications, add the approved accounts as Google test users.
+Only basic Google identity is requested; no Google API scopes or client secret
+are needed. The API verifies each ID token's signature, audience, issuer, expiry,
+verified email and allowlist membership using `google-auth`. Gmail and Workspace
+identities are accepted; other third-party email identities need additional proof
+of current email ownership and are rejected. The allowlist is checked on every
+request. Google users receive ordinary research/read/save permissions, never
+privileged deletion. The browser holds its short-lived credential only in memory;
+sign-out, expiry or a current credential's 401 clears it.
+
+`/v1/auth/config` publishes only the public client ID and whether sign-in is enabled.
+`/v1/auth/me` verifies a credential without starting research. The existing team
+bearer token and distinct privileged deletion token continue to work as before.
+
+Browser CORS defaults to the exact GitHub Pages origin `https://vinethsam.github.io`.
+Override `CORS_ALLOWED_ORIGINS` with a JSON list of exact HTTP(S) origins for other
+deployments or local development; page paths, wildcards and credentials are rejected.
+Allowed cross-origin methods are GET, POST, DELETE and OPTIONS, with Authorization,
+Content-Type and Accept request headers. CORS permits the browser transport only:
+all protected routes still require their existing authentication and deletion permissions.
+Cross-origin cookies are not used. Download filename, retry, location and bearer
+challenge response headers remain readable, including on API error responses.
+
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | GET | `/health`, `/ready` | Liveness and readiness |
+| GET | `/v1/auth/config` | Public Google client configuration |
+| GET | `/v1/auth/me` | Read-only authenticated identity check |
 | POST | `/v1/research/person` | Queue one person; return job ID |
 | POST | `/v1/research/batch` | Queue multipart CSV/TSV/XLSX upload |
 | GET | `/v1/jobs/{job_id}` | Status and progress |

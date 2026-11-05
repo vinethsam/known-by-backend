@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.schemas import Contract, ProfileField, SourceType
@@ -147,6 +147,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     API_ACCESS_TOKEN: SecretStr | None = None
     LIBRARY_DELETE_TOKEN: SecretStr | None = None
+    GOOGLE_CLIENT_ID: str | None = None
+    GOOGLE_ALLOWED_EMAILS: list[str] = Field(default_factory=list)
+    CORS_ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["https://vinethsam.github.io"])
     DATABASE_URL: str = "sqlite:///./research.db"
     STATIC_FETCH_WORKER_URL: str | None = None
     STATIC_FETCH_WORKER_SECRET: SecretStr | None = None
@@ -205,6 +208,64 @@ class Settings(BaseSettings):
     WORKER_HEARTBEAT_SECONDS: float = Field(default=20, gt=0)
     WORKER_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
     SCORING: ScoringPolicy = Field(default_factory=ScoringPolicy)
+
+    @field_validator("GOOGLE_CLIENT_ID")
+    @classmethod
+    def google_web_client(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if not value.endswith(".apps.googleusercontent.com") or any(
+            character.isspace() for character in value
+        ):
+            raise ValueError("GOOGLE_CLIENT_ID must be a Google OAuth web client ID")
+        return value
+
+    @field_validator("GOOGLE_ALLOWED_EMAILS")
+    @classmethod
+    def approved_google_emails(cls, values: list[str]) -> list[str]:
+        emails = []
+        for value in values:
+            email = value.strip().casefold()
+            if email.count("@") != 1 or any(character.isspace() for character in email) or "*" in email:
+                raise ValueError("GOOGLE_ALLOWED_EMAILS requires explicit email addresses")
+            local, domain = email.split("@")
+            if not local or not domain or "." not in domain:
+                raise ValueError("GOOGLE_ALLOWED_EMAILS requires explicit email addresses")
+            emails.append(email)
+        return list(dict.fromkeys(emails))
+
+    @field_validator("CORS_ALLOWED_ORIGINS")
+    @classmethod
+    def exact_browser_origins(cls, origins: list[str]) -> list[str]:
+        normalized = []
+        for origin in origins:
+            parsed = urlsplit(origin)
+            if (
+                parsed.scheme not in ("http", "https")
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or "?" in origin
+                or "#" in origin
+                or any(
+                    ord(character) <= 32 or ord(character) == 127 or character in "*\\"
+                    for character in origin
+                )
+            ):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS requires exact HTTP(S) origins without paths or credentials"
+                )
+            hostname = parsed.hostname.lower()
+            if ":" in hostname:
+                hostname = f"[{hostname}]"
+            port = parsed.port
+            suffix = ""
+            if port is not None and (parsed.scheme, port) not in (("http", 80), ("https", 443)):
+                suffix = f":{port}"
+            normalized.append(f"{parsed.scheme}://{hostname}{suffix}")
+        return list(dict.fromkeys(normalized))
 
     @model_validator(mode="after")
     def valid_settings(self):
