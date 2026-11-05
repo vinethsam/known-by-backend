@@ -770,13 +770,12 @@ class ResearchOrchestrator:
                 except FetchError as exc:
                     _recover_infrastructure(exc)
                     metrics.error_codes.append("STRUCTURED_RETRIEVAL_FAILED")
-            preferred = deduplicate_candidates(
-                [
-                    SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
-                    for url in [*seed.preferred_urls, *([seed.profile_link] if seed.profile_link else [])]
-                ],
-                settings,
-            )
+            # Admission below records rejected inputs before canonical deduplication;
+            # keep that trace while still fetching a supplied URL only once.
+            preferred = [
+                SourceCandidate(url=str(url), preferred_source=True, origin="supplied")
+                for url in [*seed.preferred_urls, *([seed.profile_link] if seed.profile_link else [])]
+            ]
             if preferred and not stopped(include_target=False):
                 await validate_and_process(preferred)
             if not stopped(include_target=not bool(pending_candidates)):

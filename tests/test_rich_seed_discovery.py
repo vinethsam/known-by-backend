@@ -259,7 +259,9 @@ async def test_supplied_university_recovers_education_with_no_required_planner_c
     assert rich.profile.fields[ProfileField.degree_type].value == "Bachelor's Degree"
     assert rich.profile.coverage > baseline.profile.coverage
     assert rich_calls["plans"] == 0
-    assert baseline_calls["plans"] >= 1
+    # Known professional context now tries education deterministically even
+    # without a supplied school; the richer seed still finds that school.
+    assert baseline_calls["plans"] == 0
     assert len(rich_calls["queries"]) <= len(baseline_calls["queries"]) <= 3
     assert len(rich_calls["fetched"]) == len(set(rich_calls["fetched"])) == 2
     assert any(

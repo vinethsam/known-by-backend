@@ -341,6 +341,7 @@ async def run_batch(people_count: int, directory: Path, *, latency_ms: float = 2
         "performance_totals": {
             key: round(sum(item[key] for item in performance_events), 8 if key == "provider_cost" else 3)
             for key in performance_events[0]
+            if isinstance(performance_events[0][key], (int, float))
         }
         if performance_events
         else {},

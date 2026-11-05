@@ -910,8 +910,10 @@ async def test_recovery_filters_completed_queries_before_applying_remaining_cap(
         PersonSeed(full_name="Jane Doe", organisation="Example Foundation"),
     )
 
-    assert len(calls["queries"]) == 4
-    assert "biography education career" in calls["queries"][-1]
+    queries = [json.loads(payload)["query"] for payload in calls["queries"]]
+    assert len(queries) == len(set(queries)) == 4
+    assert any("biography education career" in query for query in queries)
+    assert "site:wikipedia.org" in queries[-1]
 
 
 @pytest.mark.asyncio
