@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, MutableMapping
 from datetime import date, datetime, timezone
 from hashlib import sha256
 from typing import Any
@@ -49,6 +49,15 @@ _UI_LABELS = {
 }
 _STANDALONE_LINK_RE = re.compile(r"^(?:[-*+]\s+)?\[([^\]\n]+)\]\([^\s\[\]]+\)$")
 _PRESERVED_STRUCTURES = ("h1", "h2", "h3", "h4", "h5", "h6", "table", "dl", "article")
+_EDUCATION_HEADINGS = {
+    "education",
+    "educational background",
+    "academic background",
+    "qualifications",
+    "academic qualifications",
+    "education and qualifications",
+}
+_BIOGRAPHY_HEADINGS = {"biography", "biographical information", "career", "professional experience"}
 
 
 def _identity_terms(seed: object) -> list[str]:
@@ -173,7 +182,22 @@ def _line_mentions_seed(line: str, seed: object) -> bool:
     return any(term.lower() in line_lower for term in _primary_terms(seed))
 
 
-def _compact_boilerplate(text: str, seed: object) -> str:
+def _compact_boilerplate(text: str, seed: object, stats: MutableMapping[str, int] | None = None) -> str:
+    # Adjacent repeated complete paragraphs carry the same evidence. Do not
+    # deduplicate across intervening headings, dates or institution labels: the
+    # same wording can legitimately describe different qualifications or roles.
+    blocks = []
+    previous_block = None
+    for block in text.split("\n\n"):
+        key = " ".join(block.split())
+        if len(key) >= 80 and key == previous_block:
+            if stats is not None:
+                stats["duplicate_evidence_blocks"] = stats.get("duplicate_evidence_blocks", 0) + 1
+                stats["duplicate_evidence_chars"] = stats.get("duplicate_evidence_chars", 0) + len(block)
+            continue
+        previous_block = key
+        blocks.append(block)
+    text = "\n\n".join(blocks)
     lines = [_normalise_markdown(line) for line in text.splitlines()]
     kept: list[str] = []
     seen_counts: dict[str, int] = {}
@@ -264,6 +288,29 @@ def _term_windows(text: str, terms: list[str], chunk_size: int) -> list[tuple[in
     return intervals
 
 
+def _profile_sections(text: str, seed: object) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Prioritize relevant sections only inside a heading naming this person."""
+    headings = list(re.finditer(r"(?m)^(#{1,6})\s+([^\n]+)", text))
+    ownership = []
+    education, biography = [], []
+    for index, heading in enumerate(headings):
+        level = len(heading[1])
+        while ownership and ownership[-1][0] >= level:
+            ownership.pop()
+        owned = any(item[1] for item in ownership) or _line_mentions_seed(heading[2], seed)
+        ownership.append((level, owned))
+        label = heading[2].strip().strip(":").casefold()
+        if not owned or label not in _EDUCATION_HEADINGS | _BIOGRAPHY_HEADINGS:
+            continue
+        end = next(
+            (item.start() for item in headings[index + 1 :] if len(item[1]) <= level),
+            len(text),
+        )
+        destination = education if label in _EDUCATION_HEADINGS else biography
+        destination.append((heading.start(), end))
+    return education, biography
+
+
 def _select_relevant_text(text: str, seed: object, settings: object) -> str:
     max_chars = int(getattr(settings, "MAX_MARKDOWN_CHARS", 24_000))
     chunk_size = int(getattr(settings, "CHUNK_SIZE", 6000))
@@ -278,9 +325,15 @@ def _select_relevant_text(text: str, seed: object, settings: object) -> str:
     head_chars = min(window_size, max_selected // 3)
     primary_windows = _term_windows(text, _primary_terms(seed), window_size)
     secondary_windows = _term_windows(text, _secondary_terms(seed), window_size)
+    education_sections, biography_sections = _profile_sections(text, seed)
 
     intervals: list[tuple[int, int]] = []
-    intervals = _add_priority_intervals(intervals, primary_windows, max_selected)
+    # Keep an initial identity window, then give explicit education sections a
+    # chance before repeated early name mentions consume the whole source budget.
+    intervals = _add_priority_intervals(intervals, primary_windows[:1], max_selected)
+    intervals = _add_priority_intervals(intervals, education_sections, max_selected)
+    intervals = _add_priority_intervals(intervals, biography_sections, max_selected)
+    intervals = _add_priority_intervals(intervals, primary_windows[1:], max_selected)
     intervals = _add_priority_intervals(intervals, [(0, head_chars)], max_selected)
     intervals = _add_priority_intervals(intervals, secondary_windows, max_selected)
     intervals = _limit_intervals(intervals, max_selected)
@@ -310,17 +363,29 @@ def _chunk_text(text: str, settings: object) -> list[str]:
     return chunks
 
 
-def processed_chunks(text: str, seed: object, settings: object) -> list[str]:
+def processed_chunks(
+    text: str, seed: object, settings: object, *, processing_stats: MutableMapping[str, int] | None = None
+) -> list[str]:
     """Return compact, bounded chunks with late person mentions preserved."""
 
-    compacted = _compact_boilerplate(_normalise_markdown(text or ""), seed)
+    compacted = _compact_boilerplate(_normalise_markdown(text or ""), seed, processing_stats)
     selected = _select_relevant_text(compacted, seed, settings)
     return _chunk_text(selected, settings)
 
 
-def process_content(page: object, seed: object, settings: object) -> list[str]:
+def process_content(
+    page: object,
+    seed: object,
+    settings: object,
+    *,
+    accepted_evidence: Collection[str] = (),
+    processing_stats: MutableMapping[str, int] | None = None,
+) -> list[str]:
     """Convert a retrieved page to downstream chunks for LLM extraction."""
 
+    from app.research.extraction import structured_evidence
+
+    structured = structured_evidence(page, seed)
     captured_json = getattr(page, "captured_json", None)
     content_type = str(getattr(page, "content_type", "") or "").lower()
     if captured_json is not None:
@@ -333,7 +398,13 @@ def process_content(page: object, seed: object, settings: object) -> list[str]:
             base_url=getattr(page, "final_url", None),
             seed=seed,
         )
-    return processed_chunks(text, seed, settings)
+    # Preserve JSON-LD before the HTML converter removes script elements. An
+    # accepted fact can be excluded only by its exact, fully validated block;
+    # unresolved relationships and all ordinary prose still reach extraction.
+    blocks = [evidence for evidence, _ in structured if evidence not in accepted_evidence]
+    if blocks:
+        text = "\n\n".join([text, *blocks]).strip()
+    return processed_chunks(text, seed, settings, processing_stats=processing_stats)
 
 
 __all__ = ["html_to_markdown", "process_content", "processed_chunks"]

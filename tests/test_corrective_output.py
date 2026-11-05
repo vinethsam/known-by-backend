@@ -379,6 +379,68 @@ def test_origin_is_decode_only_and_never_an_active_extraction_field():
 
 
 @pytest.mark.parametrize("format", ["csv", "xlsx"])
+def test_source_urls_contain_accepted_support_not_unused_retrieval_candidates(format):
+    from app.schemas import EvidenceClaim, SourceRecord
+
+    results = result_for(PersonSeed(full_name="John Smith"))
+    result = results.people[0].result
+    candidate = SourceRecord(
+        source_id="unused",
+        person_id=result.profile.person_id,
+        requested_url="https://example.org/candidate",
+        final_url="https://example.org/candidate",
+        canonical_url="https://example.org/candidate",
+        domain="example.org",
+        fetch_status=200,
+    )
+    supporting = candidate.model_copy(
+        update={
+            "source_id": "accepted",
+            "requested_url": "https://example.org/evidence",
+            "final_url": "https://example.org/evidence",
+            "canonical_url": "https://example.org/evidence",
+        }
+    )
+    result.sources = [candidate, supporting]
+
+    def source_column():
+        content = export_results(results, [], format)
+        if format == "csv":
+            rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+        else:
+            workbook = load_workbook(io.BytesIO(content), read_only=True)
+            rows = list(workbook.active.values)
+            workbook.close()
+        assert len(rows[0]) == len(rows[1]) == 14
+        assert rows[0][-1] == "Source URLs"
+        return rows[1][-1] or ""
+
+    assert source_column() == ""
+    claim = EvidenceClaim(
+        claim_id="supported",
+        person_id=result.profile.person_id,
+        source_id="accepted",
+        field=ProfileField.organisation,
+        raw_value="Example Foundation",
+        normalised_value="Example Foundation",
+        evidence_text="John Smith works for Example Foundation.",
+        subject_name="John Smith",
+        extraction_model="fixture",
+    )
+    result.claims.append(claim)
+    for record in [result.profile, *result.profile.records]:
+        record.fields[ProfileField.organisation] = FieldDecision(
+            value=claim.raw_value,
+            confidence=85,
+            selected_claim_id=claim.claim_id,
+            supporting_claim_ids=[claim.claim_id],
+            provenance_status="researched",
+        )
+    assert source_column() == supporting.canonical_url
+    assert candidate in result.sources
+
+
+@pytest.mark.parametrize("format", ["csv", "xlsx"])
 def test_compact_export_keeps_credentials_associated_and_internal_details(monkeypatch, format):
     import app.export.formats as formats
 

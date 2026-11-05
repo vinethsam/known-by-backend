@@ -307,6 +307,7 @@ def _results() -> JobResults:
         canonical_url="https://example.com",
         domain="example.com",
     )
+    profile.fields[ProfileField.organisation].supporting_source_ids = [source.source_id]
     return JobResults(
         job_id="job-1",
         status="completed",
@@ -390,6 +391,18 @@ def test_export_source_urls_keep_relevant_unique_urls(format):
         )
         for url in [urls[0], "https://linkedin.com/blocked", *urls]
     ]
+    person.result.profile.fields[ProfileField.organisation].supporting_source_ids = [
+        source.source_id for source in person.result.sources
+    ]
+    person.result.sources.append(
+        SourceRecord(
+            person_id=person.person_id,
+            requested_url="https://example.com/unused",
+            final_url="https://example.com/unused",
+            canonical_url="https://example.com/unused",
+            domain="example.com",
+        )
+    )
 
     data = export_results(results, [], format)
     if format == "csv":

@@ -16,7 +16,7 @@ from app.export.schema import EXPORT_COLUMNS, RESEARCH_FIELDS, record_columns, s
 from app.research.normalisation import finalize_display
 from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
 from app.retrieval.urls import canonicalise_url, source_policy_allows, source_record_allowed
-from app.schemas import JobResults, ProfileField
+from app.schemas import JobResults, ProfileField, has_researched_value
 
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 ProvenanceMode = Literal["none", "field"]
@@ -281,7 +281,7 @@ def _compact_source_urls(result) -> str:
         decision
         for record in (result.profile.records or [result.profile])
         for field, decision in record.fields.items()
-        if field in RESEARCH_FIELDS
+        if field in RESEARCH_FIELDS and has_researched_value(decision)
     ]
     evidence = [url for decision in decisions for url in decision.sources]
     evidence.extend(
@@ -290,15 +290,21 @@ def _compact_source_urls(result) -> str:
         for source_id in decision.supporting_source_ids
         if source_id in sources
     )
-    # Older records may retain aggregate sources without field attribution.
-    return _compact_urls(
-        evidence
-        or (
-            source.canonical_url or source.final_url or source.requested_url
-            for source in sources.values()
-            if not source.identity.rejected
-        )
-    )
+    # Recover explicit support from older field decisions when URL lists are
+    # absent. Retrieved candidates alone are never accepted evidence.
+    claims = {claim.claim_id: claim for claim in result.claims}
+    for decision in decisions:
+        claim_ids = [*decision.supporting_claim_ids]
+        if decision.selected_claim_id:
+            claim_ids.append(decision.selected_claim_id)
+        if decision.provenance_status == "corroborated":
+            claim_ids.extend(decision.scoring_components.get("seed_corroborating_claim_ids", []))
+        for claim_id in claim_ids:
+            claim = claims.get(claim_id)
+            source = sources.get(claim.source_id) if claim is not None else None
+            if source is not None:
+                evidence.append(source.canonical_url or source.final_url or source.requested_url)
+    return _compact_urls(evidence)
 
 
 def _compact_urls(values, *, limit: int | None = None) -> str:

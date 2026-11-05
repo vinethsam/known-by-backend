@@ -24,6 +24,7 @@ from app.retrieval.service import RetrievalService, RetrievedPage, StaticFetcher
 from app.schemas import (
     ExtractionResponse,
     PersonSeed,
+    ProfileField,
     ResearchMetrics,
     SourceCandidate,
     SourceRecord,
@@ -766,6 +767,259 @@ def test_distinct_captured_json_pages_are_not_false_empty_body_duplicates():
     assert hashes[0] == hashes[2]
     assert "Example Foundation" in "".join(texts[0])
     assert "Example University" in "".join(texts[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("education_found", [True, False])
+async def test_missing_education_is_searched_before_broad_candidates_exhaust_source_cap(
+    monkeypatch, education_found
+):
+    async def safe(url, settings=None):
+        return url
+
+    monkeypatch.setattr("app.retrieval.service.validate_public_url", safe)
+    settings = configured(
+        MAX_SOURCES_PER_PERSON=4,
+        SOURCES_PER_ROUND=2,
+        MAX_CONCURRENT_FETCHES=1,
+        MAX_SEARCH_QUERIES_PER_PERSON=2,
+        MAX_SOURCE_MODEL_TOOL_CALLS=2,
+        MAX_SEARCH_RESULTS_PER_QUERY=6,
+        OPENROUTER_MAX_RETRIES=0,
+        PLAYWRIGHT_ENABLED=False,
+        STATIC_FETCH_WORKER_URL="https://worker.example.org/fetch",
+        STATIC_FETCH_WORKER_SECRET="fixture-secret",
+    )
+    broad_urls = [f"https://work{index}.example.org/jane" for index in range(6)]
+    education_url = "https://education.example.org/jane"
+    work_quote = "Jane Doe is Research Director at Example Foundation."
+    education_quote = "Jane Doe works at Example Foundation and earned BSc in Physics at Example University."
+    events, validation_batches = [], []
+
+    async def fetch(request):
+        url = json.loads(request.content)["url"]
+        events.append(("fetch", url))
+        quote = education_quote if url == education_url else work_quote
+        return httpx.Response(
+            200,
+            json={
+                "requested_url": url,
+                "final_url": url,
+                "status": 200,
+                "content_type": "text/html",
+                "html": f"<h1>Jane Doe</h1><p>{quote}</p><p>{url}</p>",
+            },
+        )
+
+    async def model(request):
+        body = json.loads(request.content)
+        envelope = json.loads(body["messages"][1]["content"])
+        if body.get("tools"):
+            query = envelope["query"]
+            events.append(("search", query))
+            targeted = "education" in query
+            urls = ([education_url] if education_found else []) if targeted else broad_urls
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url_citation": {
+                                            "url": url,
+                                            "title": "Jane Doe | Example Foundation",
+                                        },
+                                    }
+                                    for url in urls
+                                ],
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+                },
+            )
+        payload = envelope["payload"]
+        if payload.get("task") == "validate_candidates":
+            validation_batches.append([candidate["url"] for candidate in payload["candidates"]])
+            answer = {
+                "decisions": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "source_type": "university" if candidate["url"] == education_url else "employer",
+                        "relevance": "likely",
+                    }
+                    for candidate in payload["candidates"]
+                ]
+            }
+        else:
+            assert "source_url" in payload, (
+                "An optional planning call should not replace deterministic targeting"
+            )
+            educational = payload["source_url"] == education_url
+            quote = education_quote if educational else work_quote
+            values = (
+                [("university_name", "Example University"), ("degree_type", "BSc"), ("subject", "Physics")]
+                if educational
+                else [("organisation", "Example Foundation"), ("job_title", "Research Director")]
+            )
+            answer = {
+                "claims": [
+                    {
+                        "field": field,
+                        "value": value,
+                        "evidence": quote,
+                        "subject_name": "Jane Doe",
+                        "fact_group": "education" if educational else "employment",
+                        "is_current": not educational,
+                    }
+                    for field, value in [("full_name", "Jane Doe"), *values]
+                ]
+            }
+        return response(json.dumps(answer))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fetch)) as fetch_http:
+            provider = OpenRouterClient(settings, model_http)
+            retrieval = RetrievalService(settings, StaticFetcher(settings, fetch_http))
+            pipeline = ResearchOrchestrator(
+                settings, OpenRouterSearchProvider(settings, provider), provider, retrieval
+            )
+            result = await pipeline.research(
+                "job", "person", PersonSeed(full_name="Jane Doe", organisation="Example Foundation")
+            )
+            await retrieval.close()
+
+    searches = [(index, value) for index, (kind, value) in enumerate(events) if kind == "search"]
+    fetched = [value for kind, value in events if kind == "fetch"]
+    assert len(searches) == 2 and "education" in searches[1][1]
+    assert [kind for kind, _ in events[: searches[1][0]]] == ["search", "fetch", "fetch"]
+    assert fetched[:2] == broad_urls[:2]
+    assert len(fetched) == result.profile.metrics.sources_fetched == settings.MAX_SOURCES_PER_PERSON
+    assert result.profile.metrics.field_specific_searches == 1
+    assert result.profile.metrics.accounting["field_specific_searches"] == 1
+    assert result.profile.metrics.accounting["actual_api_cost"] is None  # Provider fixture omits cost.
+    assert validation_batches[0] == broad_urls  # Pending broad candidates reuse their first validation.
+    assert len(validation_batches) == 2 if education_found else len(validation_batches) == 1
+    if education_found:
+        assert fetched[2] == education_url
+        assert result.profile.fields[ProfileField.university_name].researched_value == "Example University"
+        assert result.profile.fields[ProfileField.degree_type].researched_value == "Bachelor's Degree"
+    else:
+        assert fetched == broad_urls[:4]  # An empty targeted search does not discard useful queued evidence.
+    assert result.profile.metrics.stop_reason == "MAX_SOURCES"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous_paragraph", [False, True])
+async def test_grounded_structured_facts_avoid_extraction_but_ambiguous_prose_still_uses_model(
+    monkeypatch, ambiguous_paragraph
+):
+    async def safe(url, settings=None):
+        return url
+
+    monkeypatch.setattr("app.retrieval.service.validate_public_url", safe)
+    settings = configured(
+        MAX_SOURCES_PER_PERSON=1,
+        OPENROUTER_MAX_RETRIES=0,
+        PLAYWRIGHT_ENABLED=False,
+        STATIC_FETCH_WORKER_URL="https://worker.example.org/fetch",
+        STATIC_FETCH_WORKER_SECRET="fixture-secret",
+    )
+    url = "https://employer.example.org/jane"
+    structured = {
+        "@context": "https://schema.org",
+        "@type": "Person",
+        "name": "Jane Doe",
+        "worksFor": {"@type": "Organization", "name": "Example Foundation"},
+        "jobTitle": "Research Director",
+    }
+    quote = "Jane Doe studied at Example University; the qualification is not stated."
+    html = f'<script type="application/ld+json">{json.dumps(structured)}</script>'
+    if ambiguous_paragraph:
+        html += f"<p>{quote}</p>"
+    extraction_inputs = []
+
+    async def fetch(request):
+        return httpx.Response(
+            200,
+            json={
+                "requested_url": url,
+                "final_url": url,
+                "status": 200,
+                "content_type": "text/html",
+                "html": html,
+            },
+        )
+
+    async def model(request):
+        body = json.loads(request.content)
+        assert not body.get("tools"), "The unchanged one-source budget prevents new discovery"
+        payload = json.loads(body["messages"][1]["content"])["payload"]
+        if payload.get("task") == "validate_candidates":
+            answer = {
+                "decisions": [
+                    {"candidate_id": item["candidate_id"], "source_type": "employer", "relevance": "likely"}
+                    for item in payload["candidates"]
+                ]
+            }
+        else:
+            extraction_inputs.append(payload["content"])
+            answer = {
+                "claims": [
+                    {
+                        "field": "university_name",
+                        "value": "Example University",
+                        "evidence": quote,
+                        "subject_name": "Jane Doe",
+                    }
+                ]
+            }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(answer)}}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10, "cost": 0.002},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fetch)) as fetch_http:
+            provider = OpenRouterClient(settings, model_http)
+            retrieval = RetrievalService(settings, StaticFetcher(settings, fetch_http))
+            pipeline = ResearchOrchestrator(
+                settings, OpenRouterSearchProvider(settings, provider), provider, retrieval
+            )
+            result = await pipeline.research(
+                "job",
+                "person",
+                PersonSeed(full_name="Jane Doe", organisation="Example Foundation", preferred_urls=[url]),
+            )
+            await retrieval.close()
+
+    assert result.sources[0].processing_status == "extracted"
+    assert result.sources[0].identity.score >= settings.SCORING.identity_review_threshold
+    assert result.profile.fields[ProfileField.organisation].researched_value == "Example Foundation"
+    assert result.profile.fields[ProfileField.job_title].researched_value == "Research Director"
+    assert result.profile.metrics.deterministic_claims_grounded == 3
+    accounting = result.profile.metrics.accounting
+    assert accounting["deterministic_claims_extracted"] == 3
+    assert accounting["deterministic_claims_grounded"] == 3
+    assert accounting["deterministic_claims_accepted"] == 3
+    assert accounting["llm_extraction_escalations"] == int(ambiguous_paragraph)
+    assert accounting["actual_api_cost"] == sum(usage.cost for usage in result.usage)
+    assert accounting["actual_api_cost"] == 0.002 * (1 + int(ambiguous_paragraph))
+    assert len(extraction_inputs) == int(ambiguous_paragraph)
+    if ambiguous_paragraph:
+        assert quote in extraction_inputs[0]
+        assert "worksFor" not in extraction_inputs[0]
+        assert result.profile.fields[ProfileField.university_name].researched_value == "Example University"
+        assert result.profile.fields[ProfileField.degree_type].researched_value is None
+    else:
+        assert result.profile.metrics.extraction_calls_avoided == 1
 
 
 @pytest.mark.asyncio

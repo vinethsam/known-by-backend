@@ -213,7 +213,7 @@ def _build_bundles(claims: list[EvidenceClaim], fields: set[ProfileField]) -> li
 
 
 def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBundle]:
-    """Split one safely expanded raw degree claim while retaining its relationship context."""
+    """Keep distinct degrees in an explicit, unambiguous credential list."""
 
     result = []
     for bundle in bundles:
@@ -222,7 +222,22 @@ def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBund
             _value_key(ProfileField.degree_type, claim.normalised_value) for claim in degree_claims
         }
         raw_values = {comparison_key(claim.raw_value) for claim in degree_claims}
-        if len(degree_values) <= 1 or len(raw_values) != 1:
+        # Some responses place a literal multi-degree list in one fact group.
+        # Preserve each level only within that explicit, single-institution
+        # relationship; ungrouped or conflicting fragments stay unresolved.
+        grouped_literal_list = (
+            bundle.explicitly_grouped
+            and len(_values(bundle.claims).get(ProfileField.university_name, set())) == 1
+            and len(_values(bundle.claims).get(ProfileField.subject, set())) <= 1
+            and len({comparison_key(claim.evidence_text) for claim in bundle.claims}) == 1
+            and all(
+                claim.directness == "explicit"
+                and bool(comparison_key(claim.raw_value))
+                and f" {comparison_key(claim.raw_value)} " in f" {comparison_key(claim.evidence_text)} "
+                for claim in bundle.claims
+            )
+        )
+        if len(degree_values) <= 1 or (len(raw_values) != 1 and not grouped_literal_list):
             result.append(bundle)
             continue
         for degree_value in sorted(degree_values):

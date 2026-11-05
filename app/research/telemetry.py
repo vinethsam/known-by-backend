@@ -123,6 +123,7 @@ def summarize_person(result: ResearchResult) -> dict:
         breakdown["unacknowledged"] = _usage_summary([], unrecorded_calls=unrecorded)
     supported = set()
     evidence_ids = set()
+    accepted_claim_ids = set()
     by_claim = {claim.claim_id: claim for claim in result.claims}
     source_ids_by_url = {
         url: source.source_id
@@ -159,6 +160,9 @@ def summarize_person(result: ResearchResult) -> dict:
             ):
                 continue
             supported.add(field_name)
+            accepted_claim_ids.update(supporting_claim_ids)
+            if decision.selected_claim_id:
+                accepted_claim_ids.add(decision.selected_claim_id)
             evidence_ids.update(decision.supporting_source_ids)
             evidence_ids.update(source_ids_by_url.get(url, "url:" + url) for url in decision.sources)
             evidence_ids.update(
@@ -187,6 +191,20 @@ def summarize_person(result: ResearchResult) -> dict:
         "retrieval_cache_misses": misses,
         "extraction_cache_hits": metrics.extraction_cache_hits,
         "request_cache_hits": metrics.request_cache_hits,
+        "deterministic_claims_extracted": metrics.deterministic_claims_extracted,
+        "deterministic_claims_grounded": metrics.deterministic_claims_grounded,
+        "deterministic_claims_accepted": sum(
+            claim_id in accepted_claim_ids and claim.extraction_model.startswith("deterministic:")
+            for claim_id, claim in by_claim.items()
+        ),
+        "extraction_calls_avoided": metrics.extraction_calls_avoided,
+        "chunks_skipped": metrics.chunks_skipped,
+        "duplicate_evidence_blocks": metrics.duplicate_evidence_blocks,
+        "duplicate_evidence_chars": metrics.duplicate_evidence_chars,
+        "llm_extraction_escalations": breakdown.get("extract_claims", {}).get("model_calls", 0),
+        "field_specific_searches": metrics.field_specific_searches,
+        "claims_grounded": len(by_claim),
+        "claims_selected": len(accepted_claim_ids & by_claim.keys()),
         "source_reuse_rate": round(hits / (hits + misses), 6) if hits + misses else None,
         "independently_supported_fields": [field.value for field in ProfileField if field in supported],
         "unresolved_required_fields": [field.value for field in ProfileField if field not in supported],
@@ -264,6 +282,22 @@ def aggregate_person_summaries(summaries: list[dict], *, unmeasured_people: int 
         "source_reuse_rate": round(hits / (hits + misses), 6)
         if hits + misses and not unmeasured_people
         else None,
+        **{
+            counter: sum(summary.get(counter, 0) for summary in summaries)
+            for counter in (
+                "deterministic_claims_extracted",
+                "deterministic_claims_grounded",
+                "deterministic_claims_accepted",
+                "extraction_calls_avoided",
+                "chunks_skipped",
+                "duplicate_evidence_blocks",
+                "duplicate_evidence_chars",
+                "llm_extraction_escalations",
+                "field_specific_searches",
+                "claims_grounded",
+                "claims_selected",
+            )
+        },
     }
 
 

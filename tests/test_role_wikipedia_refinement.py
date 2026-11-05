@@ -180,6 +180,44 @@ def test_current_prime_minister_beats_old_analyst_and_current_party_role():
     assert {"analyst-org", "party-org"} <= set(organisation.alternative_claim_ids)
 
 
+def test_current_academic_relationship_beats_ended_seed_affiliation_without_erasing_it():
+    biography = _source("biography", source_type=SourceType.university, authority=0.9)
+    claims = [
+        *_role(
+            "biography",
+            "Former Arts Institute",
+            "Visiting Professor",
+            current=False,
+            observed=date(2023, 3, 1),
+            ended=date(2023, 6, 1),
+            fact_group="former-appointment",
+        ),
+        *_role(
+            "biography",
+            "Current University",
+            "Artist in Residence",
+            current=True,
+            fact_group="current-appointment",
+        ),
+    ]
+    # Distinct IDs let both genuine relationships stay auditable on one biography.
+    for index, item in enumerate(claims):
+        item.claim_id = f"relationship-{index}"
+    profile = reconcile(
+        "person",
+        PersonSeed(full_name="Jane Doe", organisation="Former Arts Institute"),
+        claims,
+        [biography],
+        ScoringPolicy(),
+        date(2026, 11, 5),
+    )
+
+    assert profile.fields[ProfileField.organisation].researched_value == "Current University"
+    assert profile.fields[ProfileField.job_title].researched_value == "Artist in Residence"
+    assert "relationship-0" in profile.fields[ProfileField.organisation].alternative_claim_ids
+    assert "relationship-1" in profile.fields[ProfileField.job_title].alternative_claim_ids
+
+
 def test_country_value_is_rejected_when_a_government_office_is_evidenced():
     sources = [
         _source("country", source_type=SourceType.government, authority=0.95),

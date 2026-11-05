@@ -31,7 +31,12 @@ from app.research.discovery import (
     rank_candidates,
     source_authority,
 )
-from app.research.extraction import extract_chunks, extraction_chunk_key
+from app.research.extraction import (
+    DETERMINISTIC_EXTRACTION_VERSION,
+    deterministic_evidence,
+    extract_chunks,
+    extraction_chunk_key,
+)
 from app.research.identity import (
     assess_identity,
     candidate_has_seed_identity_context,
@@ -143,8 +148,10 @@ def _process_source(
     page: RetrievedPage,
     seed: PersonSeed,
     settings: Settings,
+    *,
+    processing_stats=None,
 ) -> list[str]:
-    chunks = process_content(page, seed, settings)
+    chunks = process_content(page, seed, settings, processing_stats=processing_stats)
     text = "\n\n".join(chunks)
     # A captured-JSON response may have no HTML. Hash its actual payload instead
     # of treating every such source as the same empty page.
@@ -225,6 +232,9 @@ class ResearchOrchestrator:
         active_candidates = {}
         accepted_sources = set(cursor.get("accepted_sources", []))
         applied_chunks = set(cursor.get("applied_chunks", []))
+        deterministic_chunks = set(cursor.get("deterministic_chunks", []))
+        processed_content = set(cursor.get("processed_content", []))
+        field_query_keys = set(cursor.get("field_query_keys", []))
         rejected_urls = set(cursor.get("rejected_urls", []))
         trace_candidate_urls, trace_rejected_urls = set(), set()
         no_new_claims = cursor.get("no_new_claims", 0)
@@ -241,6 +251,8 @@ class ResearchOrchestrator:
         if active_query:
             queries_done.discard(query_key(active_query))
             metrics.queries_performed = max(0, metrics.queries_performed - 1)
+            if query_key(active_query) in field_query_keys:
+                metrics.field_specific_searches = max(0, metrics.field_specific_searches - 1)
             queue.appendleft(active_query)
             active_query = None
         fallback_queued = cursor.get("fallback_queued", False)
@@ -309,6 +321,9 @@ class ResearchOrchestrator:
                         "active": [c.model_dump(mode="json") for c in active_candidates.values()],
                         "accepted_sources": sorted(accepted_sources),
                         "applied_chunks": sorted(applied_chunks),
+                        "deterministic_chunks": sorted(deterministic_chunks),
+                        "processed_content": sorted(processed_content),
+                        "field_query_keys": sorted(field_query_keys),
                         "rejected_urls": sorted(rejected_urls),
                         "no_new_claims": no_new_claims,
                         "queue": list(queue),
@@ -346,8 +361,13 @@ class ResearchOrchestrator:
                 record_fields = [record.fields for record in profile.records] or [profile.fields]
                 if all(
                     all(
-                        (field_name == ProfileField.full_name or has_researched_value(decision))
-                        and decision.confidence >= settings.TARGET_FIELD_CONFIDENCE
+                        has_researched_value(decision)
+                        and (
+                            decision.research_confidence
+                            if decision.research_confidence is not None
+                            else decision.confidence
+                        )
+                        >= settings.TARGET_FIELD_CONFIDENCE
                         and not decision.review_required
                         for field_name, decision in fields.items()
                         if field_name in ProfileField
@@ -404,7 +424,10 @@ class ResearchOrchestrator:
                 if not 200 <= page.status < 300:
                     raise FetchError("SOURCE_HTTP_ERROR")
                 with stage("processing_ms"):
-                    chunks = _process_source(source, candidate, page, seed, settings)
+                    processing_stats = {}
+                    chunks = _process_source(
+                        source, candidate, page, seed, settings, processing_stats=processing_stats
+                    )
                 source.processing_status = "processed"
                 evidence_changed = True
                 await save()
@@ -442,6 +465,60 @@ class ResearchOrchestrator:
                 if source.source_id not in accepted_sources:
                     accepted_sources.add(source.source_id)
                     metrics.sources_accepted += 1
+                grounded_blocks = []
+                deterministic_model = f"deterministic:{DETERMINISTIC_EXTRACTION_VERSION}"
+                for evidence, response in deterministic_evidence(page, seed):
+                    rejected_claims: Counter[str] = Counter()
+                    extracted, reasons = validate_claims(
+                        response,
+                        seed,
+                        source,
+                        evidence,
+                        deterministic_model,
+                        rejection_counts=rejected_claims,
+                    )
+                    key = extraction_chunk_key(
+                        source.source_id,
+                        evidence,
+                        person_id=person_id,
+                        source_url=page.final_url,
+                        model=deterministic_model,
+                    )
+                    if key not in deterministic_chunks:
+                        metrics.deterministic_claims_extracted += len(response.claims)
+                        metrics.deterministic_claims_grounded += len(extracted)
+                        metrics.claims_extracted += len(response.claims)
+                        metrics.claims_rejected += sum(rejected_claims.values())
+                        claims.extend(extracted)
+                        deterministic_chunks.add(key)
+                        metrics.error_codes.extend(
+                            code for code in reasons if code not in metrics.error_codes
+                        )
+                    if extracted and not rejected_claims:
+                        grounded_blocks.append(evidence)
+                if grounded_blocks:
+                    initial_chunk_count = len(chunks)
+                    chunks = process_content(
+                        page,
+                        seed,
+                        settings,
+                        accepted_evidence=grounded_blocks,
+                    )
+                else:
+                    initial_chunk_count = len(chunks)
+                processing_key = (
+                    f"{source.source_id}:{source.content_hash}:{DETERMINISTIC_EXTRACTION_VERSION}"
+                )
+                if processing_key not in processed_content:
+                    avoided = max(0, initial_chunk_count - len(chunks))
+                    metrics.extraction_calls_avoided += avoided
+                    metrics.chunks_skipped += avoided
+                    metrics.duplicate_evidence_blocks += processing_stats.get("duplicate_evidence_blocks", 0)
+                    metrics.duplicate_evidence_chars += processing_stats.get("duplicate_evidence_chars", 0)
+                    processed_content.add(processing_key)
+                claims = deduplicate_claims(claims)
+                evidence_changed = True
+                await save()
                 async with aclosing(
                     extract_chunks(
                         client,
@@ -845,12 +922,87 @@ class ResearchOrchestrator:
                     queue.extend(fresh_queries[: max(0, capacity - reserve_wikipedia)])
                     return bool(queue)
 
-                while not stopped(include_target=not bool(pending_candidates)):
+                def pending_field_query() -> str | None:
+                    # A broad result set must not consume every retrieval slot
+                    # before education or identity objectives can be searched.
+                    # Unused candidates stay queued and their validation is reused.
+                    if (
+                        metrics.sources_fetched < settings.SOURCES_PER_ROUND
+                        or remaining_search_call_capacity() <= 0
+                    ):
+                        return None
+                    source_map = {source.source_id: source for source in sources}
+                    eligible = eligible_identity_source_ids(seed, claims, source_map, settings.SCORING)
+                    profile = result().profile
+                    records = [record.fields for record in profile.records] or [profile.fields]
+                    education = {ProfileField.university_name, ProfileField.degree_type, ProfileField.subject}
+                    missing_education = next(
+                        (
+                            fields
+                            for fields in records
+                            if any(not has_researched_value(fields[field]) for field in education)
+                        ),
+                        None,
+                    )
+                    selected_fields = missing_education or records[0]
+                    observed = {
+                        field.value: [decision.value]
+                        for field, decision in selected_fields.items()
+                        if field in ProfileField
+                        and has_researched_value(decision)
+                        and decision.selected_claim_id
+                    }
+                    if not eligible:
+                        objective = ["full_name"]
+                    elif any(
+                        has_researched_value(selected_fields[field])
+                        for field in (ProfileField.organisation, ProfileField.job_title)
+                    ) and any(
+                        not has_researched_value(selected_fields[field])
+                        for field in (ProfileField.organisation, ProfileField.job_title)
+                    ):
+                        objective = [
+                            field.value
+                            for field in (ProfileField.organisation, ProfileField.job_title)
+                            if not has_researched_value(selected_fields[field])
+                        ]
+                    elif missing_education is not None:
+                        objective = [
+                            field.value
+                            for field in education
+                            if not has_researched_value(selected_fields[field])
+                        ]
+                    else:
+                        objective = [
+                            field.value
+                            for field in (ProfileField.organisation, ProfileField.job_title)
+                            if not has_researched_value(selected_fields[field])
+                            or any(
+                                reason in {"CURRENT_ROLE_CONFLICT", "MAJOR_CONTRADICTORY_EVIDENCE"}
+                                for reason in selected_fields[field].review_reason_codes
+                            )
+                        ]
+                    for query in build_context_queries(seed, objective, evidence_context=observed):
+                        if objective and set(objective) <= {"organisation", "job_title"} and observed:
+                            query = f"{query} current role appointment"[:600]
+                        key = query_key(query)
+                        if key not in queries_done and not any(query_key(item) == key for item in queue):
+                            field_query_keys.add(key)
+                            return query
+                    return None
+
+                # Finish each selected source round, including its additional
+                # credentials, before considering a confidence-based early exit.
+                while not stopped():
                     if pending_candidates:
-                        await validate_and_process(
-                            list(pending_candidates.values()), limit=settings.SOURCES_PER_ROUND
-                        )
-                        continue
+                        targeted_query = pending_field_query()
+                        if targeted_query:
+                            queue.appendleft(targeted_query)
+                        else:
+                            await validate_and_process(
+                                list(pending_candidates.values()), limit=settings.SOURCES_PER_ROUND
+                            )
+                            continue
                     if (
                         metrics.queries_performed >= settings.MAX_SEARCH_QUERIES_PER_PERSON
                         and retry_query_limit is None
@@ -921,7 +1073,12 @@ class ResearchOrchestrator:
                             if any(
                                 not has_researched_value(decision := fields[field])
                                 or decision.review_required
-                                or decision.confidence < settings.TARGET_FIELD_CONFIDENCE
+                                or (
+                                    decision.research_confidence
+                                    if decision.research_confidence is not None
+                                    else decision.confidence
+                                )
+                                < settings.TARGET_FIELD_CONFIDENCE
                                 for fields in record_fields
                             )
                         ]
@@ -1018,6 +1175,7 @@ class ResearchOrchestrator:
                         ]
                         if targeted and remaining_search_call_capacity() > 0:
                             queue.append(targeted[0])
+                            field_query_keys.add(query_key(targeted[0]))
                             continue
                         plan_key = hashlib.sha256(
                             json.dumps([clues, sorted(unresolved)], ensure_ascii=True).encode()
@@ -1109,6 +1267,8 @@ class ResearchOrchestrator:
                     retry_query_limit = None
                     queries_done.add(key)
                     metrics.queries_performed += 1
+                    if key in field_query_keys:
+                        metrics.field_specific_searches += 1
                     count("search_queries")
                     try:
                         with stage("discovery_ms"):
@@ -1158,6 +1318,8 @@ class ResearchOrchestrator:
                         ),
                     )
                     if not candidates:
+                        if pending_candidates:
+                            continue
                         if queue_recovery_queries() or queue_wikipedia_query(
                             [field.value for field in important_completion_fields]
                         ):
@@ -1166,6 +1328,8 @@ class ResearchOrchestrator:
                         break
                     selected_count = await validate_and_process(candidates, limit=settings.SOURCES_PER_ROUND)
                     if selected_count == 0:
+                        if pending_candidates:
+                            continue
                         if (
                             queue
                             or queue_recovery_queries()

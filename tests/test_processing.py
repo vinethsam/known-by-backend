@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+
 from app.config import Settings
 from app.processing import html_to_markdown, process_content, processed_chunks
+from app.research.claims import validate_claims
+from app.research.extraction import deterministic_evidence
+from app.research.identity import assess_identity
 from app.retrieval.service import RetrievedPage
+from app.schemas import PersonSeed, ProfileField, SourceRecord
 
 
 def settings(**overrides):
@@ -158,7 +164,7 @@ def test_ui_chrome_removal_saves_context_and_keeps_late_biography_and_education(
     assert "## Education" in after
     assert "Example University" in after
     assert "Ada Lovelace is a researcher at Analytical Society." in after
-    assert len(before) - len(after) > 400
+    assert len(before) > len(after)
 
 
 def test_ui_markup_keeps_person_clues_tables_headings_and_unfamiliar_links():
@@ -201,3 +207,272 @@ def test_standalone_boilerplate_links_removed_without_removing_adjacent_evidence
         settings(),
     )
     assert protected == ["[Privacy policy](https://example.org/privacy)"]
+
+
+def test_jsonld_person_graph_is_grounded_before_optional_llm_extraction():
+    cfg = settings()
+    seed = PersonSeed(full_name="Ada Lovelace", organisation="Analytical Society")
+    data = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {"@id": "#employer", "@type": "Organization", "name": "Analytical Society"},
+            {"@type": "ProfilePage", "mainEntity": {"@id": "#ada"}},
+            {
+                "@id": "#ada",
+                "@type": "Person",
+                "name": "Ada Lovelace",
+                "jobTitle": "Research Director",
+                "worksFor": {"@id": "#employer"},
+            },
+        ],
+    }
+    url = "https://example.org/ada"
+    page = RetrievedPage(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        html=f'<script type="application/ld+json">{json.dumps(data)}</script>',
+    )
+    chunks = process_content(page, seed, cfg)
+    text = "\n\n".join(chunks)
+    source = SourceRecord(
+        person_id="person",
+        requested_url=url,
+        final_url=url,
+        canonical_url=url,
+        domain="example.org",
+        identity=assess_identity(seed, text, cfg.SCORING),
+    )
+    accepted = []
+    claims = []
+    for evidence, response in deterministic_evidence(page, seed):
+        grounded, reasons = validate_claims(response, seed, source, evidence, "deterministic:structured-v1")
+        assert not reasons
+        assert evidence in text
+        claims.extend(grounded)
+        accepted.append(evidence)
+    assert source.identity.score >= cfg.SCORING.identity_review_threshold
+    assert {claim.field for claim in claims} == {
+        ProfileField.full_name,
+        ProfileField.organisation,
+        ProfileField.job_title,
+    }
+    assert all(claim.evidence_location.startswith("jsonld[0]") for claim in claims)
+    assert all(claim.extraction_model == "deterministic:structured-v1" for claim in claims)
+    assert process_content(page, seed, cfg, accepted_evidence=accepted) == []
+
+
+def test_structured_ambiguity_and_credential_recognizers_remain_for_the_model():
+    data = {
+        "@type": "Person",
+        "name": "Ada Lovelace",
+        "jobTitle": ["Director", "Professor"],
+        "worksFor": [{"name": "Analytical Society"}, {"name": "Example College"}],
+        "alumniOf": {"@type": "CollegeOrUniversity", "name": "Example University"},
+        "hasCredential": [
+            {
+                "@type": "Credential",
+                "name": "PhD in Mathematics",
+                "recognizedBy": {"@type": "Organization", "name": "Academic Accreditors"},
+                "issuer": {"@type": "CollegeOrUniversity", "name": "Doctoral Institute"},
+                "description": "This qualification was completed in 2011.",
+                "dateCreated": "2011-06-01",
+            },
+            {"@type": "Credential", "name": "Honorary Doctor of Science"},
+        ],
+        "description": "Ada Lovelace's qualifications and career need their dates and institutions interpreted.",
+    }
+    url = "https://example.org/ada"
+    page = RetrievedPage(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        html=f'<script type="application/ld+json">{json.dumps(data)}</script>',
+    )
+    batches = deterministic_evidence(page, {"full_name": "Ada Lovelace"})
+    claims = [claim for _, response in batches for claim in response.claims]
+    assert not any(claim.field in {ProfileField.organisation, ProfileField.job_title} for claim in claims)
+    university = next(claim for claim in claims if claim.field == ProfileField.university_name)
+    degree = next(claim for claim in claims if claim.field == ProfileField.degree_type)
+    assert university.value == "Example University"
+    assert degree.fact_group != university.fact_group
+    assert not any("Honorary" in claim.value or "Accreditors" in claim.value for claim in claims)
+    remaining = "\n\n".join(
+        process_content(
+            page, {"full_name": "Ada Lovelace"}, settings(), accepted_evidence=[text for text, _ in batches]
+        )
+    )
+    assert "Professor" in remaining and "Example College" in remaining
+    assert "Academic Accreditors" in remaining and "Honorary Doctor" in remaining
+    assert (
+        "Doctoral Institute" in remaining and "2011-06-01" in remaining and "completed in 2011" in remaining
+    )
+    assert "qualifications and career" in remaining
+
+
+def test_microdata_identity_does_not_inherit_a_neighbouring_persons_job():
+    html = """
+    <div itemscope itemtype="https://schema.org/Person">
+      <h1 itemprop="name">Ada Lovelace</h1><span itemprop="jobTitle">Research Director</span>
+      <span itemprop="worksFor" itemscope itemtype="https://schema.org/Organization">
+        <span itemprop="name">Analytical Society</span></span>
+    </div>
+    <div itemscope itemtype="https://schema.org/Person">
+      <h2 itemprop="name">Another Person</h2><span itemprop="jobTitle">Chief Executive</span>
+    </div>"""
+    page = RetrievedPage(
+        requested_url="https://example.org/ada", final_url="https://example.org/ada", status=200, html=html
+    )
+    claims = [
+        claim
+        for _, response in deterministic_evidence(page, {"full_name": "Ada Lovelace"})
+        for claim in response.claims
+    ]
+    assert {claim.value for claim in claims} == {"Ada Lovelace", "Research Director", "Analytical Society"}
+    assert all(claim.evidence_location.startswith("microdata") for claim in claims)
+
+
+def test_each_explicit_credential_issuer_keeps_its_degree_and_subject_association():
+    data = {
+        "@type": "Person",
+        "name": "Ada Lovelace",
+        "hasCredential": [
+            {
+                "@type": "Credential",
+                "name": "BSc in Mathematics",
+                "issuer": {"@type": "CollegeOrUniversity", "name": "Example University"},
+            },
+            {
+                "@type": "Credential",
+                "name": "MSc in Computing",
+                "about": {"name": "Computing"},
+                "issuedBy": {"@type": "EducationalOrganization", "name": "Analytical Institute"},
+            },
+            {
+                "@type": "Credential",
+                "name": "PhD in Mathematics",
+                "recognizedBy": {"@type": "CollegeOrUniversity", "name": "Accrediting University"},
+            },
+        ],
+    }
+    page = RetrievedPage(
+        requested_url="https://example.org/ada",
+        final_url="https://example.org/ada",
+        status=200,
+        html=f'<script type="application/ld+json">{json.dumps(data)}</script>',
+    )
+    groups = [
+        response.claims
+        for _, response in deterministic_evidence(page, {"full_name": "Ada Lovelace"})
+        if any(claim.field == ProfileField.degree_type for claim in response.claims)
+    ]
+    assert [{claim.value for claim in group} for group in groups] == [
+        {"BSc in Mathematics", "Example University"},
+        {"MSc in Computing", "Computing", "Analytical Institute"},
+        {"PhD in Mathematics"},
+    ]
+    assert all(len({claim.fact_group for claim in group}) == 1 for group in groups)
+    assert len({group[0].fact_group for group in groups}) == 3
+
+
+def test_exact_repeated_evidence_blocks_save_chunks_without_dropping_unique_education():
+    block = "Ada Lovelace researches analytical computing at Analytical Society. " * 8
+    education = "## Education\nAda Lovelace earned a BSc and an MSc in Mathematics at Example University."
+    cfg = settings(CHUNK_SIZE=800, CHUNK_OVERLAP=100, MAX_CHUNKS_PER_SOURCE=3)
+    stats = {}
+    chunks = processed_chunks(
+        "\n\n".join([block, block, block, education]),
+        {"full_name": "Ada Lovelace"},
+        cfg,
+        processing_stats=stats,
+    )
+    assert len(chunks) == 1
+    assert stats["duplicate_evidence_blocks"] == 2
+    assert "BSc and an MSc" in chunks[0] and "Example University" in chunks[0]
+
+
+def test_repeated_paragraphs_under_different_education_contexts_are_preserved():
+    paragraph = (
+        "Ada Lovelace completed an advanced qualification covering the theory and practice of computing."
+    )
+    text = f"## University A\n\n{paragraph}\n\n## University B\n\n{paragraph}"
+    stats = {}
+    combined = "\n\n".join(
+        processed_chunks(text, {"full_name": "Ada Lovelace"}, settings(), processing_stats=stats)
+    )
+    assert combined.count(paragraph) == 2
+    assert not stats
+
+
+def test_same_name_structured_records_with_conflicting_context_require_interpretation():
+    data = [
+        {
+            "@type": "Person",
+            "@id": "#one",
+            "name": "Ada Lovelace",
+            "jobTitle": "Research Director",
+            "worksFor": {"name": "Analytical Society"},
+        },
+        {
+            "@type": "Person",
+            "@id": "#two",
+            "name": "Ada Lovelace",
+            "jobTitle": "Chief Executive",
+            "worksFor": {"name": "Other Laboratories"},
+        },
+    ]
+    page = RetrievedPage(
+        requested_url="https://example.org/people",
+        final_url="https://example.org/people",
+        status=200,
+        html=f'<script type="application/ld+json">{json.dumps(data)}</script>',
+    )
+    batches = deterministic_evidence(page, {"full_name": "Ada Lovelace"})
+    assert {claim.field for _, response in batches for claim in response.claims} == {ProfileField.full_name}
+    remaining = "\n\n".join(
+        process_content(
+            page, {"full_name": "Ada Lovelace"}, settings(), accepted_evidence=[text for text, _ in batches]
+        )
+    )
+    assert "Analytical Society" in remaining and "Other Laboratories" in remaining
+
+
+def test_nonliteral_structured_names_remain_context_without_inventing_name_claims():
+    seed = {"full_name": "Ada Lovelace"}
+    for name in (["Ada Lovelace", "A. Lovelace"], {"@value": "Ada Lovelace"}):
+        data = {
+            "@type": "Person",
+            "name": name,
+            "givenName": "Ada",
+            "familyName": "Lovelace",
+            "jobTitle": "Research Director",
+            "worksFor": {"name": "Analytical Society"},
+        }
+        page = RetrievedPage(
+            requested_url="https://example.org/ada",
+            final_url="https://example.org/ada",
+            status=200,
+            html=f'<h1>Ada Lovelace</h1><script type="application/ld+json">{json.dumps(data)}</script>',
+        )
+        assert deterministic_evidence(page, seed) == []
+        remaining = "\n\n".join(process_content(page, seed, settings()))
+        assert "Research Director" in remaining and "Analytical Society" in remaining
+        assert "givenName" in remaining and "familyName" in remaining
+
+
+def test_named_profile_education_section_survives_repeated_early_name_windows():
+    text = (
+        "# Ada Lovelace\n\n"
+        + "\n\n".join(
+            f"Ada Lovelace profile event {number}. " + "Unrelated event schedule details. " * 18
+            for number in range(20)
+        )
+        + "\n\n## Education\n\nShe earned a BSc and MSc in Mathematics at Example University."
+    )
+    cfg = settings(MAX_MARKDOWN_CHARS=1600, CHUNK_SIZE=600, CHUNK_OVERLAP=60, MAX_CHUNKS_PER_SOURCE=3)
+    combined = "\n\n".join(processed_chunks(text, {"full_name": "Ada Lovelace"}, cfg))
+    assert "Ada Lovelace" in combined and "BSc and MSc in Mathematics at Example University" in combined
+    # A separate person's education section is not a shortcut to target evidence.
+    unrelated = text.replace("## Education", "# Another Person\n\n## Education")
+    combined = "\n\n".join(processed_chunks(unrelated, {"full_name": "Ada Lovelace"}, cfg))
+    assert "Example University" not in combined

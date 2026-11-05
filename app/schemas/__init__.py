@@ -439,6 +439,13 @@ class ResearchMetrics(Contract):
     retrieval_cache_misses: int = 0
     extraction_cache_hits: int = 0
     request_cache_hits: int = 0
+    deterministic_claims_extracted: int = 0
+    deterministic_claims_grounded: int = 0
+    extraction_calls_avoided: int = 0
+    chunks_skipped: int = 0
+    duplicate_evidence_blocks: int = 0
+    duplicate_evidence_chars: int = 0
+    field_specific_searches: int = 0
     # Derived from the retained attempt ledger; actual cost stays unknown when
     # any attempt lacks provider accounting. Never used for budget admission.
     accounting: dict[str, Any] = Field(default_factory=dict)

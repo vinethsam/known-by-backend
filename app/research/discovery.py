@@ -159,6 +159,23 @@ def build_context_queries(
             terms.append(suffix)
         queries.append(" ".join(terms)[:600])
 
+    if fields == {"full_name"}:
+        # A supplied title is a reconciliation hypothesis, not an identity test.
+        anchors = values(
+            "organisation",
+            "current_employer",
+            "government_office",
+            "organisation_affiliation",
+            "alumni_organisation",
+            "university_name",
+            "historical_employer",
+        )
+        if anchors:
+            add(anchors, suffix="biography")
+        else:
+            queries.append(f'"{seed.full_name}" biography')
+        return _unique(queries)
+
     professional = fields is None or bool(fields & {"organisation", "job_title"})
     education = fields is None or bool(fields & {"university_name", "degree_type", "subject"})
     if professional:

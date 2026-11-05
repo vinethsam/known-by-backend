@@ -80,8 +80,44 @@ evidence or performing historical backfills.
 
 Repository fixture costs are synthetic. November 1–2 credit-exhaustion/HTTP 403
 batches are failed-provider diagnostics, not a successful cost or coverage baseline.
-Without representative successful provider accounting, live savings remain
-unverified; a 50% reduction is a target, not a measured outcome.
+The November 5 five-person job `e79e7948-464b-45ad-9911-9d548e4fc864` provides a
+successful baseline: $0.11215195 actual cost, $0.02243039 per attempted person,
+60 model calls (45 extraction, 5 discovery, 10 candidate validation), and 23/35
+independently supported fields. Four people were enriched. Every person exhausted
+the six-source budget after one discovery query; no deterministic candidate
+validations were recorded. This baseline does not establish savings from later
+changes. A 50% cost reduction remains a target pending a comparable live run.
+
+## Phase 2 extraction and field objectives
+
+Named schema.org Person/ProfilePage facts and scoped Person microdata can now use
+the existing claim grounding, source identity and reconciliation gates before model
+extraction. Method, source, literal structured evidence, location and relationship
+group remain on each claim. Only fully interpreted, grounded fact projections are
+removed from subsequent extraction; rich properties, contradictory relationships,
+unmatched identities and ordinary biography/education prose still reach the model.
+Consecutive exact long evidence blocks can be deduplicated; intervening headings,
+dates and institution context remain distinct. Education sections within the target
+person's heading scope receive selection priority within the unchanged chunk budget.
+
+After an initial source round, unresolved identity, paired employment or education
+can trigger a deterministic targeted query before broad pending candidates consume
+all retrieval slots. Pending candidates and their validation remain reusable if the
+targeted search is empty or ambiguous. Search, source and provider budgets are
+unchanged. Target-confidence exits use independently researched values and scores.
+
+Internal cumulative accounting additionally records deterministic claims extracted,
+grounded and accepted in selected field support; extraction calls/chunks avoided;
+duplicate blocks/characters; actual model extraction escalations; field-specific
+searches; and grounded versus selected claims. Avoided calls describe the difference
+in eligible chunk counts, not an estimated provider charge. Grounded claim counts
+include deterministic normalization of compound qualifications. Actual costs still
+come exclusively from the provider ledger. No diagnostic export columns are added.
+
+Source URLs now use accepted field attribution or explicit selected/supporting
+claim references. Unused retrieved candidates stay internal; missing historical
+attribution is left blank rather than promoted to confirmed evidence. Original saved
+files and evidence are retained, including their historical explicit source lists.
 
 ## Phase 1 paid-call audit and deterministic work
 

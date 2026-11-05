@@ -179,6 +179,46 @@ def test_distinct_qualification_labels_at_same_institution_remain_separate_crede
     )
 
 
+def test_explicit_shared_institution_degree_list_preserves_each_literal_qualification():
+    quote = "Jane Doe earned BSc, MSc and PhD degrees, all in Engineering at Example University."
+    claims = [
+        claim("university", ProfileField.university_name, "Example University", "education"),
+        claim("subject", ProfileField.subject, "Engineering", "education"),
+        *(claim(value, ProfileField.degree_type, value, "education") for value in ("BSc", "MSc", "PhD")),
+    ]
+    for item in claims:
+        item.evidence_text = quote
+
+    profile = profile_for(claims)
+
+    assert len(profile.records) == 3
+    assert {record.fields[ProfileField.degree_type].selected_claim_id for record in profile.records} == {
+        "BSc",
+        "MSc",
+        "PhD",
+    }
+    for record in profile.records:
+        assert record.fields[ProfileField.university_name].value == "Example University"
+        assert record.fields[ProfileField.subject].value == "Engineering"
+        assert record.fields[ProfileField.university_name].supporting_claim_ids == ["university"]
+
+
+def test_degree_list_with_conflicting_institutions_is_not_expanded_into_invented_associations():
+    quote = "Jane Doe earned BSc and MSc degrees at Example University and Other University."
+    claims = [
+        claim("first", ProfileField.university_name, "Example University", "education"),
+        claim("second", ProfileField.university_name, "Other University", "education"),
+        *(claim(value, ProfileField.degree_type, value, "education") for value in ("BSc", "MSc")),
+    ]
+    for item in claims:
+        item.evidence_text = quote
+
+    profile = profile_for(claims)
+
+    assert len(profile.records) == 1
+    assert set(profile.fields[ProfileField.university_name].conflicting_claim_ids)
+
+
 def test_materially_distinct_credential_dates_remain_separate_credentials():
     claims = [
         claim("example-2010", ProfileField.university_name, "Example University", "degree-2010"),

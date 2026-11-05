@@ -54,7 +54,7 @@ def _clue_key(label: str, value: str) -> str:
         value = value.replace("&", " and ")
     key = comparison_key(value)
     if label in _INSTITUTION_FIELDS:
-        key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc|corporation|corp)$", "", key)
+        key = re.sub(r"\s+(inc|incorporated|ltd|limited|llc|plc|corporation|corp|gmbh)$", "", key)
         key = re.sub(r"\s+newspaper$", "", key)
     if label == "job_title":
         for abbreviation, expanded in _ROLE_ALIASES.items():

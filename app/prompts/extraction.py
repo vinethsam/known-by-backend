@@ -1,6 +1,6 @@
 """Prompt text for claim extraction."""
 
-EXTRACTION_PROMPT_VERSION = "claims-v8"
+EXTRACTION_PROMPT_VERSION = "claims-v9"
 
 EXTRACTION_SYSTEM_PROMPT = """Extract concise person profile claims from supplied source text.
 
@@ -23,6 +23,9 @@ Return only claims that are about the seeded person. Evidence must be short lite
 the supplied source and must contain the claim value verbatim. subject_name must name the seeded
 person. Use the same fact_group for education or employment components that belong together.
 Use a different fact_group for each explicitly distinct qualification or employment relationship.
+If one sentence explicitly links several degrees to one university, repeat that university and
+any explicitly shared subject within each degree's group. Do not drop the other qualifications
+or confuse teaching appointments, honorary awards and memberships with earned degrees.
 An organisation may be a company, government office, ministry, department, agency, legislature,
 university, NGO, international organisation, or other institution. Extract it only when the source
 links that body to the person's role; a party, building, residence, or location is not an employer

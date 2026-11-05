@@ -124,6 +124,38 @@ def test_candidate_metadata_only_opens_retrieval_when_name_and_seed_institution_
     assert not candidate_has_seed_identity_context(seed, partial)
 
 
+@pytest.mark.parametrize("institution_field", ["organisation", "alumni_organisation"])
+def test_omitted_company_legal_suffix_and_changed_title_do_not_erase_an_institution_anchor(institution_field):
+    institution = (
+        {"organisation": "Example Devices GmbH"}
+        if institution_field == "organisation"
+        else {"known_attributes": {"alumni_organisation": "Example Devices GmbH"}}
+    )
+    seed = PersonSeed(full_name="Maya Singh", job_title="Designer; Advisor", **institution)
+    quote = "Maya Singh is Chief Medical Officer at Example Devices."
+    source = _source("employer", seed, quote)
+    claims = [
+        _claim(source, seed, field, value, quote)
+        for field, value in (
+            (ProfileField.organisation, "Example Devices"),
+            (ProfileField.job_title, "Chief Medical Officer"),
+        )
+    ]
+
+    assert source.identity.signals["matched_seed_anchors"] == [institution_field]
+    assert source.identity.score >= POLICY.identity_review_threshold
+    assert eligible_identity_source_ids(seed, claims, {source.source_id: source}, POLICY) == {
+        source.source_id
+    }
+    profile = reconcile("person", seed, claims, [source], POLICY)
+    assert profile.fields[ProfileField.organisation].researched_value == "Example Devices"
+    assert profile.fields[ProfileField.job_title].researched_value == "Chief Medical Officer"
+
+    namesake = _source("namesake", seed, "Maya Singh is Designer at Other Devices.")
+    assert namesake.identity.signals["matched_seed_anchors"] == []
+    assert namesake.identity.score == POLICY.identity_name_only
+
+
 def test_disputed_candidate_metadata_cannot_validate_a_different_fetched_person():
     seed = PersonSeed(full_name="Alexander Karp", organisation="Example Analytics")
     candidate = SourceCandidate(
