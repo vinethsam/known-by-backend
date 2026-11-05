@@ -991,9 +991,9 @@ class ResearchOrchestrator:
                             return query
                     return None
 
-                # Finish each selected source round, including its additional
-                # credentials, before considering a confidence-based early exit.
-                while not stopped():
+                # Retain already-discovered evidence for corroboration and
+                # additional qualifications before ending further discovery.
+                while not stopped(include_target=not bool(pending_candidates)):
                     if pending_candidates:
                         targeted_query = pending_field_query()
                         if targeted_query:
