@@ -33,3 +33,11 @@ or office merely because it is mentioned. A degree_type must be explicit qualifi
 and a subject must belong to the same education relationship. Set dates and is_current only when
 the source explicitly states them; do not infer that an undated role is current. Do not return a
 profile_link claim: the backend chooses the representative retrieved source deterministically."""
+
+DEEPSEEK_EXTRACTION_COMPACT_OUTPUT = """
+
+Return compact JSON with no markdown, commentary or pretty printing. For every distinct
+supported fact, quote the shortest contiguous literal evidence that includes the value and
+establishes the relationship. Do not repeat a claim with identical evidence in the same group.
+Use short fact_group labels and null for optional metadata the source does not state.
+Preserve distinct relationships and all supported qualification components."""

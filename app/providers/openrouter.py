@@ -7,6 +7,7 @@ import inspect
 import json
 import math
 import random
+import re
 import socket
 import ssl
 import time
@@ -46,6 +47,34 @@ OPENROUTER_SCHEMA_ERROR = "OPENROUTER_SCHEMA_ERROR"
 OPENROUTER_TRANSPORT_ERROR = "OPENROUTER_TRANSPORT_ERROR"
 OPENROUTER_TIMEOUT = "OPENROUTER_TIMEOUT"
 OPENROUTER_RESPONSE_TOO_LARGE = "OPENROUTER_RESPONSE_TOO_LARGE"
+_ACCESS_ERROR_COOLDOWN_SECONDS = 60
+_MODEL_ACCESS_ERRORS = {"provider_access", "route_restricted"}
+_TYPED_ERRORS = {
+    "authentication",
+    "permission_denied",
+    "payment_required",
+    "rate_limit_exceeded",
+    "provider_overloaded",
+    "provider_unavailable",
+    "not_found",
+    "invalid_request",
+    "invalid_prompt",
+    "context_length_exceeded",
+    "max_tokens_exceeded",
+    "token_limit_exceeded",
+    "string_too_long",
+    "content_policy_violation",
+    "refusal",
+    "server",
+    "timeout",
+    "unmapped",
+}
+_LIMIT_SOURCES = {
+    "openrouter_guardrail_budget",
+    "openrouter_workspace_budget",
+    "openrouter_key_limit",
+    "openrouter_in_flight_budget",
+}
 
 
 class OpenRouterError(RuntimeError):
@@ -68,6 +97,7 @@ class OpenRouterError(RuntimeError):
         retry_after_seconds: float | None = None,
         response_uncertain: bool = False,
         infrastructure: bool = False,
+        provider_error_category: str | None = None,
     ) -> None:
         super().__init__(message)
         self.usage = usage or []
@@ -83,6 +113,7 @@ class OpenRouterError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.response_uncertain = response_uncertain
         self.infrastructure = infrastructure
+        self.provider_error_category = provider_error_category
 
 
 class OpenRouterResponseTooLarge(OpenRouterError):
@@ -105,6 +136,7 @@ class OpenRouterClient:
         self._owns_client = client is None
         self._usage_callback = usage_callback
         self._sleep = sleep or asyncio.sleep
+        self._access_cooldowns: dict[str | None, tuple[float, int, str]] = {}
 
     async def __aenter__(self) -> Self:
         return self
@@ -138,12 +170,30 @@ class OpenRouterClient:
         *,
         before_attempt: AttemptCallback | None = None,
         on_usage: UsageCallback | None = None,
+        model_override: str | None = None,
+        max_output_tokens: int | None = None,
+        reasoning: dict | None = None,
     ) -> tuple[T, list[UsageRecord]]:
         """Return a parsed model and all usage attempts made for the call."""
 
-        model = self._model_for_role(role)
+        model = model_override or self._model_for_role(role)
+        body = self._request_body(
+            schema,
+            model,
+            prompt,
+            payload,
+            context,
+            max_output_tokens=max_output_tokens,
+            reasoning=reasoning,
+        )
+        if (
+            role == "extraction"
+            and model == self.settings.OPENROUTER_EXTRACTION_MODEL
+            and (provider := self.settings.OPENROUTER_EXTRACTION_PROVIDER)
+        ):
+            body.setdefault("provider", {}).update(only=[provider], allow_fallbacks=False)
         return await self._perform(
-            self._request_body(schema, model, prompt, payload, context),
+            body,
             role=role,
             model=model,
             context=context,
@@ -204,7 +254,9 @@ class OpenRouterClient:
 
         attempt_usage: list[UsageRecord] = []
         last_error: OpenRouterError | None = None
+        secret = self.settings.OPENROUTER_API_KEY.get_secret_value()
         for attempt in range(self.settings.OPENROUTER_MAX_RETRIES + 1):
+            self._check_access_cooldown(model, attempt_usage)
             await self._emit_attempt(
                 before_attempt,
                 {
@@ -228,6 +280,7 @@ class OpenRouterClient:
             response_body_received = False
             http_status: int | None = None
             data: Any = None
+            response_headers = httpx.Headers()
             retry_after_seconds: float | None = None
             try:
                 request = self.client.build_request(
@@ -240,6 +293,7 @@ class OpenRouterClient:
                 response = await self.client.send(request, stream=True)
                 response_received = True
                 http_status = response.status_code
+                response_headers = response.headers
                 retry_after_seconds = self._retry_after_seconds(response.headers.get("Retry-After"))
                 try:
                     data = await self._read_json_response(response)
@@ -266,8 +320,7 @@ class OpenRouterClient:
                 )
                 if response.status_code >= 400:
                     raise self._http_error(response.status_code)
-                provider_error = self._provider_error(data, response.status_code)
-                if provider_error is not None:
+                if provider_error := self._provider_error(data, response.status_code):
                     raise provider_error
                 parsed = parse(data)
                 usage.success = True
@@ -322,32 +375,27 @@ class OpenRouterClient:
                 )
             finally:
                 if failure is not None:
+                    error_type = _object(_object(_response_error(data)).get("metadata")).get("error_type")
+                    exhausted = error_type == "max_tokens_exceeded"
                     if failure.error_code == OPENROUTER_SCHEMA_ERROR and isinstance(data, dict):
                         choices = data.get("choices")
                         choices = choices if isinstance(choices, list) else []
-                        exhausted = any(
+                        exhausted = exhausted or any(
                             isinstance(choice, dict) and choice.get("finish_reason") == "length"
                             for choice in choices
                         )
-                        response_usage = data.get("usage")
-                        completion_tokens = (
-                            response_usage.get("completion_tokens", 0)
-                            if isinstance(response_usage, dict)
-                            else 0
+                        exhausted = exhausted or (
+                            usage is not None and usage.completion_tokens >= body["max_tokens"]
                         )
-                        reached_limit = isinstance(
-                            completion_tokens, (int, float)
-                        ) and completion_tokens >= body.get("max_tokens", float("inf"))
-                        if exhausted or reached_limit:
-                            # Repeating this same bounded request cannot repair a
-                            # truncated contract. Preserve usage and salvage other
-                            # sources instead of paying for identical retries.
-                            failure = OpenRouterError(
-                                "OpenRouter structured output exceeded the response token limit",
-                                error_code=OPENROUTER_SCHEMA_ERROR,
-                                retryable=False,
-                                exception_type="OutputTokenLimit",
-                            )
+                    if exhausted:
+                        # A completed, validated response never enters this branch.
+                        # An incomplete contract needs a different output allowance
+                        # or model, rather than an identical automatic retry.
+                        failure = OpenRouterError(
+                            "OpenRouter structured output exceeded the response token limit",
+                            error_code=OPENROUTER_SCHEMA_ERROR,
+                            exception_type="OutputTokenLimit",
+                        )
                     failure.operation = operation
                     failure.http_status = failure.http_status or http_status
                     failure.request_sent = request_sent
@@ -368,6 +416,10 @@ class OpenRouterClient:
                     )
                 elif failure is not None:
                     self._apply_failure_diagnostics(usage, failure)
+                self._attach_response_metadata(usage, data, response_headers, body, context, secret)
+                if failure is not None:
+                    failure.provider_error_category = usage.provider_error_category
+                    self._remember_access_error(model, usage)
                 attempt_usage.append(usage)
                 await self._emit_usage(usage, on_usage)
 
@@ -401,6 +453,7 @@ class OpenRouterClient:
             retry_after_seconds=last_error.retry_after_seconds,
             response_uncertain=last_error.response_uncertain,
             infrastructure=last_error.infrastructure,
+            provider_error_category=last_error.provider_error_category,
         ) from last_error
 
     def _model_for_role(self, role: str) -> str:
@@ -418,6 +471,7 @@ class OpenRouterClient:
         return {
             "Authorization": f"Bearer {self.settings.OPENROUTER_API_KEY.get_secret_value()}",
             "Content-Type": "application/json",
+            "X-OpenRouter-Metadata": "enabled",
         }
 
     def _request_body(
@@ -427,6 +481,9 @@ class OpenRouterClient:
         prompt: str,
         payload: dict,
         context: dict,
+        *,
+        max_output_tokens: int | None = None,
+        reasoning: dict | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
@@ -441,7 +498,9 @@ class OpenRouterClient:
                     ),
                 },
             ],
-            "max_tokens": self.settings.OPENROUTER_MAX_TOKENS,
+            "max_tokens": max_output_tokens
+            if max_output_tokens is not None
+            else self.settings.OPENROUTER_MAX_TOKENS,
             "stream": False,
         }
         # OpenRouter forwards explicit sampling parameters and `require_parameters`
@@ -449,6 +508,8 @@ class OpenRouterClient:
         # omit the neutral configured value so their provider default can apply.
         if self.settings.OPENROUTER_TEMPERATURE > 0:
             body["temperature"] = self.settings.OPENROUTER_TEMPERATURE
+        if reasoning is not None:
+            body["reasoning"] = reasoning
         if self.settings.OPENROUTER_RESPONSE_FORMAT == "json_schema":
             body["response_format"] = {
                 "type": "json_schema",
@@ -510,25 +571,42 @@ class OpenRouterClient:
             infrastructure=self._retryable_status(status_code),
         )
 
+    def _check_access_cooldown(self, model: str, usage: list[UsageRecord]) -> None:
+        now = time.monotonic()
+        for scope in (None, model):
+            blocked = self._access_cooldowns.get(scope)
+            if blocked is None:
+                continue
+            expires, status, category = blocked
+            if expires <= now:
+                self._access_cooldowns.pop(scope, None)
+                continue
+            raise OpenRouterError(
+                "OpenRouter access temporarily blocked after a non-retryable rejection",
+                usage=usage,
+                error_code=OPENROUTER_HTTP_ERROR,
+                http_status=status,
+                provider_error_category=category,
+            )
+
+    def _remember_access_error(self, model: str, usage: UsageRecord) -> None:
+        status = usage.effective_provider_status
+        category = usage.provider_error_category
+        if status is None or category is None:
+            return
+        expires = time.monotonic() + _ACCESS_ERROR_COOLDOWN_SECONDS
+        if account_access_denied(status, category):
+            self._access_cooldowns[None] = (expires, status, category)
+        elif category in _MODEL_ACCESS_ERRORS:
+            self._access_cooldowns[model] = (expires, status, category)
+
     @classmethod
     def _provider_error(cls, data: Any, http_status: int) -> OpenRouterError | None:
-        if not isinstance(data, dict):
-            return None
-        errors: list[Any] = [data.get("error")]
-        choices = data.get("choices")
-        if isinstance(choices, list):
-            errors.extend(choice.get("error") for choice in choices if isinstance(choice, dict))
-        provider_error = next((value for value in errors if value), None)
+        provider_error = _response_error(data)
         if provider_error is None:
             return None
-        provider_code = provider_error.get("code") if isinstance(provider_error, dict) else None
-        if isinstance(provider_code, str) and provider_code.isdigit():
-            provider_code = int(provider_code)
-        retryable = (
-            cls._retryable_status(provider_code)
-            if isinstance(provider_code, int) and not isinstance(provider_code, bool)
-            else False
-        )
+        provider_code = _provider_status(_object(provider_error).get("code"))
+        retryable = provider_code is not None and cls._retryable_status(provider_code)
         return OpenRouterError(
             "OpenRouter provider returned an error",
             error_code=OPENROUTER_PROVIDER_ERROR,
@@ -710,6 +788,70 @@ class OpenRouterClient:
         usage.response_received = failure.response_received
         usage.response_body_received = failure.response_body_received
 
+    @staticmethod
+    def _attach_response_metadata(
+        usage: UsageRecord, data: Any, headers: httpx.Headers, body: dict, context: dict, secret: str
+    ) -> None:
+        envelope = _object(data)
+        router_metadata = _object(envelope.get("openrouter_metadata"))
+        endpoints = _object(router_metadata.get("endpoints")).get("available")
+        selected_provider = (
+            next(
+                (
+                    endpoint.get("provider")
+                    for endpoint in endpoints
+                    if _object(endpoint).get("selected") is True
+                ),
+                None,
+            )
+            if isinstance(endpoints, list)
+            else None
+        )
+        error = _object(_response_error(data))
+        metadata = _object(error.get("metadata"))
+        usage.inference_provider = _safe_route_label(
+            envelope.get("provider") or selected_provider or metadata.get("provider_name"), secret
+        )
+        usage.response_model = _safe_route_label(envelope.get("model"), secret)
+        usage.fallback_from_model = _safe_route_label(context.get("fallback_from_model"), secret)
+        usage.max_output_tokens = body["max_tokens"]
+        usage.requested_provider = _safe_route_label(
+            next(iter(_object(body.get("provider")).get("only", [])), None), secret
+        )
+        reasoning_tokens = _object(_object(envelope.get("usage")).get("completion_tokens_details")).get(
+            "reasoning_tokens"
+        )
+        if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+            usage.reasoning_tokens = reasoning_tokens
+        choices = envelope.get("choices")
+        first_choice = _object(choices[0]) if isinstance(choices, list) and choices else {}
+        usage.finish_reason = _safe_route_label(first_choice.get("finish_reason"), secret)
+        request_id = (
+            headers.get("x-openrouter-request-id")
+            or headers.get("x-request-id")
+            or envelope.get("id")
+            or headers.get("cf-ray")
+        )
+        if isinstance(request_id, str) and re.fullmatch(
+            r"(?:(?:gen|req|chatcmpl)-[A-Za-z0-9_-]{1,110}|"
+            r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}|"
+            r"[a-fA-F0-9]{16,24}(?:-[A-Z]{3})?)",
+            request_id,
+        ):
+            usage.provider_request_id = _safe_route_label(request_id, secret)
+        if usage.success:
+            return
+        usage.provider_error_status = _provider_status(error.get("code"))
+        error_type = metadata.get("error_type")
+        if isinstance(error_type, str) and error_type in _TYPED_ERRORS:
+            usage.provider_error_type = error_type
+        limit_source = metadata.get("limit_source")
+        if isinstance(limit_source, str) and limit_source in _LIMIT_SOURCES:
+            usage.provider_limit_source = limit_source
+        usage.provider_error_category = _provider_error_category(
+            usage.effective_provider_status, error, metadata, router_metadata, headers
+        )
+
     async def _read_json_response(self, response: httpx.Response) -> Any:
         chunks: list[bytes] = []
         total = 0
@@ -773,6 +915,109 @@ def _token_count(*values: Any) -> int:
         except (TypeError, ValueError, OverflowError):
             continue
     return 0
+
+
+def _object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _response_error(data: Any) -> Any:
+    data = _object(data)
+    error = data.get("error")
+    if error:
+        return error
+    choices = data.get("choices")
+    if isinstance(choices, list):
+        return next((choice["error"] for choice in choices if _object(choice).get("error")), None)
+    return None
+
+
+def _provider_status(value: Any) -> int | None:
+    if isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value):
+        value = int(value)
+    return value if isinstance(value, int) and 100 <= value <= 599 else None
+
+
+def _safe_route_label(value: Any, secret: str) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ./_:+()-]{0,119}", value):
+        return None
+    folded = value.casefold()
+    if (secret and secret.casefold() in folded) or re.search(r"\b(?:bearer\s|sk[-_]|ghp_|eyj)", folded):
+        return None
+    return value
+
+
+def _provider_error_category(
+    status: int | None,
+    error: dict,
+    metadata: dict,
+    router_metadata: dict,
+    headers: httpx.Headers,
+) -> str | None:
+    """Summarize the error envelope without retaining its free-form text or raw metadata."""
+    if status == 401:
+        return "authentication"
+    if status == 402:
+        return "payment_required"
+    if status != 403:
+        return None
+    if headers.get("cf-mitigated") == "challenge":
+        return "edge_challenge"
+    limit_source = metadata.get("limit_source")
+    message = error.get("message")
+    message = message[:500].casefold() if isinstance(message, str) else ""
+    error_type = metadata.get("error_type")
+    if (isinstance(limit_source, str) and limit_source in _LIMIT_SOURCES) or (
+        "budget limit exceeded" in message or "spending limit exceeded" in message
+    ):
+        return "spending_limit"
+    if error_type == "authentication" or any(
+        marker in message for marker in ("invalid api key", "api key is disabled", "api key has expired")
+    ):
+        return "authentication"
+    if error_type == "payment_required" or "insufficient credits" in message:
+        return "payment_required"
+    stages = router_metadata.get("pipeline")
+    guardrail_block = isinstance(stages, list) and any(
+        _object(stage).get("type") == "guardrail" and _object(stage.get("data")).get("action") == "blocked"
+        for stage in stages
+    )
+    if (
+        error_type in ("content_policy_violation", "refusal")
+        or "flagged_input" in metadata
+        or guardrail_block
+        or "prompt injection patterns detected" in message
+    ):
+        return "content_policy"
+    if any(
+        marker in message
+        for marker in (
+            "model not allowed",
+            "provider not allowed",
+            "model is not allowed",
+            "provider is not allowed",
+            "model is not available for",
+            "model allowlist",
+            "provider allowlist",
+            "no endpoints found",
+        )
+    ):
+        return "route_restricted"
+    if metadata.get("provider_name") and error_type == "permission_denied":
+        return "provider_access"
+    if "api key" in message and any(
+        marker in message for marker in ("permission", "restricted", "not allowed")
+    ):
+        return "key_restricted"
+    if "workspace" in message or "guardrail" in message:
+        return "account_policy"
+    return "forbidden_unclassified"
+
+
+def account_access_denied(status: int | None, category: str | None) -> bool:
+    return status in {401, 402} or (
+        status == 403 and category not in _MODEL_ACCESS_ERRORS | {"content_policy"}
+    )
 
 
 def _reported_cost(value: Any) -> float | None:

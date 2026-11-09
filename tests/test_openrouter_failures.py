@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -9,9 +10,12 @@ import pytest
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.logging import JsonFormatter
 from app.providers.openrouter import OpenRouterClient, OpenRouterError, strict_json_schema
+from app.providers.search import OpenRouterSearchProvider, SearchProviderError
 from app.providers.source_advisor import SourceAdvisor, SourceDecisionSet
-from app.schemas import Contract, PersonSeed, UsageRecord
+from app.research.budget import BudgetedModel
+from app.schemas import Contract, PersonSeed, ResearchMetrics, UsageRecord
 
 
 class DiagnosticResponse(Contract):
@@ -40,6 +44,19 @@ async def test_truncated_structured_output_is_not_retried(finish_reason, complet
     assert error.exception_type == "OutputTokenLimit"
     assert emitted[0].completion_tokens == completion_tokens
     assert "token limit" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_typed_provider_output_limit_is_not_retried():
+    def handler(request):
+        return httpx.Response(
+            200, json={"error": {"code": 400, "metadata": {"error_type": "max_tokens_exceeded"}}}
+        )
+
+    error, emitted = await complete(handler, retries=2)
+    assert len(emitted) == 1 and error.exception_type == "OutputTokenLimit"
+    assert emitted[0].http_status == 200 and emitted[0].provider_error_status == 400
+    assert emitted[0].provider_error_type == "max_tokens_exceeded"
 
 
 @pytest.mark.asyncio
@@ -168,6 +185,188 @@ async def test_http_400_records_safe_zero_token_diagnostics() -> None:
     )
     assert error.retryable is False
     assert "private invalid-schema detail" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message,metadata,category",
+    [
+        ("API key is disabled", {}, "authentication"),
+        ("Missing permission for this API key", {}, "key_restricted"),
+        ("Budget limit exceeded", {"limit_source": "openrouter_key_limit"}, "spending_limit"),
+        ("Model is not allowed", {}, "route_restricted"),
+        ("Forbidden", {"error_type": "permission_denied", "provider_name": "Inference A"}, "provider_access"),
+        (
+            "Forbidden",
+            {"error_type": "content_policy_violation", "flagged_input": "private input"},
+            "content_policy",
+        ),
+        ("Forbidden", {}, "forbidden_unclassified"),
+    ],
+)
+async def test_forbidden_error_preserves_only_allowlisted_details(message, metadata, category):
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(
+            403,
+            headers={"X-OpenRouter-Request-Id": "req-123-test", "Authorization": "Bearer raw-secret"},
+            json={
+                "error": {
+                    "code": 403,
+                    "message": f"{message}. Echoed Bearer openrouter-token.",
+                    "metadata": {**metadata, "raw": "raw-secret"},
+                },
+            },
+        )
+
+    error, usage = await complete(handler, retries=2)
+    assert len(attempts) == len(usage) == 1
+    assert error.provider_error_category == usage[0].provider_error_category == category
+    assert error.retryable is False and error.transient is False
+    assert usage[0].provider_error_status == 403
+    assert usage[0].provider_request_id == "req-123-test"
+    assert usage[0].provider_limit_source == metadata.get("limit_source")
+    log = logging.makeLogRecord({"msg": "model_attempt", **usage[0].model_dump()})
+    safe_details = JsonFormatter().format(log) + usage[0].model_dump_json() + str(error)
+    assert "raw-secret" not in safe_details and "openrouter-token" not in safe_details
+    assert "private input" not in safe_details and "Echoed" not in safe_details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "access_message,next_requests", [("API key is disabled", 0), ("Model not allowed", 1)]
+)
+async def test_access_cooldown_stops_rejected_scope_without_counting_a_request(access_message, next_requests):
+    models, usage = [], []
+
+    def handler(request):
+        body = json.loads(request.content)
+        models.append(body["model"])
+        if len(models) == 1:
+            return httpx.Response(403, json={"error": {"code": 403, "message": access_message}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"name":"Jane"}'}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenRouterClient(settings(), http_client)
+        args = (DiagnosticResponse, "extraction", "Return JSON.", {}, {}, "test")
+        with pytest.raises(OpenRouterError):
+            await client.complete(*args, on_usage=usage.append)
+        with pytest.raises(OpenRouterError, match="temporarily blocked"):
+            await client.complete(*args, on_usage=usage.append)
+        if next_requests:
+            response, _ = await client.complete(
+                *args, model_override="alternate/model", on_usage=usage.append
+            )
+            assert response.name == "Jane"
+        else:
+            with pytest.raises(OpenRouterError, match="temporarily blocked"):
+                await client.complete(*args, model_override="alternate/model", on_usage=usage.append)
+    assert len(models) == len(usage) == 1 + next_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message,metadata,category",
+    [
+        ("Model not allowed", {}, "route_restricted"),
+        ("Forbidden", {"error_type": "content_policy_violation"}, "content_policy"),
+    ],
+)
+async def test_recovered_search_keeps_access_receipts_scoped(message, metadata, category):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                403, json={"error": {"code": 403, "message": message, "metadata": metadata}}
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"annotations": []}}]})
+
+    config = settings()
+    ledger = []
+    context = {"job_id": "job-1", "person_id": "person-1"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        original_client = OpenRouterClient(config, http)
+        original = BudgetedModel(original_client, config, ResearchMetrics(), ledger)
+        with pytest.raises(SearchProviderError):
+            await original.search(OpenRouterSearchProvider(config, original_client), "same", 1, context)
+
+        recovered_client = OpenRouterClient(config, http)
+        recovered = BudgetedModel(
+            recovered_client, config, original.metrics.model_copy(deep=True), list(ledger)
+        )
+        provider = OpenRouterSearchProvider(config, recovered_client)
+        with pytest.raises(SearchProviderError) as caught:
+            await recovered.search(provider, "same", 1, context)
+        assert caught.value.provider_error_category == category
+        assert len(requests) == len(recovered.usage) == 1
+        if category == "route_restricted":
+            with pytest.raises(SearchProviderError) as blocked:
+                await recovered.search(provider, "different", 1, context)
+            assert blocked.value.provider_error_category == category
+            assert len(requests) == len(recovered.usage) == 1
+        else:
+            assert await recovered.search(provider, "different", 1, context) == []
+            assert len(requests) == len(recovered.usage) == 2
+
+
+@pytest.mark.asyncio
+async def test_route_pinning_and_reasoning_metadata_keep_the_alternate_route_independent():
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        assert request.headers["x-openrouter-metadata"] == "enabled"
+        return httpx.Response(
+            200,
+            json={
+                "id": "gen-123",
+                "model": "actual/model",
+                "openrouter_metadata": {
+                    "endpoints": {
+                        "available": [
+                            {"provider": "Unselected", "selected": False},
+                            {"provider": "Inference A", "selected": True},
+                        ]
+                    }
+                },
+                "choices": [{"finish_reason": "length", "message": {"content": '{"name":"Jane"}'}}],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 6000,
+                    "completion_tokens_details": {"reasoning_tokens": 200},
+                    "cost": 0.01,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenRouterClient(settings(OPENROUTER_EXTRACTION_PROVIDER="inference-a"), http_client)
+        args = (DiagnosticResponse, "extraction", "Return JSON.", {}, {}, "test")
+        result, records = await client.complete(*args, max_output_tokens=6000, reasoning={"effort": "none"})
+        _, fallback = await client.complete(
+            *args[:4],
+            {"fallback_from_model": "extraction-model"},
+            args[-1],
+            model_override="alternate/model",
+        )
+    assert result.name == "Jane"
+    assert requests[0]["provider"] == {
+        "require_parameters": True,
+        "only": ["inference-a"],
+        "allow_fallbacks": False,
+    }
+    assert requests[0]["reasoning"] == {"effort": "none"}
+    assert requests[0]["max_tokens"] == 6000
+    assert requests[1]["provider"] == {"require_parameters": True}
+    assert records[0].model == "extraction-model" and records[0].response_model == "actual/model"
+    assert records[0].requested_provider == "inference-a" and records[0].inference_provider == "Inference A"
+    assert records[0].reasoning_tokens == 200 and records[0].max_output_tokens == 6000
+    assert records[0].success and records[0].finish_reason == "length" and records[0].cost == 0.01
+    assert fallback[0].fallback_from_model == "extraction-model"
 
 
 @pytest.mark.asyncio

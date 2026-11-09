@@ -20,6 +20,8 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
+PERSISTENCE_FAILED_OUTCOME = "persistence_failed"
 TIMINGS = (
     "queue_wait_ms",
     "discovery_ms",
@@ -93,9 +95,19 @@ def _usage_summary(records: list[UsageRecord], *, unrecorded_calls: int = 0) -> 
     unknown = unrecorded_calls + sum(record.cost is None and not _proven_unsent(record) for record in records)
     return {
         "models": sorted({record.model for record in records}),
+        "inference_providers": sorted(
+            {record.inference_provider for record in records if record.inference_provider}
+        ),
         "model_calls": sum(not _proven_unsent(record) for record in records) + unrecorded_calls,
+        "successful_calls": sum(record.success for record in records),
+        "output_limit_failures": sum(record.exception_type == "OutputTokenLimit" for record in records),
+        "retries": sum(record.retry_attempt > 0 for record in records),
+        "fallback_calls": sum(
+            record.fallback_from_model is not None and not _proven_unsent(record) for record in records
+        ),
         "input_tokens": sum(record.prompt_tokens for record in records),
         "output_tokens": sum(record.completion_tokens for record in records),
+        "reported_reasoning_tokens": sum(record.reasoning_tokens or 0 for record in records),
         "reported_api_cost": round(reported, 8),
         "actual_api_cost": None if unknown else round(reported, 8),
         "cost_complete": not unknown,
@@ -203,7 +215,7 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
         record for record in ledger if record.operation == "web_search" and not _proven_unsent(record)
     ]
     reported_searches = sum(record.web_search_requests or 0 for record in searches)
-    return {
+    summary = {
         **accounting,
         "operations": breakdown,
         "discovery_requests": metrics.queries_performed,
@@ -246,6 +258,22 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
         "failure_reason": metrics.failure_reason,
         "review_required": result.profile.review_required,
     }
+    return (
+        persistence_failure_summary(summary)
+        if result.profile.research_status == PERSISTENCE_FAILED_OUTCOME
+        else summary
+    )
+
+
+def persistence_failure_summary(summary: dict) -> dict:
+    return dict(
+        summary,
+        successfully_enriched=False,
+        research_outcome=PERSISTENCE_FAILED_OUTCOME,
+        person_status="failed",
+        failure_reason=PERSISTENCE_FAILED,
+        review_required=False,
+    )
 
 
 def record_person_result(
@@ -256,7 +284,9 @@ def record_person_result(
     result.profile.metrics.field_specific_searches_with_support = summary[
         "field_specific_searches_with_support"
     ]
-    if outcome is not None:
+    if outcome == PERSISTENCE_FAILED_OUTCOME:
+        summary = persistence_failure_summary(summary)
+    elif outcome is not None:
         summary["research_outcome"] = outcome
     result.profile.metrics.accounting = summary
     current = _current.get()

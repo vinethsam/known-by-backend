@@ -47,7 +47,12 @@ from app.db.models import (
 from app.research.normalisation import finalize_display
 from app.research.seed_provenance import project_stored_seed, supplied_field_decisions
 from app.research.source_policy import sanitize_research_result
-from app.research.telemetry import aggregate_person_summaries
+from app.research.telemetry import (
+    PERSISTENCE_FAILED,
+    PERSISTENCE_FAILED_OUTCOME,
+    aggregate_person_summaries,
+    persistence_failure_summary,
+)
 from app.schemas import (
     EvidenceClaim,
     JobCreated,
@@ -367,7 +372,6 @@ class Store:
             return rows == 1
 
     def finish_task(self, lease: Lease, result: ResearchResult) -> bool:
-        summary = None
         with self.session_factory.begin() as session:
             job = self._lock_job(session, lease.job_id)
             if not job or job.status == JobStatus.cancelled.value:
@@ -386,16 +390,9 @@ class Store:
             task.completed_at = now
             self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
-            if job.status in {"completed", "partial", "failed"}:
-                summary = self._job_cost_summary(session, job.job_id)
-        if summary is not None:
-            logger.info(
-                "research_cost_summary",
-                extra={
-                    "job_id": lease.job_id,
-                    "performance": {"research_cost": summary},
-                },
-            )
+            job_terminal = job.status in {"completed", "partial", "failed"}
+        if job_terminal:
+            self._log_terminal_job_cost(lease.job_id)
         return True
 
     def checkpoint(self, lease: Lease, result: ResearchResult) -> bool:
@@ -412,7 +409,6 @@ class Store:
             return True
 
     def fail_task(self, lease: Lease, error_code: str, result: ResearchResult | None = None) -> bool:
-        summary = None
         with self.session_factory.begin() as session:
             job = self._lock_job(session, lease.job_id)
             if not job or job.status == JobStatus.cancelled.value:
@@ -430,16 +426,9 @@ class Store:
             if result is not None:
                 self._replace_result(session, lease.job_id, lease.person_id, result, now)
             self._refresh_job_status(session, job)
-            if job.status in {"completed", "partial", "failed"}:
-                summary = self._job_cost_summary(session, job.job_id)
-        if summary is not None:
-            logger.info(
-                "research_cost_summary",
-                extra={
-                    "job_id": lease.job_id,
-                    "performance": {"research_cost": summary},
-                },
-            )
+            job_terminal = job.status in {"completed", "partial", "failed"}
+        if job_terminal:
+            self._log_terminal_job_cost(lease.job_id)
         return True
 
     @staticmethod
@@ -963,6 +952,13 @@ class Store:
             result.profile.status = PersonStatus(task.status)
             if task.status in {"queued", "researching", "cancelled"}:
                 result.profile.research_status = task.status
+            elif task.error_code == PERSISTENCE_FAILED:
+                result.profile.research_status = PERSISTENCE_FAILED_OUTCOME
+                result.profile.metrics.failure_reason = PERSISTENCE_FAILED
+                if result.profile.metrics.accounting:
+                    result.profile.metrics.accounting = persistence_failure_summary(
+                        result.profile.metrics.accounting
+                    )
             elif task.status == "failed" and result.profile.research_status not in {
                 "insufficient_evidence",
                 "retryable_research_failure",
@@ -1041,22 +1037,43 @@ class Store:
             return "resuming", reason if reason in RECOVERY_REASONS else "INFRASTRUCTURE_UNAVAILABLE", None
         return None, None, None
 
+    def _log_terminal_job_cost(self, job_id: str) -> None:
+        # A diagnostic read must never roll back or requeue committed results.
+        try:
+            with self.session_factory() as session:
+                summary = self._job_cost_summary(session, job_id)
+        except Exception as exc:
+            logger.warning(
+                "research_cost_summary_unavailable",
+                extra={"job_id": job_id, "exception_type": type(exc).__name__},
+            )
+            return
+        logger.info(
+            "research_cost_summary",
+            extra={"job_id": job_id, "performance": {"research_cost": summary}},
+        )
+
     @staticmethod
     def _job_cost_summary(session: Session, job_id: str) -> dict:
-        # One compact read only when the last person makes a job terminal. Never
-        # load page bodies/claims, backfill historical jobs or poll per person.
+        # Read only attempted profiles. PostgreSQL JSON path operators decode
+        # escaped characters across the document, including preserved input
+        # metadata such as a JSON-escaped NUL that PostgreSQL text cannot hold.
         rows = session.execute(
-            select(PersonTaskRow.attempts, ProfileRow.data_json["metrics"]["accounting"])
+            select(PersonTaskRow.error_code, ProfileRow.data_json)
             .select_from(PersonTaskRow)
             .outerjoin(ProfileRow, ProfileRow.person_id == PersonTaskRow.person_id)
-            .where(PersonTaskRow.job_id == job_id)
+            .where(PersonTaskRow.job_id == job_id, PersonTaskRow.attempts > 0)
         )
         summaries, unmeasured = [], 0
-        for attempts, accounting in rows:
-            if not attempts:
-                continue
+        for error_code, profile in rows:
+            metrics = profile.get("metrics") if isinstance(profile, dict) else None
+            accounting = metrics.get("accounting") if isinstance(metrics, dict) else None
             if isinstance(accounting, dict) and "cost_complete" in accounting:
-                summaries.append(accounting)
+                summaries.append(
+                    persistence_failure_summary(accounting)
+                    if error_code == PERSISTENCE_FAILED
+                    else accounting
+                )
             else:
                 unmeasured += 1
         return aggregate_person_summaries(summaries, unmeasured_people=unmeasured)

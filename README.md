@@ -183,7 +183,8 @@ complete reference for bounds, timeouts, concurrency, retention, and scoring pol
 
 - **Runtime and access:** `APP_ENV`, `PORT`, `LOG_LEVEL`, `API_ACCESS_TOKEN`, `GOOGLE_CLIENT_ID`, `GOOGLE_ALLOWED_EMAILS`, `CORS_ALLOWED_ORIGINS`, `DATABASE_URL`.
 - **OpenRouter:** `OPENROUTER_API_KEY`, `OPENROUTER_SOURCE_MODEL`,
-  `OPENROUTER_EXTRACTION_MODEL`, `OPENROUTER_RESPONSE_FORMAT`.
+  `OPENROUTER_EXTRACTION_MODEL`, `OPENROUTER_RESPONSE_FORMAT`,
+  optional `OPENROUTER_EXTRACTION_PROVIDER` for controlled comparisons.
 - **Static retrieval:** `STATIC_FETCH_WORKER_URL`, `STATIC_FETCH_WORKER_SECRET`,
   `STATIC_MIN_READABLE_CHARS` (default `250`).
 - **Optional acquisition:** `PLAYWRIGHT_ENABLED`, `BROWSER_SANDBOX`, `STRUCTURED_SOURCES`.
@@ -207,6 +208,9 @@ that do not accept explicit temperature remain eligible under `require_parameter
 positive configured values are forwarded.
 Worker crash recovery is separately attempt-limited. Use plain model IDs and ensure
 OpenRouter workspace settings permit Exa without forced legacy web plugins.
+For a controlled comparison, set `OPENROUTER_EXTRACTION_PROVIDER` to the
+provider slug for the configured extraction model. Discovery and the alternate
+extraction model use ordinary routing. Leave the setting unset for normal routing.
 
 LinkedIn and ordinary social-media hosts are excluded through the central source
 policy before candidate admission and at retrieval and evidence boundaries. This
@@ -221,8 +225,18 @@ profile with one or more valid enrichment fields succeeds with limited coverage 
 when another source failed. Structured attempt records and logs include
 the operation, HTTP status when available, exception class, retry number, and whether
 a request, response, and response body were observed. Stage-boundary logs add
-candidate, citation, and selected-source counts. Credentials and raw model bodies are
-excluded.
+candidate, citation, and selected-source counts. Model attempts also record the
+requested and resolved model, selected inference provider, request ID, output
+budget, reported reasoning tokens, finish reason, and fallback model when available.
+Provider failures retain allowlisted status, error type, limit source and category.
+Error text, request content, raw provider metadata and credentials are excluded.
+
+For an unclassified 403, match the request ID and timestamp in OpenRouter Activity.
+Verify the key configured in the Railway worker under OpenRouter API Keys, including
+its workspace, expiry, usage limit and remaining budget. The OpenRouter
+[`GET /api/v1/key` endpoint](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key)
+can check the active worker key without running inference. For a route restriction,
+inspect the key and workspace model/provider allowlists and data policies.
 
 The diagnostic fields are additive JSON fields and require no database migration.
 Deploy or restart the web and worker services from the same revision so an older

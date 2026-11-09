@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import signal
 from datetime import timezone
 from time import monotonic
@@ -17,15 +18,28 @@ from app.logging import configure_logging
 from app.providers.openrouter import OpenRouterClient
 from app.providers.search import OpenRouterSearchProvider
 from app.research.orchestrator import RecoverableResearchError, ResearchOrchestrator
-from app.research.telemetry import person_performance, record_person_result, stage
+from app.research.telemetry import (
+    PERSISTENCE_FAILED,
+    PERSISTENCE_FAILED_OUTCOME,
+    person_performance,
+    record_person_result,
+    stage,
+)
 from app.retrieval.service import RetrievalService
 from app.schemas import PersonStatus, utcnow
 
 logger = logging.getLogger(__name__)
+FINALIZATION_PENDING = "finalization_pending"
 
 
 class LeaseLost(RuntimeError):
     pass
+
+
+class PersistenceFailure(RuntimeError):
+    def __init__(self, operation: str):
+        super().__init__(operation)
+        self.operation = operation
 
 
 class ResearchClock:
@@ -151,21 +165,64 @@ async def _process_lease(store, orchestrator, lease, settings):
     latest = getattr(lease, "checkpoint", None)
     final_result = None
     outcome = None
+    checkpoint_error = None
 
     async def persist(method, *args):
         with stage("persistence_ms"):
-            return await retry_database(store, method, *args, clock=clock)
+            try:
+                return await retry_database(store, method, *args, clock=clock)
+            except Exception as exc:
+                raise PersistenceFailure(getattr(method, "__name__", "database_operation")) from exc
+
+    async def fail_persistence(error):
+        nonlocal outcome
+        outcome = PERSISTENCE_FAILED_OUTCOME
+        original = error.__cause__
+        database_error = getattr(original, "orig", None)
+        sqlstate = getattr(database_error, "sqlstate", None) or getattr(database_error, "pgcode", None)
+        logger.error(
+            "person_persistence_failed",
+            extra={
+                "job_id": lease.job_id,
+                "person_id": lease.person_id,
+                "operation": error.operation,
+                "error_code": PERSISTENCE_FAILED,
+                "exception_type": type(original).__name__,
+                "sqlstate": sqlstate
+                if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate)
+                else None,
+            },
+        )
+        # Fence and fail the task without rewriting the rejected payload. Any
+        # committed profile, claims and paid-attempt ledger remain available.
+        await persist(store.fail_task, lease, PERSISTENCE_FAILED)
 
     async def checkpoint(result):
-        nonlocal latest
-        latest = result.model_copy(deep=True)
-        saved = await persist(store.checkpoint, lease, result)
+        nonlocal latest, checkpoint_error
+        if checkpoint_error is not None:
+            raise checkpoint_error
+        try:
+            saved = await persist(store.checkpoint, lease, result)
+        except PersistenceFailure as error:
+            # A cleanup callback may try to save again while the first failed
+            # checkpoint unwinds. Fence it without submitting another write.
+            checkpoint_error = error
+            raise
         if not saved:
             raise LeaseLost()
+        latest = result.model_copy(deep=True)
 
     async def work():
         nonlocal final_result
-        if isinstance(orchestrator, ResearchOrchestrator):
+        resuming_finalization = (
+            latest is not None and latest.profile.metrics.recovery.get(FINALIZATION_PENDING) is True
+        )
+        if resuming_finalization:
+            result = latest.model_copy(deep=True)
+            logger.info(
+                "research_finalization_resumed", extra={"job_id": lease.job_id, "person_id": lease.person_id}
+            )
+        elif isinstance(orchestrator, ResearchOrchestrator):
             result = await orchestrator.research(
                 lease.job_id,
                 lease.person_id,
@@ -176,6 +233,7 @@ async def _process_lease(store, orchestrator, lease, settings):
         else:
             result = await orchestrator.research(lease.job_id, lease.person_id, lease.seed, checkpoint)
         final_result = result
+        failure_reason = None
         if result.profile.coverage == 0:
             failure_reason = (
                 result.profile.metrics.failure_reason
@@ -185,23 +243,30 @@ async def _process_lease(store, orchestrator, lease, settings):
             result.profile.status = PersonStatus.failed
             for record in result.profile.records:
                 record.status = PersonStatus.failed
-            record_person_result(result)
-            if not await persist(store.fail_task, lease, failure_reason, result):
-                raise LeaseLost()
+        record_person_result(result)
+        if not resuming_finalization:
+            # Task status is still researching. A replacement lease can commit
+            # this exact result without re-entering research or billing work.
+            result.profile.metrics.recovery[FINALIZATION_PENDING] = True
+            await checkpoint(result)
+        result.profile.metrics.recovery.pop(FINALIZATION_PENDING, None)
+        if failure_reason is not None:
+            saved = await persist(store.fail_task, lease, failure_reason, result)
         else:
-            record_person_result(result)
-            if not await persist(store.finish_task, lease, result):
-                raise LeaseLost()
+            saved = await persist(store.finish_task, lease, result)
+        if not saved:
+            raise LeaseLost()
 
     task = asyncio.create_task(work())
     try:
         while not task.done():
             remaining = settings.PERSON_TIMEOUT_SECONDS - clock.elapsed()
-            if remaining <= 0 and not clock.waiters:
+            if remaining <= 0 and not clock.waiters and final_result is None:
                 raise TimeoutError()
-            done, _ = await asyncio.wait(
-                {task}, timeout=min(settings.WORKER_HEARTBEAT_SECONDS, max(0.05, remaining))
-            )
+            wait = settings.WORKER_HEARTBEAT_SECONDS
+            if final_result is None and not clock.waiters:
+                wait = min(wait, max(0.05, remaining))
+            done, _ = await asyncio.wait({task}, timeout=wait)
             if done:
                 break
             if not await persist(store.renew_lease, lease):
@@ -222,7 +287,11 @@ async def _process_lease(store, orchestrator, lease, settings):
             outage_attempt = latest.profile.metrics.recovery.get("outage_attempt", 0)
             latest.profile.metrics.recovery["outage_attempt"] = outage_attempt + 1
         delay = max(exc.retry_after_seconds or 0, min(30.0, 5 * 2 ** min(outage_attempt, 3)))
-        saved = await persist(store.defer_task, lease, exc.error_code, delay, latest)
+        try:
+            saved = await persist(store.defer_task, lease, exc.error_code, delay, latest)
+        except PersistenceFailure as error:
+            await fail_persistence(error)
+            return
         logger.info(
             "job_waiting_for_infrastructure" if saved else "lease_lost",
             extra={
@@ -236,15 +305,21 @@ async def _process_lease(store, orchestrator, lease, settings):
         outcome = "timed_out"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await persist(store.fail_task, lease, "PERSON_TIMEOUT")
+        try:
+            await persist(store.fail_task, lease, "PERSON_TIMEOUT")
+        except PersistenceFailure as error:
+            await fail_persistence(error)
     except asyncio.CancelledError:
         outcome = "cancelled"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         raise
+    except PersistenceFailure as error:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await fail_persistence(error)
     except Exception as exc:
         outcome = "failed"
-        # A lease-renewal/database error can occur while research is still live.
         # Stop owned network/model work before recording the terminal failure.
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -257,7 +332,10 @@ async def _process_lease(store, orchestrator, lease, settings):
                 "exception_type": type(exc).__name__,
             },
         )
-        await persist(store.fail_task, lease, "RESEARCH_FAILED")
+        try:
+            await persist(store.fail_task, lease, "RESEARCH_FAILED")
+        except PersistenceFailure as error:
+            await fail_persistence(error)
     finally:
         if not task.done():
             task.cancel()

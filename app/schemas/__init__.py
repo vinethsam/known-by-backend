@@ -489,22 +489,40 @@ class UsageRecord(Contract):
     source_id: str | None = None
     role: str
     model: str
+    response_model: str | None = None
+    requested_provider: str | None = None
+    inference_provider: str | None = None
+    fallback_from_model: str | None = None
     prompt_version: str
     operation: str = "structured_completion"
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    finish_reason: str | None = None
     web_search_requests: int | None = Field(default=None, ge=0)
     cost: float | None = Field(default=None, ge=0)
     latency_ms: float = Field(default=0, ge=0)
     success: bool = True
     error_code: str | None = None
     http_status: int | None = Field(default=None, ge=100, le=599)
+    provider_request_id: str | None = None
+    provider_error_status: int | None = Field(default=None, ge=100, le=599)
+    provider_error_type: str | None = None
+    provider_error_category: str | None = None
+    provider_limit_source: str | None = None
     exception_type: str | None = None
     retry_attempt: int = Field(default=0, ge=0)
     request_sent: bool = False
     response_received: bool = False
     response_body_received: bool = False
     created_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def effective_provider_status(self) -> int | None:
+        if self.http_status is not None and self.http_status >= 400:
+            return self.http_status
+        return self.provider_error_status or self.http_status
 
 
 class ResearchResult(Contract):

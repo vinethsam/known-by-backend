@@ -15,7 +15,12 @@ from app.logging import JsonFormatter
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
 from app.providers.openrouter import OpenRouterClient, OpenRouterError
 from app.providers.search import OpenRouterSearchProvider
-from app.research.budget import BudgetedModel, BudgetExceeded
+from app.research.budget import (
+    DEEPSEEK_EXTRACTION_MODEL,
+    LUNA_EXTRACTION_FALLBACK,
+    BudgetedModel,
+    BudgetExceeded,
+)
 from app.research.concurrency import ordered_window
 from app.research.extraction import extract_chunks, extraction_chunk_key
 from app.research.orchestrator import ResearchOrchestrator, _process_source
@@ -53,6 +58,173 @@ def response(content='{"claims":[]}'):
             "usage": {"prompt_tokens": 20, "completion_tokens": 10},
         },
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_at_limit", [False, True])
+async def test_deepseek_output_budget_and_recovery_use_only_one_luna_fallback(valid_at_limit):
+    settings = configured(OPENROUTER_MAX_RETRIES=1).model_copy(
+        update={"OPENROUTER_EXTRACTION_MODEL": DEEPSEEK_EXTRACTION_MODEL}
+    )
+    metrics, usage, requests = ResearchMetrics(), [], []
+    content = '{"claims":[{"field":"full_name","value":"Jane Doe","evidence":"Jane Doe","subject_name":"Jane Doe"}]}'
+    snapshot = None
+
+    async def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if body["model"] == DEEPSEEK_EXTRACTION_MODEL:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": content if valid_at_limit else '{"claims":['},
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 6000, "cost": 0.01},
+                },
+            )
+        return response(content)
+
+    async def checkpoint():
+        nonlocal snapshot
+        if len(usage) == 1 and any(
+            receipt["state"] == "output_limited" for receipt in metrics.recovery["requests"].values()
+        ):
+            snapshot = snapshot or metrics.model_copy(deep=True)
+
+    async def extract(client):
+        return [
+            (claims.claims[0].value, model)
+            async for _, claims, model in extract_chunks(
+                client,
+                PersonSeed(full_name="Jane Doe"),
+                ["Jane Doe"],
+                "https://example.org/jane",
+                CONTEXT,
+                asyncio.Semaphore(1),
+                1,
+            )
+        ]
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterClient(settings, http)
+        client = BudgetedModel(provider, settings, metrics, usage)
+        client.checkpoint = checkpoint
+        expected_model = DEEPSEEK_EXTRACTION_MODEL if valid_at_limit else LUNA_EXTRACTION_FALLBACK
+        assert await extract(client) == [("Jane Doe", expected_model)]
+        assert requests[0]["max_tokens"] == 6000
+        assert requests[0]["reasoning"] == {"enabled": False}
+        assert requests[0]["response_format"]["type"] == "json_schema"
+        assert "shortest contiguous literal evidence" in requests[0]["messages"][0]["content"]
+        assert len(requests) == (1 if valid_at_limit else 2)
+        if not valid_at_limit:
+            assert snapshot is not None
+            assert requests[1]["model"] == LUNA_EXTRACTION_FALLBACK
+            assert requests[1]["max_tokens"] == settings.OPENROUTER_MAX_TOKENS
+            assert usage[0].exception_type == "OutputTokenLimit"
+            assert usage[1].fallback_from_model == DEEPSEEK_EXTRACTION_MODEL
+            assert (
+                json.loads(requests[0]["messages"][1]["content"])["payload"]
+                == json.loads(requests[1]["messages"][1]["content"])["payload"]
+            )
+            after_primary_usage = usage[:1]
+            assert await extract(BudgetedModel(provider, settings, snapshot, after_primary_usage)) == [
+                ("Jane Doe", expected_model)
+            ]
+            assert [body["model"] for body in requests] == [
+                DEEPSEEK_EXTRACTION_MODEL,
+                LUNA_EXTRACTION_FALLBACK,
+                LUNA_EXTRACTION_FALLBACK,
+            ]
+            assert len(after_primary_usage) == snapshot.llm_calls == 2
+            assert snapshot.cost == 0.01
+        completed = metrics.model_copy(deep=True)
+        persisted_usage = usage.copy()
+        requests_before = len(requests)
+        assert await extract(BudgetedModel(provider, settings, completed, persisted_usage)) == [
+            ("Jane Doe", expected_model)
+        ]
+        assert len(requests) == requests_before
+        assert persisted_usage == usage
+
+
+@pytest.mark.asyncio
+async def test_extraction_preserves_sibling_replies_when_primary_and_fallback_exhaust_output():
+    settings = configured(OPENROUTER_MAX_RETRIES=0).model_copy(
+        update={"OPENROUTER_EXTRACTION_MODEL": DEEPSEEK_EXTRACTION_MODEL}
+    )
+    models = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        models.append(body["model"])
+        content = json.loads(body["messages"][1]["content"])["payload"]["content"]
+        if content == "first":
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": '{"claims":['}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": body["max_tokens"]},
+                },
+            )
+        return response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BudgetedModel(OpenRouterClient(settings, http), settings, ResearchMetrics(), [])
+        accepted = []
+        with pytest.raises(OpenRouterError) as caught:
+            async for chunk, _, _ in extract_chunks(
+                client,
+                PersonSeed(full_name="Jane Doe"),
+                ["first", "second"],
+                "https://example.org/jane",
+                CONTEXT,
+                asyncio.Semaphore(1),
+                1,
+            ):
+                accepted.append(chunk)
+    assert caught.value.exception_type == "OutputTokenLimit"
+    assert accepted == ["second"]
+    assert models == [DEEPSEEK_EXTRACTION_MODEL, LUNA_EXTRACTION_FALLBACK, DEEPSEEK_EXTRACTION_MODEL]
+
+
+@pytest.mark.asyncio
+async def test_permanent_provider_denial_drains_successful_sibling_without_new_http_calls():
+    settings = configured(OPENROUTER_MAX_RETRIES=0)
+    requested = []
+    sibling_started = asyncio.Event()
+
+    async def handler(request):
+        body = json.loads(request.content)
+        content = json.loads(body["messages"][1]["content"])["payload"]["content"]
+        requested.append(content)
+        if content == "denied":
+            await sibling_started.wait()
+            return httpx.Response(403, json={"error": {"code": 403, "message": "Forbidden"}})
+        sibling_started.set()
+        return response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BudgetedModel(OpenRouterClient(settings, http), settings, ResearchMetrics(), [])
+        accepted = []
+        async with asyncio.timeout(2):
+            with pytest.raises(OpenRouterError) as caught:
+                async for chunk, _, _ in extract_chunks(
+                    client,
+                    PersonSeed(full_name="Jane Doe"),
+                    ["denied", "successful sibling", "blocked before dispatch"],
+                    "https://example.org/jane",
+                    CONTEXT,
+                    asyncio.Semaphore(2),
+                    2,
+                ):
+                    accepted.append(chunk)
+    assert caught.value.http_status == 403
+    assert accepted == ["successful sibling"]
+    assert requested == ["denied", "successful sibling"]
 
 
 @pytest.mark.asyncio
@@ -312,7 +484,7 @@ async def test_applied_extraction_is_skipped_before_call_without_reindexing_pend
                 applied_chunks=applied,
             )
         ) as chunks:
-            output = [chunk async for chunk, _ in chunks]
+            output = [chunk async for chunk, _, _ in chunks]
     assert indexes == [1] and output == ["second"]
     assert metrics.llm_calls == len(usage) == 1
     assert metrics.extraction_cache_hits == 1
@@ -395,7 +567,7 @@ async def test_extraction_out_of_order_is_bounded_and_consumed_in_chunk_order():
                     2,
                 )
             ) as chunks:
-                output = [chunk async for chunk, _ in chunks]
+                output = [chunk async for chunk, _, _ in chunks]
     assert output == ["first", "second", "third"]
     assert finished == [1, 0, 2]
     assert all(
@@ -477,7 +649,7 @@ async def test_tight_extraction_budget_keeps_serial_priority():
                     2,
                 )
             ) as chunks:
-                async for chunk, _ in chunks:
+                async for chunk, _, _ in chunks:
                     consumed.append(chunk)
     assert indexes == [0, 1]
     assert consumed == ["first", "second"]
@@ -570,8 +742,8 @@ def test_extraction_concurrency_setting_is_conservative_and_bounded():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error,code", [(RuntimeError, "RESEARCH_FAILED"), (TimeoutError, "PERSON_TIMEOUT")])
-async def test_lease_renewal_failure_cancels_owned_research_before_terminal_write(error, code):
+@pytest.mark.parametrize("error", [RuntimeError, TimeoutError])
+async def test_lease_renewal_failure_cancels_owned_research_before_terminal_write(error):
     started, cancelled = asyncio.Event(), asyncio.Event()
     failures = []
 
@@ -596,7 +768,7 @@ async def test_lease_renewal_failure_cancels_owned_research_before_terminal_writ
     async with asyncio.timeout(2):
         await process_lease(Store(), Pipeline(), lease, configured(WORKER_HEARTBEAT_SECONDS=0.05))
     assert cancelled.is_set()
-    assert failures == [code]
+    assert failures == ["PERSISTENCE_FAILED"]
 
 
 @pytest.mark.asyncio

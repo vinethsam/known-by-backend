@@ -533,7 +533,7 @@ class ResearchOrchestrator:
                         applied_chunks=applied_chunks,
                     )
                 ) as extractions:
-                    async for chunk, response in extractions:
+                    async for chunk, response, extraction_model in extractions:
                         chunk_key = extraction_chunk_key(
                             source.source_id,
                             chunk,
@@ -550,7 +550,7 @@ class ResearchOrchestrator:
                             seed,
                             source,
                             chunk,
-                            settings.OPENROUTER_EXTRACTION_MODEL or "configured",
+                            extraction_model,
                             rejection_counts=rejected_claims,
                             adjustment_counts=adjusted_claims,
                         )
@@ -588,6 +588,7 @@ class ResearchOrchestrator:
             except OpenRouterError as exc:
                 interrupted = bool(getattr(exc, "transient", False))
                 _recover_infrastructure(exc)
+                claims = deduplicate_claims(claims)
                 source.processing_status = "extraction_failed"
                 source.error_code = "EXTRACTION_PROVIDER_FAILED"
                 metrics.error_codes.append(source.error_code)

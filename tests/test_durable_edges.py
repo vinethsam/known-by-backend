@@ -1,5 +1,7 @@
 """Exercise production Store/migrations on SQLite and an optional isolated PostgreSQL schema."""
 
+import asyncio
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -9,15 +11,17 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DataError
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.config import Settings
 from app.db.library import DatabaseResultFileStorage
-from app.db.models import PersonTaskRow, RetrievalCacheRow
+from app.db.models import PersonTaskRow, ProfileRow, RetrievalCacheRow
 from app.db.store import Store, normalize_database_url
 from app.export.artifacts import build_export_artifact
 from app.library import LibraryLimitError
+from app.research.telemetry import record_person_result
 from app.schemas import (
     EvidenceClaim,
     FieldDecision,
@@ -29,6 +33,8 @@ from app.schemas import (
     UsageRecord,
     utcnow,
 )
+from app.seed_context import seed_input_attributes
+from app.worker import FINALIZATION_PENDING, process_lease
 
 
 @pytest.fixture(params=["sqlite", "postgresql"])
@@ -127,6 +133,62 @@ def expire(store, lease):
         session.get(PersonTaskRow, lease.person_id).lease_expires_at = utcnow() - timedelta(seconds=1)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [True, False])
+async def test_final_result_checkpoint_prevents_research_replay_or_permanent_failure_loop(
+    store, monkeypatch, caplog, interrupted
+):
+    caplog.set_level(logging.INFO, logger="app.db.store")
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    first = store.claim_task("first")
+    result = result_for(first)
+    research_calls = 0
+
+    class Pipeline:
+        async def research(self, *args):
+            nonlocal research_calls
+            research_calls += 1
+            return result
+
+    def fail_finalization(*args):
+        if interrupted:
+            raise asyncio.CancelledError()
+        raise DataError("test statement", {}, ValueError("test payload failure"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "finish_task", fail_finalization)
+        if interrupted:
+            with pytest.raises(asyncio.CancelledError):
+                await process_lease(store, Pipeline(), first, store.settings)
+        else:
+            await process_lease(store, Pipeline(), first, store.settings)
+
+    expire(store, first)
+    second = store.claim_task("second")
+    if interrupted:
+        assert second.checkpoint.profile.metrics.recovery[FINALIZATION_PENDING] is True
+        await process_lease(store, Pipeline(), second, store.settings)
+    else:
+        assert second is None
+    assert research_calls == 1
+    assert store.claim_task("third") is None
+    saved = store.get_results(job.job_id).people[0]
+    assert saved.status == ("review_required" if interrupted else "failed")
+    assert saved.error_code == (None if interrupted else "PERSISTENCE_FAILED")
+    assert [claim.claim_id for claim in saved.result.claims] == [result.claims[0].claim_id]
+    assert [usage.usage_id for usage in saved.result.usage] == [result.usage[0].usage_id]
+    (summary,) = [
+        record.performance["research_cost"]
+        for record in caplog.records
+        if record.getMessage() == "research_cost_summary"
+    ]
+    assert summary["reported_api_cost"] == pytest.approx(result.usage[0].cost)
+    if not interrupted:
+        assert saved.result.profile.research_status == "persistence_failed"
+        assert summary["research_outcomes"] == {"persistence_failed": 1}
+        assert summary["successfully_enriched_people"] == 0
+
+
 def test_final_expired_attempt_waits_then_resumes_and_preserves_checkpoint(store):
     job = store.create_job([PersonSeed(full_name="Jane Doe")])
     first = store.claim_task("first")
@@ -170,6 +232,62 @@ def test_reclaim_retains_provenance_usage_and_does_not_duplicate_checkpoints(sto
     assert sum(item.cost for item in saved.usage) == pytest.approx(0.02)
     assert saved.profile.fields[ProfileField.full_name].selected_claim_id == final.claims[0].claim_id
     assert all(item.source_id in {s.source_id for s in saved.sources} for item in saved.claims)
+
+
+def test_terminal_write_preserves_grounded_result_with_escaped_nul(store, caplog):
+    original_note = "Verbatim input\x00metadata"
+    seed = PersonSeed(full_name="Jane Doe", input_metadata={"Notes": original_note})
+    job = store.create_job([seed])
+    lease = store.claim_task("worker")
+    result = result_for(lease)
+    result.profile.seed_attributes = seed_input_attributes(lease.seed)
+    result.profile.fields[ProfileField.full_name].confidence = 91
+    result.profile.fields[ProfileField.full_name].research_confidence = 91
+    record_person_result(result)
+    assert store.checkpoint(lease, result)
+
+    if store.engine.dialect.name == "postgresql":
+        with store.session_factory() as session, pytest.raises(DataError) as error:
+            # Reproduce the old terminal query against the same stored payload.
+            session.scalar(
+                select(ProfileRow.data_json["metrics"]["accounting"]).where(
+                    ProfileRow.person_id == lease.person_id
+                )
+            )
+        assert error.value.orig.sqlstate == "22P05"
+
+    with caplog.at_level(logging.INFO, logger="app.db.store"):
+        assert store.finish_task(lease, result)
+        assert store.finish_task(lease, result)  # Idempotent commit receipt.
+    assert store.claim_task("other-worker") is None
+    assert store.get_job(job.job_id).status == "completed"
+    saved = store.get_results(job.job_id).people[0].result
+    assert saved.profile.seed_attributes[0]["value"] == original_note
+    assert saved.profile.fields[ProfileField.full_name].research_confidence == 91
+    assert [claim.claim_id for claim in saved.claims] == [result.claims[0].claim_id]
+    assert [usage.usage_id for usage in saved.usage] == [result.usage[0].usage_id]
+    summaries = [
+        event.performance["research_cost"]
+        for event in caplog.records
+        if event.getMessage() == "research_cost_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["actual_api_cost"] == pytest.approx(0.01)
+
+
+def test_diagnostic_read_failure_keeps_terminal_result_committed(store, monkeypatch, caplog):
+    job = store.create_job([PersonSeed(full_name="Jane Doe")])
+    lease = store.claim_task("worker")
+    result = result_for(lease)
+
+    def unavailable(_session, _job_id):
+        raise DataError(None, None, RuntimeError("Diagnostic read unavailable"))
+
+    monkeypatch.setattr(store, "_job_cost_summary", unavailable)
+    assert store.finish_task(lease, result)
+    assert store.get_job(job.job_id).status == "completed"
+    assert store.get_results(job.job_id).people[0].result.claims[0].claim_id == result.claims[0].claim_id
+    assert "research_cost_summary_unavailable" in caplog.messages
 
 
 def test_concurrent_claims_and_completions_keep_final_counts_consistent(store):

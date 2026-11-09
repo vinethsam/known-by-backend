@@ -38,6 +38,7 @@ class SearchProviderError(RuntimeError):
         retry_after_seconds: float | None = None,
         response_uncertain: bool = False,
         infrastructure: bool = False,
+        provider_error_category: str | None = None,
     ) -> None:
         super().__init__(message)
         self.usage = usage or []
@@ -48,6 +49,7 @@ class SearchProviderError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.response_uncertain = response_uncertain
         self.infrastructure = infrastructure
+        self.provider_error_category = provider_error_category
 
 
 class SearchProvider(Protocol):
@@ -98,6 +100,7 @@ class OpenRouterSearchProvider:
                 retry_after_seconds=exc.retry_after_seconds,
                 response_uncertain=exc.response_uncertain,
                 infrastructure=exc.infrastructure,
+                provider_error_category=exc.provider_error_category,
             ) from exc
         results = self._parse_results(data, count)
         logger.info(

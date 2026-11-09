@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator, Mapping
 from bs4 import BeautifulSoup
 
 from app.prompts.extraction import EXTRACTION_PROMPT_VERSION, EXTRACTION_SYSTEM_PROMPT
+from app.providers.openrouter import OpenRouterError
+from app.research.budget import BudgetExceeded
 from app.research.concurrency import ordered_window
 from app.research.identity import research_seed_payload
 from app.research.normalisation import (
@@ -410,7 +412,7 @@ async def extract_chunks(
     concurrency: int,
     *,
     applied_chunks: set[str] | None = None,
-) -> AsyncIterator[tuple[str, ExtractionResponse]]:
+) -> AsyncIterator[tuple[str, ExtractionResponse, str]]:
     if not source_policy_allows(source_url):
         return
     payloads = []
@@ -449,11 +451,11 @@ async def extract_chunks(
         else 1
     )
 
-    async def extract(payload: dict) -> ExtractionResponse:
+    async def extract(payload: dict) -> tuple[ExtractionResponse, str]:
         async with semaphore:
             count("extraction_chunks")
             with stage("extraction_ms"):
-                response, _ = await client.complete(
+                response, usage = await client.complete(
                     ExtractionResponse,
                     "extraction",
                     EXTRACTION_SYSTEM_PROMPT,
@@ -461,8 +463,28 @@ async def extract_chunks(
                     context,
                     EXTRACTION_PROMPT_VERSION,
                 )
-                return response
+                extraction_model = next(
+                    (record.response_model or record.model for record in reversed(usage) if record.success),
+                    model or "configured",
+                )
+                return response, extraction_model
 
+    permanent_failure = None
     async with ordered_window(payloads, extract, width) as results:
         async for payload, outcome in results:
-            yield payload["content"], outcome.unwrap()
+            error = outcome.error
+            if isinstance(error, OpenRouterError) and not error.transient and not error.response_uncertain:
+                # A permanent failure of one chunk does not invalidate other
+                # chunks from the source. Surface it after grounding those replies.
+                if not isinstance(permanent_failure, OpenRouterError):
+                    permanent_failure = error
+                continue
+            if isinstance(error, BudgetExceeded) and str(error) == "PROVIDER_UNAVAILABLE":
+                # The provider gate blocks new HTTP calls, but siblings may already
+                # have valid or cached responses available to ground.
+                permanent_failure = permanent_failure or error
+                continue
+            response, extraction_model = outcome.unwrap()
+            yield payload["content"], response, extraction_model
+    if permanent_failure is not None:
+        raise permanent_failure
