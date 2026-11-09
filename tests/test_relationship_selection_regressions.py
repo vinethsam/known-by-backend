@@ -170,3 +170,26 @@ def test_explicitly_historical_role_remains_an_alternative():
         in record.fields[ProfileField.organisation].alternative_claim_ids
     )
     assert "historical-employer-role-job_title" in record.fields[ProfileField.job_title].alternative_claim_ids
+
+
+def test_explicit_end_date_overrides_inconsistent_current_flag_in_role_ranking():
+    seed = PersonSeed(full_name="Jane Doe")
+    ended, current = _source("dated-former-employer"), _source("current-employer")
+    ended_claims = _role(
+        seed, ended, "Legacy Systems", "Chief Executive Officer", current=True, observed=date(2026, 6, 30)
+    )
+    for claim in ended_claims:
+        claim.end_date = date(2026, 6, 30)
+        claim.evidence_text = "Jane Doe is Chief Executive Officer at Legacy Systems through 2026-06-30."
+    claims = [
+        *ended_claims,
+        *_role(seed, current, "Current Company", "Research Analyst", current=True, observed=date(2026, 9, 1)),
+    ]
+
+    fields = _profile(seed, [ended, current], claims).fields
+
+    assert fields[ProfileField.organisation].value == "Current Company"
+    assert fields[ProfileField.job_title].value == "Research Analyst"
+    assert fields[ProfileField.job_title].scoring_components["relationship_temporal_status"] == "current"
+    assert ended_claims[1].claim_id in fields[ProfileField.job_title].alternative_claim_ids
+    assert ended_claims[1].end_date == date(2026, 6, 30)

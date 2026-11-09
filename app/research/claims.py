@@ -18,6 +18,9 @@ from app.research.normalisation import (
 from app.retrieval.urls import source_policy_allows, source_record_allowed
 from app.schemas import EvidenceClaim, ExtractionResponse, PersonSeed, ProfileField, SourceRecord, utcnow
 
+_INLINE_LINK = re.compile(r"(?<![!\\])\[([^\[\]\r\n]+)\]\(https?://[^\s()<>\"]+\)", re.IGNORECASE)
+_PARAGRAPH_BREAK = re.compile(r"\r?\n[ \t]*\r?\n")
+
 
 def literal_key(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
@@ -58,6 +61,7 @@ def validate_claims(
         return [], ["SOURCE_POLICY_BLOCKED"]
     claims, reasons = [], []
     content = literal_key(chunk)
+    visible_link_blocks = None
     for claim in response.claims:
         if name_key(claim.subject_name) != name_key(seed.full_name) and not (
             not source.identity.rejected
@@ -67,12 +71,26 @@ def validate_claims(
         ):
             rejected("CLAIM_SUBJECT_MISMATCH")
             continue
-        if literal_key(claim.evidence) not in content:
-            rejected("UNGROUNDED_EVIDENCE")
-            continue
+        evidence_key = literal_key(claim.evidence)
+        if evidence_key not in content:
+            # A quote can contain the exact visible text of an inline Markdown
+            # link. Keep paragraph boundaries and all literal label characters.
+            # URL claims still require a verbatim quote and an observed URL.
+            if claim.field == ProfileField.profile_link:
+                rejected("UNGROUNDED_EVIDENCE")
+                continue
+            if visible_link_blocks is None:
+                visible_link_blocks = [
+                    literal_key(_INLINE_LINK.sub(r"\1", block))
+                    for block in _PARAGRAPH_BREAK.split(chunk)
+                    if _INLINE_LINK.search(block)
+                ]
+            if not any(evidence_key in block for block in visible_link_blocks):
+                rejected("UNGROUNDED_EVIDENCE")
+                continue
         # Extraction values should be verbatim; normalisation is our responsibility.
         # A URL is additionally required to be an observed link, never model invention.
-        if literal_key(claim.value) not in literal_key(claim.evidence):
+        if literal_key(claim.value) not in evidence_key:
             rejected("UNGROUNDED_VALUE")
             continue
         if not claim_is_eligible_for_source(seed, source, claim.field, claim.value, claim.evidence):

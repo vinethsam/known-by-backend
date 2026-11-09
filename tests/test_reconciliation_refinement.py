@@ -179,6 +179,38 @@ def test_distinct_qualification_labels_at_same_institution_remain_separate_crede
     )
 
 
+def test_explicit_same_level_degree_list_keeps_distinct_records_and_original_evidence():
+    claims = [
+        claim("university", ProfileField.university_name, "Example University", "education"),
+        claim("msc", ProfileField.degree_type, "MSc", "education"),
+        claim("mba", ProfileField.degree_type, "MBA", "education"),
+    ]
+    for item in claims:
+        item.evidence_text = "Jane Doe earned an MSc and MBA at Example University."
+
+    records = profile_for(claims).records
+
+    assert len(records) == len({record.record_id for record in records}) == 2
+    assert {record.fields[ProfileField.degree_type].selected_claim_id for record in records} == {"msc", "mba"}
+    for record in records:
+        assert record.fields[ProfileField.degree_type].value == "Master's Degree"
+        assert record.fields[ProfileField.university_name].supporting_claim_ids == ["university"]
+        assert record.fields[ProfileField.subject].value is None
+    assert all(item.fact_group == "education" for item in claims)
+
+
+def test_degree_aliases_within_one_quote_do_not_create_extra_credentials():
+    claims = [
+        claim("university", ProfileField.university_name, "Example University", "education"),
+        claim("emba", ProfileField.degree_type, "Executive MBA", "education"),
+        claim("mba", ProfileField.degree_type, "MBA", "education"),
+    ]
+    for item in claims:
+        item.evidence_text = "Jane Doe earned an Executive MBA at Example University."
+
+    assert len(profile_for(claims).records) == 1
+
+
 def test_explicit_shared_institution_degree_list_preserves_each_literal_qualification():
     quote = "Jane Doe earned BSc, MSc and PhD degrees, all in Engineering at Example University."
     claims = [

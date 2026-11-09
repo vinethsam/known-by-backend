@@ -505,6 +505,33 @@ def test_claims_need_literal_evidence_values_and_target_subject():
     assert set(codes) == {"UNGROUNDED_VALUE", "UNGROUNDED_EVIDENCE", "CLAIM_SUBJECT_MISMATCH"}
 
 
+def test_plain_link_label_quotes_are_grounded_only_within_their_paragraph():
+    visible = "Jane Doe earned a degree at Example University."
+    markdown = "Jane Doe earned a degree at [Example University](https://one.org/education)."
+    text = f"{markdown}\n\n[Another University](https://two.org) sponsors research."
+    valid = ExtractedClaim(
+        field="university_name", value="Example University", evidence=visible, subject_name="Jane Doe"
+    )
+    claims = [
+        valid,
+        valid.model_copy(update={"value": "Imagined University"}),
+        valid.model_copy(update={"subject_name": "John Doe"}),
+        valid.model_copy(update={"evidence": markdown.replace("one.org", "invented.example")}),
+        valid.model_copy(
+            update={
+                "value": "Another University",
+                "evidence": f"{visible} Another University sponsors research.",
+            }
+        ),
+    ]
+    accepted, codes = validate_claims(
+        ExtractionResponse(claims=claims), PersonSeed(full_name="Jane Doe"), source(), text, "fake"
+    )
+    assert [claim.raw_value for claim in accepted] == ["Example University"]
+    assert accepted[0].evidence_text == visible
+    assert set(codes) == {"UNGROUNDED_VALUE", "UNGROUNDED_EVIDENCE", "CLAIM_SUBJECT_MISMATCH"}
+
+
 def test_strict_claim_output_rejects_schema_mismatch():
     with pytest.raises(ValueError):
         ExtractionResponse.model_validate({"claims": [{"field": "secret_field", "value": "x"}]})

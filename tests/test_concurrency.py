@@ -901,6 +901,7 @@ async def test_missing_education_is_searched_before_broad_candidates_exhaust_sou
     assert len(fetched) == result.profile.metrics.sources_fetched == settings.MAX_SOURCES_PER_PERSON
     assert result.profile.metrics.field_specific_searches == 1
     assert result.profile.metrics.accounting["field_specific_searches"] == 1
+    assert result.profile.metrics.accounting["field_specific_searches_with_support"] == int(education_found)
     assert result.profile.metrics.accounting["actual_api_cost"] is None  # Provider fixture omits cost.
     assert validation_batches[0] == broad_urls  # Pending broad candidates reuse their first validation.
     assert len(validation_batches) == 2 if education_found else len(validation_batches) == 1

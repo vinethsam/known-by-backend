@@ -235,6 +235,7 @@ class ResearchOrchestrator:
         deterministic_chunks = set(cursor.get("deterministic_chunks", []))
         processed_content = set(cursor.get("processed_content", []))
         field_query_keys = set(cursor.get("field_query_keys", []))
+        field_search_evidence = dict(cursor.get("field_search_evidence", {}))
         rejected_urls = set(cursor.get("rejected_urls", []))
         trace_candidate_urls, trace_rejected_urls = set(), set()
         no_new_claims = cursor.get("no_new_claims", 0)
@@ -324,6 +325,7 @@ class ResearchOrchestrator:
                         "deterministic_chunks": sorted(deterministic_chunks),
                         "processed_content": sorted(processed_content),
                         "field_query_keys": sorted(field_query_keys),
+                        "field_search_evidence": field_search_evidence,
                         "rejected_urls": sorted(rejected_urls),
                         "no_new_claims": no_new_claims,
                         "queue": list(queue),
@@ -898,6 +900,7 @@ class ResearchOrchestrator:
                         return False
                     wikipedia_completion_queued = True
                     queue.append(query)
+                    register_field_query(query, unresolved_fields)
                     return True
 
                 def queue_recovery_queries() -> bool:
@@ -922,6 +925,45 @@ class ResearchOrchestrator:
                     queue.extend(fresh_queries[: max(0, capacity - reserve_wikipedia)])
                     return bool(queue)
 
+                education_fields = (
+                    ProfileField.university_name,
+                    ProfileField.degree_type,
+                    ProfileField.subject,
+                )
+
+                def observed_fields(fields):
+                    observed = {
+                        field.value: [decision.value]
+                        for field, decision in fields.items()
+                        if field in ProfileField
+                        and has_researched_value(decision)
+                        and decision.selected_claim_id
+                    }
+                    # Distinct qualifications may share a display level, such
+                    # as MBA and MSc. Use the grounded label to narrow the search.
+                    label = fields[ProfileField.degree_type].scoring_components.get("qualification_label")
+                    if "degree_type" in observed and isinstance(label, str) and label:
+                        observed["degree_type"] = [label]
+                    return observed
+
+                def education_gap_queries(records):
+                    for fields in records:
+                        missing = [
+                            field.value
+                            for field in education_fields
+                            if not has_researched_value(fields[field])
+                        ]
+                        if missing:
+                            for query in build_context_queries(
+                                seed, missing, evidence_context=observed_fields(fields)
+                            ):
+                                yield query, missing
+
+                def register_field_query(query, fields):
+                    key = query_key(query)
+                    field_query_keys.add(key)
+                    field_search_evidence[key] = {"fields": fields, "urls": []}
+
                 def pending_field_query() -> str | None:
                     # A broad result set must not consume every retrieval slot
                     # before education or identity objectives can be searched.
@@ -935,23 +977,8 @@ class ResearchOrchestrator:
                     eligible = eligible_identity_source_ids(seed, claims, source_map, settings.SCORING)
                     profile = result().profile
                     records = [record.fields for record in profile.records] or [profile.fields]
-                    education = {ProfileField.university_name, ProfileField.degree_type, ProfileField.subject}
-                    missing_education = next(
-                        (
-                            fields
-                            for fields in records
-                            if any(not has_researched_value(fields[field]) for field in education)
-                        ),
-                        None,
-                    )
-                    selected_fields = missing_education or records[0]
-                    observed = {
-                        field.value: [decision.value]
-                        for field, decision in selected_fields.items()
-                        if field in ProfileField
-                        and has_researched_value(decision)
-                        and decision.selected_claim_id
-                    }
+                    selected_fields = records[0]
+                    observed = observed_fields(selected_fields)
                     if not eligible:
                         objective = ["full_name"]
                     elif any(
@@ -966,13 +993,12 @@ class ResearchOrchestrator:
                             for field in (ProfileField.organisation, ProfileField.job_title)
                             if not has_researched_value(selected_fields[field])
                         ]
-                    elif missing_education is not None:
-                        objective = [
-                            field.value
-                            for field in education
-                            if not has_researched_value(selected_fields[field])
-                        ]
                     else:
+                        for query, missing in education_gap_queries(records):
+                            key = query_key(query)
+                            if key not in queries_done and not any(query_key(item) == key for item in queue):
+                                register_field_query(query, missing)
+                                return query
                         objective = [
                             field.value
                             for field in (ProfileField.organisation, ProfileField.job_title)
@@ -987,14 +1013,14 @@ class ResearchOrchestrator:
                             query = f"{query} current role appointment"[:600]
                         key = query_key(query)
                         if key not in queries_done and not any(query_key(item) == key for item in queue):
-                            field_query_keys.add(key)
+                            register_field_query(query, objective)
                             return query
                     return None
 
                 # Retain already-discovered evidence for corroboration and
                 # additional qualifications before ending further discovery.
                 while not stopped(include_target=not bool(pending_candidates)):
-                    if pending_candidates:
+                    if pending_candidates and retry_query_limit is None:
                         targeted_query = pending_field_query()
                         if targeted_query:
                             queue.appendleft(targeted_query)
@@ -1123,13 +1149,11 @@ class ResearchOrchestrator:
                             role_query = build_role_institution_query(seed, role.value)
                             if query_key(role_query) not in queries_done:
                                 queue.append(role_query)
+                                register_field_query(role_query, [ProfileField.organisation.value])
                                 continue
                         # Use evidence-aware deterministic objectives before optional
                         # LLM planning, including education absent from input columns.
-                        observed = {}
-                        for field_name, decision in profile.fields.items():
-                            if field_name in ProfileField and decision.selected_claim_id and decision.value:
-                                observed[field_name.value] = [decision.value]
+                        observed = observed_fields(primary_fields)
                         context_available = bool(
                             observed
                             or set(seed_context_values(seed))
@@ -1144,12 +1168,10 @@ class ResearchOrchestrator:
                                 "industry",
                             }
                         )
-                        objectives = build_context_queries(seed, unresolved, evidence_context=observed)
-                        education_fields = {
-                            ProfileField.university_name,
-                            ProfileField.degree_type,
-                            ProfileField.subject,
-                        }
+                        objectives = [
+                            (query, unresolved)
+                            for query in build_context_queries(seed, unresolved, evidence_context=observed)
+                        ]
                         if all(
                             has_researched_value(primary_fields[field])
                             for field in (ProfileField.organisation, ProfileField.job_title)
@@ -1160,22 +1182,16 @@ class ResearchOrchestrator:
                         ):
                             # Another education source can fill absent credentials and
                             # corroborate a known role; don't repeat broad employment first.
-                            objectives = [
-                                *build_context_queries(
-                                    seed,
-                                    [field.value for field in education_fields],
-                                    evidence_context=observed,
-                                ),
-                                *objectives,
-                            ]
+                            objectives = [*education_gap_queries(record_fields), *objectives]
                         targeted = [
-                            query
-                            for query in objectives
+                            (query, objective)
+                            for query, objective in objectives
                             if context_available and query_key(query) not in queries_done
                         ]
                         if targeted and remaining_search_call_capacity() > 0:
-                            queue.append(targeted[0])
-                            field_query_keys.add(query_key(targeted[0]))
+                            query, objective = targeted[0]
+                            queue.append(query)
+                            register_field_query(query, objective)
                             continue
                         plan_key = hashlib.sha256(
                             json.dumps([clues, sorted(unresolved)], ensure_ascii=True).encode()
@@ -1301,6 +1317,15 @@ class ResearchOrchestrator:
                             metrics.stop_reason = "PROVIDER_UNAVAILABLE"
                             break
                         continue
+                    if key in field_search_evidence:
+                        field_search_evidence[key]["urls"] = sorted(
+                            {
+                                canonicalise_url(candidate.url)
+                                for candidate in deduplicate_candidates(candidates)
+                            }
+                            - discovered_urls
+                            - seen_urls
+                        )
                     pending_candidates.update({candidate.url: candidate for candidate in candidates})
                     active_query = None
                     await save()
@@ -1390,5 +1415,5 @@ class ResearchOrchestrator:
             source_records=sources,
             policy=settings.SCORING,
         )
-        record_person_result(final)
+        record_person_result(final, targeted_searches=field_search_evidence.values())
         return final

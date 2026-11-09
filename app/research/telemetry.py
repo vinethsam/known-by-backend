@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -102,7 +103,7 @@ def _usage_summary(records: list[UsageRecord], *, unrecorded_calls: int = 0) -> 
     }
 
 
-def summarize_person(result: ResearchResult) -> dict:
+def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict] | None = None) -> dict:
     """Cumulative accounting, independent of the number of worker leases.
 
     Usage IDs are durable and may occur in recovered snapshots more than once.
@@ -122,6 +123,7 @@ def summarize_person(result: ResearchResult) -> dict:
     if unrecorded:
         breakdown["unacknowledged"] = _usage_summary([], unrecorded_calls=unrecorded)
     supported = set()
+    field_sources = {}
     evidence_ids = set()
     accepted_claim_ids = set()
     by_claim = {claim.claim_id: claim for claim in result.claims}
@@ -168,6 +170,34 @@ def summarize_person(result: ResearchResult) -> dict:
             evidence_ids.update(
                 by_claim[claim_id].source_id for claim_id in supporting_claim_ids if claim_id in by_claim
             )
+            if targeted_searches is not None:
+                ids = field_sources.setdefault(field_name.value, set())
+                ids.update(decision.supporting_source_ids)
+                ids.update(source_ids_by_url[url] for url in decision.sources if url in source_ids_by_url)
+                ids.update(
+                    by_claim[claim_id].source_id for claim_id in supporting_claim_ids if claim_id in by_claim
+                )
+                if decision.selected_claim_id in by_claim:
+                    ids.add(by_claim[decision.selected_claim_id].source_id)
+    searches_with_support = metrics.field_specific_searches_with_support
+    if targeted_searches is not None:
+        from app.retrieval.urls import canonicalise_url
+
+        requested_urls = {
+            source.source_id: canonicalise_url(source.requested_url) for source in result.sources
+        }
+        searches_with_support = sum(
+            bool(
+                set(search["urls"])
+                & {
+                    requested_urls[source_id]
+                    for field_name in search["fields"]
+                    for source_id in field_sources.get(field_name, ())
+                    if source_id in requested_urls
+                }
+            )
+            for search in targeted_searches
+        )
     hits, misses = metrics.retrieval_cache_hits, metrics.retrieval_cache_misses
     searches = [
         record for record in ledger if record.operation == "web_search" and not _proven_unsent(record)
@@ -203,6 +233,7 @@ def summarize_person(result: ResearchResult) -> dict:
         "duplicate_evidence_chars": metrics.duplicate_evidence_chars,
         "llm_extraction_escalations": breakdown.get("extract_claims", {}).get("model_calls", 0),
         "field_specific_searches": metrics.field_specific_searches,
+        "field_specific_searches_with_support": searches_with_support,
         "claims_grounded": len(by_claim),
         "claims_selected": len(accepted_claim_ids & by_claim.keys()),
         "source_reuse_rate": round(hits / (hits + misses), 6) if hits + misses else None,
@@ -212,12 +243,19 @@ def summarize_person(result: ResearchResult) -> dict:
         "successfully_enriched": bool(supported - {ProfileField.full_name, ProfileField.profile_link}),
         "research_outcome": result.profile.research_status,
         "person_status": result.profile.status.value,
+        "failure_reason": metrics.failure_reason,
+        "review_required": result.profile.review_required,
     }
 
 
-def record_person_result(result: ResearchResult, *, outcome: str | None = None) -> dict:
+def record_person_result(
+    result: ResearchResult, *, outcome: str | None = None, targeted_searches: Iterable[dict] | None = None
+) -> dict:
     """Attach final cumulative diagnostics to existing state and the lease event."""
-    summary = summarize_person(result)
+    summary = summarize_person(result, targeted_searches=targeted_searches)
+    result.profile.metrics.field_specific_searches_with_support = summary[
+        "field_specific_searches_with_support"
+    ]
     if outcome is not None:
         summary["research_outcome"] = outcome
     result.profile.metrics.accounting = summary
@@ -254,6 +292,14 @@ def aggregate_person_summaries(summaries: list[dict], *, unmeasured_people: int 
     actual = subtotal if complete else None
     hits = sum(summary["retrieval_cache_hits"] for summary in summaries)
     misses = sum(summary["retrieval_cache_misses"] for summary in summaries)
+    calls_by_operation = Counter()
+    for summary in summaries:
+        calls_by_operation.update(
+            {name: usage["model_calls"] for name, usage in summary.get("operations", {}).items()}
+        )
+    measured_searches = [
+        summary for summary in summaries if summary.get("field_specific_searches_with_support") is not None
+    ]
 
     def average(denominator):
         return round(actual / denominator, 8) if actual is not None and denominator else None
@@ -268,6 +314,20 @@ def aggregate_person_summaries(summaries: list[dict], *, unmeasured_people: int 
         "reported_api_cost": round(subtotal, 8),
         "cost_complete": complete,
         "unknown_cost_calls": sum(summary["unknown_cost_calls"] for summary in summaries),
+        "model_calls_by_operation": dict(sorted(calls_by_operation.items())),
+        "research_outcomes": dict(
+            Counter(summary.get("research_outcome", "unknown") for summary in summaries)
+        ),
+        "identity_unresolved_people": sum(
+            summary.get("failure_reason") == "IDENTITY_UNRESOLVED" for summary in summaries
+        ),
+        "review_required_people": sum(summary.get("review_required", False) for summary in summaries),
+        "field_specific_searches_measured": sum(
+            summary["field_specific_searches"] for summary in measured_searches
+        ),
+        "field_specific_searches_with_support": sum(
+            summary["field_specific_searches_with_support"] for summary in measured_searches
+        ),
         "average_actual_cost_per_attempted_person": average(attempted),
         "average_actual_cost_per_enriched_person": average(enriched),
         "average_actual_cost_per_supported_field": average(supported),

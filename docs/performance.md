@@ -203,6 +203,18 @@ reservation before transport. Usage and checkpoints are serialized safely when
 responses finish out of order. Raising concurrency does not raise a person's token or
 attempt budget.
 
+For a controlled Phase 3 comparison, rerun the five reference inputs under the same
+provider, model and budget settings. Compare the terminal `research_cost_summary`
+against $0.02243 per person, 65.7% independent field coverage and 12 model calls per
+person. Review `person_performance` and decision summaries for changes in accepted
+evidence and review outcomes.
+
+The job summary includes calls by operation and targeted searches with accepted
+support. A search counts toward this numerator when a newly discovered source from
+that search supports a final decision for one of its target fields. Use
+`field_specific_searches_measured` as the denominator. The same summary separates
+identity failures and review outcomes and retains reported provider costs.
+
 ## Reuse and durability
 
 Canonical URL locks and the existing job cache avoid duplicate simultaneous fetches.

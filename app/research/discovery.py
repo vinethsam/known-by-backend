@@ -186,6 +186,11 @@ def build_context_queries(
         universities = values("university_name")
         degrees = values("degree_type") if fields is None or "degree_type" in fields else []
         subjects = values("subject") if fields is None or "subject" in fields else []
+        # A verified qualification can identify the particular credential whose
+        # institution or subject is missing.
+        if fields is not None:
+            degrees = observed.get("degree_type") or degrees
+            subjects = observed.get("subject") or subjects
         anchors = universities or degrees or subjects
         if fields is not None and not anchors:
             # Once professional sources have been drained, missing education is

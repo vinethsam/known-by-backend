@@ -226,6 +226,8 @@ def test_jsonld_person_graph_is_grounded_before_optional_llm_extraction():
             },
         ],
     }
+    # CMS templates can publish the same Person node more than once.
+    data["@graph"].append(dict(data["@graph"][-1]))
     url = "https://example.org/ada"
     page = RetrievedPage(
         requested_url=url,
@@ -252,6 +254,7 @@ def test_jsonld_person_graph_is_grounded_before_optional_llm_extraction():
         claims.extend(grounded)
         accepted.append(evidence)
     assert source.identity.score >= cfg.SCORING.identity_review_threshold
+    assert len(claims) == 3
     assert {claim.field for claim in claims} == {
         ProfileField.full_name,
         ProfileField.organisation,
@@ -260,6 +263,22 @@ def test_jsonld_person_graph_is_grounded_before_optional_llm_extraction():
     assert all(claim.evidence_location.startswith("jsonld[0]") for claim in claims)
     assert all(claim.extraction_model == "deterministic:structured-v1" for claim in claims)
     assert process_content(page, seed, cfg, accepted_evidence=accepted) == []
+
+    description = "Ada Lovelace also held a visiting appointment during her earlier career."
+    data["@graph"][-1]["description"] = description
+    rich_page = page.model_copy(
+        update={"html": f'<script type="application/ld+json">{json.dumps(data)}</script>'}
+    )
+    remainder = "\n\n".join(process_content(rich_page, seed, cfg, accepted_evidence=accepted))
+    assert description in remainder
+    assert "Research Director" not in remainder and "worksFor" not in remainder
+
+    data["@graph"][0]["description"] = "Historical appointment from 2018 to 2021."
+    dated_page = page.model_copy(
+        update={"html": f'<script type="application/ld+json">{json.dumps(data)}</script>'}
+    )
+    remainder = "\n\n".join(process_content(dated_page, seed, cfg, accepted_evidence=accepted))
+    assert "Historical appointment from 2018 to 2021." in remainder and "Research Director" in remainder
 
 
 def test_structured_ambiguity_and_credential_recognizers_remain_for_the_model():

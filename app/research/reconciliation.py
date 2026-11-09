@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from app.config import ScoringPolicy
+from app.research.claims import literal_key
 from app.research.confidence import (
     EDUCATION_FIELDS,
     VOLATILE_FIELDS,
@@ -102,6 +103,16 @@ def _value_key(field_name: ProfileField, value: str) -> str:
 def _claim_value_key(claim: EvidenceClaim) -> str:
     value = claim.raw_value if claim.field == ProfileField.university_name else claim.normalised_value
     return _value_key(claim.field, value)
+
+
+def _qualification_labels(claims: list[EvidenceClaim]) -> set[str]:
+    return {
+        comparison_key(candidate.qualification_label)
+        for claim in claims
+        if claim.field == ProfileField.degree_type
+        for candidate in normalise_degree_candidates(claim.raw_value)
+        if candidate.value == claim.normalised_value and candidate.qualification_label
+    }
 
 
 def _university_base_key(value: str) -> str | None:
@@ -212,23 +223,49 @@ def _build_bundles(claims: list[EvidenceClaim], fields: set[ProfileField]) -> li
     return list(bundles.values())
 
 
+def _listed_qualification_labels(claims: list[EvidenceClaim]) -> dict[str, str]:
+    raw_values = {literal_key(claim.raw_value) for claim in claims}
+    if len(raw_values) < 2:
+        return {}
+    quote = literal_key(claims[0].evidence_text)
+    names = "|".join(re.escape(value) for value in sorted(raw_values, key=lambda value: (-len(value), value)))
+    matches = list(re.finditer(rf"(?<!\w)(?:{names})(?!\w)", quote))
+    # Require separate list entries. An abbreviation within a longer label or
+    # an equivalence phrase can describe a single qualification.
+    if len(matches) != len(raw_values) or {match.group() for match in matches} != raw_values:
+        return {}
+    if not all(
+        re.fullmatch(r"\s*(?:,\s*(?:and\s+)?|and\s+)", quote[left.end() : right.start()])
+        for left, right in zip(matches, matches[1:])
+    ):
+        return {}
+    labels = {}
+    for claim in claims:
+        candidates = _qualification_labels([claim])
+        if len(candidates) != 1:
+            return {}
+        labels[claim.claim_id] = next(iter(candidates))
+    return labels
+
+
 def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBundle]:
     """Keep distinct degrees in an explicit, unambiguous credential list."""
 
     result = []
     for bundle in bundles:
         degree_claims = [claim for claim in bundle.claims if claim.field == ProfileField.degree_type]
-        degree_values = {
-            _value_key(ProfileField.degree_type, claim.normalised_value) for claim in degree_claims
-        }
+        if len(degree_claims) <= 1:
+            result.append(bundle)
+            continue
         raw_values = {comparison_key(claim.raw_value) for claim in degree_claims}
+        values = _values(bundle.claims)
         # Some responses place a literal multi-degree list in one fact group.
         # Preserve each level only within that explicit, single-institution
         # relationship; ungrouped or conflicting fragments stay unresolved.
         grouped_literal_list = (
             bundle.explicitly_grouped
-            and len(_values(bundle.claims).get(ProfileField.university_name, set())) == 1
-            and len(_values(bundle.claims).get(ProfileField.subject, set())) <= 1
+            and len(values.get(ProfileField.university_name, set())) == 1
+            and len(values.get(ProfileField.subject, set())) <= 1
             and len({comparison_key(claim.evidence_text) for claim in bundle.claims}) == 1
             and all(
                 claim.directness == "explicit"
@@ -237,10 +274,23 @@ def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBund
                 for claim in bundle.claims
             )
         )
-        if len(degree_values) <= 1 or (len(raw_values) != 1 and not grouped_literal_list):
+        if len(raw_values) != 1 and not grouped_literal_list:
             result.append(bundle)
             continue
-        for degree_value in sorted(degree_values):
+        # A subject in the common group may belong to only one degree. Keep
+        # same-level splitting to lists with no unassigned subject.
+        labels = (
+            _listed_qualification_labels(degree_claims)
+            if grouped_literal_list and ProfileField.subject not in values
+            else {}
+        )
+        degree_groups = defaultdict(list)
+        for claim in degree_claims:
+            degree_groups[(_claim_value_key(claim), labels.get(claim.claim_id, ""))].append(claim)
+        if len(degree_groups) <= 1:
+            result.append(bundle)
+            continue
+        for (degree_value, label), matching in sorted(degree_groups.items()):
             derived_marker = f"derived_degree_subject:{degree_value}"
             common = [
                 claim
@@ -251,15 +301,13 @@ def _split_compound_degree_bundles(bundles: list[_FactBundle]) -> list[_FactBund
                     or claim.source_claim_type == derived_marker
                 )
             ]
-            matching = [
-                claim
-                for claim in degree_claims
-                if _value_key(ProfileField.degree_type, claim.normalised_value) == degree_value
-            ]
+            group = f"{bundle.fact_group}:degree:{degree_value}"
+            if label:
+                group = f"{group}:{label}"
             result.append(
                 _FactBundle(
                     source_id=bundle.source_id,
-                    fact_group=f"{bundle.fact_group}:degree:{degree_value}",
+                    fact_group=group,
                     claims=[*common, *matching],
                     explicitly_grouped=True,
                 )
@@ -325,18 +373,8 @@ def _definitely_distinct_education(bundle: _FactBundle, cluster: _EvidenceCluste
         if contextual_conflicts >= 2:
             return True
 
-        def qualification_labels(claims: list[EvidenceClaim]) -> set[str]:
-            labels = set()
-            for claim in claims:
-                if claim.field != ProfileField.degree_type:
-                    continue
-                for candidate in normalise_degree_candidates(claim.raw_value):
-                    if candidate.value == claim.normalised_value and candidate.qualification_label:
-                        labels.add(comparison_key(candidate.qualification_label))
-            return labels
-
-        bundle_labels = qualification_labels(bundle.claims)
-        cluster_labels = qualification_labels(cluster.claims)
+        bundle_labels = _qualification_labels(bundle.claims)
+        cluster_labels = _qualification_labels(cluster.claims)
         if bundle_labels and cluster_labels and bundle_labels.isdisjoint(cluster_labels):
             return True
 
@@ -1111,7 +1149,9 @@ def _employment_decisions(
         if id(cluster) in rank_cache:
             return rank_cache[id(cluster)]
         cluster_claims = cluster.claims
-        explicitly_current = int(any(claim.is_current is True for claim in cluster_claims))
+        explicitly_current = int(
+            any(claim.is_current is True and claim.end_date is None for claim in cluster_claims)
+        )
         observed = max(
             (role_observation_date(claim, sources[claim.source_id]) or date.min for claim in cluster_claims),
             default=date.min,
@@ -1138,6 +1178,7 @@ def _employment_decisions(
         grounded_present_role = any(
             claim.field == ProfileField.job_title
             and claim.is_current is None
+            and claim.end_date is None
             and claim.directness == "explicit"
             and sources[claim.source_id].source_type
             in {SourceType.first_party, SourceType.government, SourceType.employer, SourceType.university}
@@ -1709,6 +1750,7 @@ def reconcile(
     )
     education_scopes: list[_EvidenceCluster | None] = clusters or [None]
     records: list[ProfileRecord] = []
+    used_record_ids: set[str] = set()
     for scope_index, cluster in enumerate(education_scopes):
         fields = {
             ProfileField.full_name: full_name.model_copy(deep=True),
@@ -1771,9 +1813,14 @@ def reconcile(
         attach_seed_provenance(fields, seed, seed_attributes, web_identity)
         record_reasons = list(dict.fromkeys([*record_reasons, *seed_review_reasons(fields)]))
         review = review or bool(seed_review_reasons(fields))
+        record_id = _record_id(fields)
+        # Distinct credentials can share the same standardized display fields.
+        if record_id in used_record_ids:
+            record_id = f"{record_id}:{scope_index + 1}"
+        used_record_ids.add(record_id)
         records.append(
             ProfileRecord(
-                record_id=_record_id(fields),
+                record_id=record_id,
                 fields=fields,
                 profile_confidence=profile_confidence,
                 coverage=coverage,

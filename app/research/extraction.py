@@ -216,13 +216,12 @@ def structured_evidence(page: object, seed: object) -> list[tuple[str, Extractio
             text = json.dumps(
                 {"@type": "Person", "name": name, **properties}, ensure_ascii=False, sort_keys=True
             )
-            if (
-                len(text) > 800
-                or not 2 <= len(name) <= 200
-                or text in seen
-                or any(value not in text for _, value in fields)
-            ):
+            if len(text) > 800 or not 2 <= len(name) <= 200 or any(value not in text for _, value in fields):
                 return False
+            if text in seen:
+                # This projection already has claims. Keep any unrepresented
+                # properties below without sending the same facts back to the model.
+                return True
             seen.add(text)
             response = ExtractionResponse(
                 claims=[
@@ -278,8 +277,8 @@ def structured_evidence(page: object, seed: object) -> list[tuple[str, Extractio
                         "url",
                     }:
                         remaining.pop("worksFor", None)
-                    if "jobTitle" in properties:
-                        remaining.pop("jobTitle", None)
+                        if "jobTitle" in properties:
+                            remaining.pop("jobTitle", None)
         elif not employers and isinstance(title, str) and 0 < len(title.strip()) <= 500:
             if emit({"jobTitle": title}, [(ProfileField.job_title, title)], "jobTitle"):
                 remaining.pop("jobTitle", None)
@@ -365,7 +364,12 @@ def structured_evidence(page: object, seed: object) -> list[tuple[str, Extractio
         # Uninterpreted biography, multiple affiliations, dates and credential
         # relationships still reach the LLM, with their named owner retained.
         if any(key not in {"@type", "@id", "@context", "name"} for key in remaining):
-            text = json.dumps(_expand_references(remaining, references), ensure_ascii=False, sort_keys=True)
+            expanded = _expand_references(remaining, references)
+            # Expanding the person's own @id can restore removed properties.
+            # Retain other linked context while keeping those facts omitted.
+            for key in person.keys() - remaining.keys():
+                expanded.pop(key, None)
+            text = json.dumps(expanded, ensure_ascii=False, sort_keys=True)
             if text not in seen:
                 batches.append((text, ExtractionResponse()))
     return batches

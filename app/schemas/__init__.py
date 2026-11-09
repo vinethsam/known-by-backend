@@ -446,6 +446,7 @@ class ResearchMetrics(Contract):
     duplicate_evidence_blocks: int = 0
     duplicate_evidence_chars: int = 0
     field_specific_searches: int = 0
+    field_specific_searches_with_support: int | None = None
     # Derived from the retained attempt ledger; actual cost stays unknown when
     # any attempt lacks provider accounting. Never used for budget admission.
     accounting: dict[str, Any] = Field(default_factory=dict)

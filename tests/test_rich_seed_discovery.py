@@ -70,6 +70,11 @@ def test_objective_queries_separate_education_and_employment_and_follow_missing_
         ["subject"],
         evidence_context={"university_name": ["Newly Verified University"]},
     ) == ['"Jane Doe" Newly Verified University Economics']
+    assert build_context_queries(
+        seed,
+        ["subject"],
+        evidence_context={"university_name": ["Newly Verified University"], "degree_type": ["MBA"]},
+    ) == ['"Jane Doe" Newly Verified University MBA']
 
 
 def test_alias_duplicates_private_and_unknown_values_never_expand_searches_or_processing():
