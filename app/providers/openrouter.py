@@ -22,12 +22,14 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.config import Settings
+from app.research.telemetry import stage
 from app.schemas import UsageRecord
 
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 WEB_SEARCH_MAX_CHARACTERS = 1000
 WEB_SEARCH_MAX_OUTPUT_TOKENS = 1000
 WEB_SEARCH_PROMPT_VERSION = "web-discovery-v3"
+_REQUEST_BOOKKEEPING = {"job_id", "person_id", "source_id", "fallback_from_model"}
 WEB_SEARCH_SYSTEM_PROMPT = (
     "Find public source pages for the supplied targeted query. Use web search once with that query. "
     "Return a short list of relevant source links with citations, not a biography or inferred facts. "
@@ -435,7 +437,8 @@ class OpenRouterClient:
 
             if attempt >= self.settings.OPENROUTER_MAX_RETRIES:
                 break
-            await self._sleep(max(self._retry_delay(attempt), failure.retry_after_seconds or 0))
+            with stage("provider_backoff_ms"):
+                await self._sleep(max(self._retry_delay(attempt), failure.retry_after_seconds or 0))
 
         assert last_error is not None
         raise OpenRouterError(
@@ -491,11 +494,7 @@ class OpenRouterClient:
                 {"role": "system", "content": prompt},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {"payload": payload, "context": context},
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ),
+                    "content": _model_input({"payload": payload}, context),
                 },
             ],
             "max_tokens": max_output_tokens
@@ -531,9 +530,7 @@ class OpenRouterClient:
                 {"role": "system", "content": WEB_SEARCH_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {"query": query, "context": context}, ensure_ascii=True, separators=(",", ":")
-                    ),
+                    "content": _model_input({"query": query}, context),
                 },
             ],
             "max_tokens": min(self.settings.OPENROUTER_MAX_TOKENS, WEB_SEARCH_MAX_OUTPUT_TOKENS),
@@ -915,6 +912,13 @@ def _token_count(*values: Any) -> int:
         except (TypeError, ValueError, OverflowError):
             continue
     return 0
+
+
+def _model_input(payload: dict, context: dict) -> str:
+    model_context = {key: value for key, value in context.items() if key not in _REQUEST_BOOKKEEPING}
+    if model_context:
+        payload = {**payload, "context": model_context}
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
 def _object(value: Any) -> dict[str, Any]:

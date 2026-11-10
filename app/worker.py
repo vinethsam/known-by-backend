@@ -150,13 +150,21 @@ def terminal_research_error(error_codes: list[str]) -> str | None:
 
 
 async def process_lease(store, orchestrator, lease, settings):
-    if getattr(lease, "checkpoint", None) is not None:
+    checkpoint = getattr(lease, "checkpoint", None)
+    claimed = utcnow()
+    if checkpoint is not None:
         logger.info("research_resumed", extra={"job_id": lease.job_id, "person_id": lease.person_id})
     created = getattr(lease, "created_at", None)
     if created is not None and created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
-    queue_wait = (utcnow() - created).total_seconds() * 1000 if created is not None else 0
-    with person_performance(lease.job_id, lease.person_id, queue_wait_ms=queue_wait):
+    started = checkpoint.profile.started_at if checkpoint is not None else claimed
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    queue_wait = (started - created).total_seconds() * 1000 if created is not None else 0
+    prior_elapsed = (claimed - started).total_seconds() * 1000
+    with person_performance(
+        lease.job_id, lease.person_id, queue_wait_ms=queue_wait, prior_elapsed_ms=prior_elapsed
+    ):
         await _process_lease(store, orchestrator, lease, settings)
 
 
@@ -366,6 +374,7 @@ async def run_worker(settings=None, store=None, orchestrator=None, stop_event=No
         orchestrator = ResearchOrchestrator(settings, search, model, retrieval)
     worker_id = str(uuid4())
     active = set()
+    stop_waiter = asyncio.create_task(stop_event.wait())
     next_heartbeat = 0.0
     try:
         if not await retry_database(store, store.ready, raise_transient=True, stop_event=stop_event):
@@ -390,20 +399,21 @@ async def run_worker(settings=None, store=None, orchestrator=None, stop_event=No
                 if lease is None:
                     break
                 active.add(asyncio.create_task(process_lease(store, orchestrator, lease, settings)))
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=min(settings.WORKER_POLL_SECONDS, settings.WORKER_HEARTBEAT_SECONDS),
-                )
-            except TimeoutError:
-                pass
+            # Refill a freed slot promptly when there is queued work. Polling
+            # still detects new jobs while idle and bounds the heartbeat wait.
+            await asyncio.wait(
+                active | {stop_waiter},
+                timeout=min(settings.WORKER_POLL_SECONDS, settings.WORKER_HEARTBEAT_SECONDS),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
     except asyncio.CancelledError:
         if not stop_event.is_set():
             raise
     finally:
+        stop_waiter.cancel()
         for task in active:
             task.cancel()
-        await asyncio.gather(*active, return_exceptions=True)
+        await asyncio.gather(stop_waiter, *active, return_exceptions=True)
         if resources:
             await resources[0].aclose()
             await resources[1].close()

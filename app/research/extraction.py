@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections import ChainMap
+from collections.abc import AsyncIterator, Iterable, Mapping
 
 from bs4 import BeautifulSoup
 
@@ -79,7 +80,23 @@ def _json_objects(value, path: str = "$", *, depth: int = 0):
             yield from _json_objects(child, f"{path}[{index}]", depth=depth + 1)
 
 
-def _structured_nodes(page: object) -> list[tuple[str, dict, dict[str, dict]]]:
+def _reference_index(nodes: Iterable[dict]) -> dict[str, dict]:
+    references = {}
+    conflicts = set()
+    for node in nodes:
+        identifier = node.get("@id")
+        if not isinstance(identifier, str) or identifier in conflicts:
+            continue
+        previous = references.get(identifier, {})
+        if any(key in previous and previous[key] != value for key, value in node.items()):
+            conflicts.add(identifier)
+            references.pop(identifier, None)
+        else:
+            references[identifier] = previous | node
+    return references
+
+
+def _structured_nodes(page: object) -> list[tuple[str, dict, Mapping[str, dict]]]:
     roots = []
     captured = getattr(page, "captured_json", None)
     html = str(getattr(page, "html", "") or "")
@@ -124,34 +141,47 @@ def _structured_nodes(page: object) -> list[tuple[str, dict, dict[str, dict]]]:
                         person[key] = value
             roots.append((f"microdata[{index}]", person))
     nodes = []
+    share_fragments = sum(origin.startswith("jsonld[") for origin, _ in roots) > 1
+    fragments = []
+    shared_references = []
     for origin, root in roots:
         objects = list(_json_objects(root))
-        # Resolve only local graph references; never fetch JSON-LD contexts or IDs.
-        references = {}
-        conflicts = set()
-        for _, node in objects:
-            identifier = node.get("@id")
-            if not isinstance(identifier, str) or identifier in conflicts:
-                continue
-            previous = references.get(identifier, {})
-            if any(key in previous and previous[key] != value for key, value in node.items()):
-                conflicts.add(identifier)
-                references.pop(identifier, None)
-            else:
-                references[identifier] = previous | node
+        local_references = _reference_index(node for _, node in objects)
+        references: Mapping[str, dict] = local_references
+        # Resolve same-document fragment IDs across JSON-LD scripts using the
+        # page's default base. Keep conflicting IDs scoped to their own scripts.
+        if (
+            share_fragments
+            and origin.startswith("jsonld[")
+            and not any("@base" in node for _, node in objects)
+        ):
+            fragments.extend(
+                node
+                for _, node in objects
+                if isinstance(identifier := node.get("@id"), str)
+                and identifier.startswith("#")
+                and len(identifier) > 1
+            )
+            combined = ChainMap(local_references)
+            shared_references.append(combined)
+            references = combined
         nodes.extend(
             (f"{origin}{path}", node, references) for path, node in objects if "Person" in _schema_types(node)
         )
+    if len(shared_references) > 1:
+        page_references = _reference_index(fragments)
+        for combined in shared_references:
+            combined.maps.insert(0, page_references)
     return nodes
 
 
-def _node_value(value, references: dict[str, dict]):
+def _node_value(value, references: Mapping[str, dict]):
     if isinstance(value, dict) and isinstance(value.get("@id"), str):
         return references.get(value["@id"], value) | value
     return value
 
 
-def _expand_references(value, references: dict[str, dict], *, depth=0, seen=frozenset()):
+def _expand_references(value, references: Mapping[str, dict], *, depth=0, seen=frozenset()):
     if depth > 8:
         return value
     if isinstance(value, list):
@@ -168,7 +198,7 @@ def _expand_references(value, references: dict[str, dict], *, depth=0, seen=froz
     return value
 
 
-def _literal_name(value, references: dict[str, dict]) -> str | None:
+def _literal_name(value, references: Mapping[str, dict]) -> str | None:
     value = _node_value(value, references)
     value = value.get("name") if isinstance(value, dict) else value
     return value if isinstance(value, str) and 0 < len(value.strip()) <= 500 else None

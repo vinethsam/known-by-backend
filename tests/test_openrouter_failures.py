@@ -15,11 +15,46 @@ from app.providers.openrouter import OpenRouterClient, OpenRouterError, strict_j
 from app.providers.search import OpenRouterSearchProvider, SearchProviderError
 from app.providers.source_advisor import SourceAdvisor, SourceDecisionSet
 from app.research.budget import BudgetedModel
+from app.research.telemetry import person_performance
 from app.schemas import Contract, PersonSeed, ResearchMetrics, UsageRecord
 
 
 class DiagnosticResponse(Contract):
     name: str
+
+
+@pytest.mark.asyncio
+async def test_provider_prompts_omit_bookkeeping_but_keep_evidence_and_usage_context():
+    context = {
+        "job_id": "internal-job",
+        "person_id": "internal-person",
+        "source_id": "internal-source",
+        "fallback_from_model": "primary-model",
+        "unresolved_fields": ["subject"],
+    }
+    sent = []
+
+    def handler(request):
+        message = json.loads(request.content)["messages"][1]["content"]
+        sent.append(json.loads(message))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"name":"Jane"}'}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenRouterClient(settings(), http)
+        payload = {"content": "Jane earned a doctorate."}
+        result, usage = await client.complete(
+            DiagnosticResponse, "extraction", "Extract", payload, context, "v1"
+        )
+        await client.web_search("Jane university", 1, context)
+
+    assert result.name == "Jane"
+    assert sent == [
+        {"payload": payload, "context": {"unresolved_fields": ["subject"]}},
+        {"query": "Jane university", "context": {"unresolved_fields": ["subject"]}},
+    ]
+    assert usage[0].job_id == context["job_id"] and usage[0].person_id == context["person_id"]
+    assert usage[0].source_id == context["source_id"]
+    assert usage[0].fallback_from_model == context["fallback_from_model"]
 
 
 @pytest.mark.asyncio
@@ -499,7 +534,7 @@ async def test_long_retry_after_returns_to_durable_worker_without_early_retry():
 
 
 @pytest.mark.asyncio
-async def test_bounded_500_retries_retain_last_http_status() -> None:
+async def test_bounded_500_retries_retain_last_http_status(caplog, monkeypatch) -> None:
     attempts = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -511,7 +546,19 @@ async def test_bounded_500_retries_retain_last_http_status() -> None:
             request=request,
         )
 
-    error, emitted = await complete(handler, retries=1)
+    timeline = iter([0, 1, 1.25, 2])
+    monkeypatch.setattr("app.research.telemetry.perf_counter", lambda: next(timeline))
+    with (
+        caplog.at_level(logging.INFO, logger="app.research.telemetry"),
+        person_performance("job-1", "person-1", queue_wait_ms=1000, prior_elapsed_ms=500),
+    ):
+        error, emitted = await complete(handler, retries=1)
+    (performance,) = [
+        record.performance for record in caplog.records if record.getMessage() == "person_performance"
+    ]
+    assert performance["provider_backoff_ms"] == 250
+    assert performance["total_person_ms"] == 2000
+    assert performance["person_end_to_end_ms"] == 3500
 
     assert attempts == 2
     assert len(error.usage) == len(emitted) == 2

@@ -1059,13 +1059,14 @@ class Store:
         # escaped characters across the document, including preserved input
         # metadata such as a JSON-escaped NUL that PostgreSQL text cannot hold.
         rows = session.execute(
-            select(PersonTaskRow.error_code, ProfileRow.data_json)
+            select(PersonTaskRow.error_code, PersonTaskRow.status, ProfileRow.data_json)
             .select_from(PersonTaskRow)
             .outerjoin(ProfileRow, ProfileRow.person_id == PersonTaskRow.person_id)
             .where(PersonTaskRow.job_id == job_id, PersonTaskRow.attempts > 0)
         )
-        summaries, unmeasured = [], 0
-        for error_code, profile in rows:
+        summaries, unmeasured, completed_people = [], 0, 0
+        for error_code, status, profile in rows:
+            completed_people += status in SUCCESS_STATUSES
             metrics = profile.get("metrics") if isinstance(profile, dict) else None
             accounting = metrics.get("accounting") if isinstance(metrics, dict) else None
             if isinstance(accounting, dict) and "cost_complete" in accounting:
@@ -1076,7 +1077,23 @@ class Store:
                 )
             else:
                 unmeasured += 1
-        return aggregate_person_summaries(summaries, unmeasured_people=unmeasured)
+        summary = aggregate_person_summaries(summaries, unmeasured_people=unmeasured)
+        job = session.get(JobRow, job_id)
+        summary["completed_people"] = completed_people
+        if job is not None and job.completed_at is not None:
+            created, started, completed = map(_aware, (job.created_at, job.started_at, job.completed_at))
+            elapsed = max(0, (completed - created).total_seconds())
+            summary["batch_end_to_end_ms"] = round(elapsed * 1000, 3)
+            summary["batch_queue_wait_ms"] = (
+                round(max(0, (started - created).total_seconds()) * 1000, 3) if started else None
+            )
+            summary["batch_processing_wall_ms"] = (
+                round(max(0, (completed - started).total_seconds()) * 1000, 3) if started else None
+            )
+            summary["completed_people_per_minute"] = (
+                round(completed_people * 60 / elapsed, 3) if elapsed else None
+            )
+        return summary
 
     def _refresh_job_status(self, session: Session, job: JobRow) -> None:
         if job.status == JobStatus.cancelled.value:

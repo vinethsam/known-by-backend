@@ -177,6 +177,7 @@ class Settings(BaseSettings):
     OPENROUTER_TEMPERATURE: float = Field(default=0, ge=0, le=1)
     OPENROUTER_MAX_TOKENS: int = Field(default=3000, ge=100, le=16000)
     OPENROUTER_DEEPSEEK_EXTRACTION_MAX_TOKENS: int = Field(default=6000, ge=100, le=16000)
+    OPENROUTER_DEEPSEEK_EXTRACTION_REASONING: bool = False
     OPENROUTER_RESPONSE_FORMAT: Literal["json_schema", "json_object"] = "json_schema"
     MAX_SEARCH_QUERIES_PER_PERSON: int = Field(default=6, ge=1, le=30)
     MAX_SEARCH_RESULTS_PER_QUERY: int = Field(default=8, ge=1, le=20)

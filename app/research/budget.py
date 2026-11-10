@@ -168,7 +168,7 @@ class BudgetedModel:
                 context,
                 f"{prompt_version}-deepseek-compact",
                 max_output_tokens=self.settings.OPENROUTER_DEEPSEEK_EXTRACTION_MAX_TOKENS,
-                reasoning={"enabled": False},
+                reasoning={"enabled": self.settings.OPENROUTER_DEEPSEEK_EXTRACTION_REASONING},
             )
         except OpenRouterError as error:
             if error.exception_type != "OutputTokenLimit" and getattr(

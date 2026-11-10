@@ -273,6 +273,10 @@ def test_terminal_write_preserves_grounded_result_with_escaped_nul(store, caplog
     ]
     assert len(summaries) == 1
     assert summaries[0]["actual_api_cost"] == pytest.approx(0.01)
+    assert summaries[0]["completed_people"] == 1
+    assert summaries[0]["batch_end_to_end_ms"] >= summaries[0]["batch_processing_wall_ms"] >= 0
+    assert summaries[0]["batch_end_to_end_ms"] >= summaries[0]["batch_queue_wait_ms"] >= 0
+    assert summaries[0]["completed_people_per_minute"] > 0
 
 
 def test_diagnostic_read_failure_keeps_terminal_result_committed(store, monkeypatch, caplog):

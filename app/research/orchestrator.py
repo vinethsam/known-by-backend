@@ -11,7 +11,7 @@ from contextlib import aclosing
 from time import monotonic
 
 from app.config import Settings
-from app.processing import document_metadata, process_content
+from app.processing import PreparedContent, document_metadata, prepare_content
 from app.providers.openrouter import OPENROUTER_SCHEMA_ERROR, OpenRouterError
 from app.providers.search import SearchProviderError
 from app.providers.source_advisor import SourceAdvisor, SourceDecision
@@ -33,7 +33,6 @@ from app.research.discovery import (
 )
 from app.research.extraction import (
     DETERMINISTIC_EXTRACTION_VERSION,
-    deterministic_evidence,
     extract_chunks,
     extraction_chunk_key,
 )
@@ -149,9 +148,11 @@ def _process_source(
     seed: PersonSeed,
     settings: Settings,
     *,
+    content: PreparedContent | None = None,
     processing_stats=None,
 ) -> list[str]:
-    chunks = process_content(page, seed, settings, processing_stats=processing_stats)
+    content = content if content is not None else prepare_content(page, seed)
+    chunks = content.chunks(seed, settings, processing_stats=processing_stats)
     text = "\n\n".join(chunks)
     # A captured-JSON response may have no HTML. Hash its actual payload instead
     # of treating every such source as the same empty page.
@@ -427,8 +428,15 @@ class ResearchOrchestrator:
                     raise FetchError("SOURCE_HTTP_ERROR")
                 with stage("processing_ms"):
                     processing_stats = {}
+                    content = prepare_content(page, seed)
                     chunks = _process_source(
-                        source, candidate, page, seed, settings, processing_stats=processing_stats
+                        source,
+                        candidate,
+                        page,
+                        seed,
+                        settings,
+                        content=content,
+                        processing_stats=processing_stats,
                     )
                 source.processing_status = "processed"
                 evidence_changed = True
@@ -469,7 +477,9 @@ class ResearchOrchestrator:
                     metrics.sources_accepted += 1
                 grounded_blocks = []
                 deterministic_model = f"deterministic:{DETERMINISTIC_EXTRACTION_VERSION}"
-                for evidence, response in deterministic_evidence(page, seed):
+                for evidence, response in content.structured:
+                    if not response.claims:
+                        continue
                     rejected_claims: Counter[str] = Counter()
                     extracted, reasons = validate_claims(
                         response,
@@ -498,16 +508,10 @@ class ResearchOrchestrator:
                         )
                     if extracted and not rejected_claims:
                         grounded_blocks.append(evidence)
+                initial_chunk_count = len(chunks)
                 if grounded_blocks:
-                    initial_chunk_count = len(chunks)
-                    chunks = process_content(
-                        page,
-                        seed,
-                        settings,
-                        accepted_evidence=grounded_blocks,
-                    )
-                else:
-                    initial_chunk_count = len(chunks)
+                    with stage("processing_ms"):
+                        chunks = content.chunks(seed, settings, accepted_evidence=grounded_blocks)
                 processing_key = (
                     f"{source.source_id}:{source.content_hash}:{DETERMINISTIC_EXTRACTION_VERSION}"
                 )

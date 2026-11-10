@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -24,6 +24,8 @@ PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
 PERSISTENCE_FAILED_OUTCOME = "persistence_failed"
 TIMINGS = (
     "queue_wait_ms",
+    "prior_elapsed_ms",
+    "person_end_to_end_ms",
     "discovery_ms",
     "source_validation_ms",
     "retrieval_ms",
@@ -31,6 +33,7 @@ TIMINGS = (
     "extraction_ms",
     "reconciliation_ms",
     "persistence_ms",
+    "provider_backoff_ms",
     "total_person_ms",
 )
 COUNTERS = (
@@ -93,6 +96,7 @@ def _proven_unsent(record: UsageRecord) -> bool:
 def _usage_summary(records: list[UsageRecord], *, unrecorded_calls: int = 0) -> dict:
     reported = sum(record.cost for record in records if record.cost is not None)
     unknown = unrecorded_calls + sum(record.cost is None and not _proven_unsent(record) for record in records)
+    latencies = [record.latency_ms for record in records if record.latency_ms > 0]
     return {
         "models": sorted({record.model for record in records}),
         "inference_providers": sorted(
@@ -100,7 +104,17 @@ def _usage_summary(records: list[UsageRecord], *, unrecorded_calls: int = 0) -> 
         ),
         "model_calls": sum(not _proven_unsent(record) for record in records) + unrecorded_calls,
         "successful_calls": sum(record.success for record in records),
+        "extraction_calls": sum(
+            record.role == "extraction" and not _proven_unsent(record) for record in records
+        ),
+        "successful_extraction_calls": sum(
+            record.role == "extraction" and record.success for record in records
+        ),
         "output_limit_failures": sum(record.exception_type == "OutputTokenLimit" for record in records),
+        "invalid_structured_replies": sum(
+            record.error_code == "OPENROUTER_SCHEMA_ERROR" and record.exception_type != "OutputTokenLimit"
+            for record in records
+        ),
         "retries": sum(record.retry_attempt > 0 for record in records),
         "fallback_calls": sum(
             record.fallback_from_model is not None and not _proven_unsent(record) for record in records
@@ -108,6 +122,18 @@ def _usage_summary(records: list[UsageRecord], *, unrecorded_calls: int = 0) -> 
         "input_tokens": sum(record.prompt_tokens for record in records),
         "output_tokens": sum(record.completion_tokens for record in records),
         "reported_reasoning_tokens": sum(record.reasoning_tokens or 0 for record in records),
+        "latency_samples": len(latencies),
+        "attempt_latency_ms": round(sum(latencies), 3),
+        "mean_attempt_latency_ms": round(sum(latencies) / len(latencies), 3) if latencies else None,
+        "reported_failed_api_cost": round(
+            sum(record.cost or 0 for record in records if not record.success), 8
+        ),
+        "reported_retry_api_cost": round(
+            sum(record.cost or 0 for record in records if record.retry_attempt), 8
+        ),
+        "reported_fallback_api_cost": round(
+            sum(record.cost or 0 for record in records if record.fallback_from_model is not None), 8
+        ),
         "reported_api_cost": round(reported, 8),
         "actual_api_cost": None if unknown else round(reported, 8),
         "cost_complete": not unknown,
@@ -127,8 +153,10 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
     ledger = list({record.usage_id: record for record in result.usage}.values())
     metrics = result.profile.metrics
     operations = {}
+    attempts_by_model = defaultdict(list)
     for record in ledger:
         operations.setdefault(record.operation, []).append(record)
+        attempts_by_model[record.response_model or record.model].append(record)
     unrecorded = max(0, metrics.llm_calls - sum(not _proven_unsent(record) for record in ledger))
     accounting = _usage_summary(ledger, unrecorded_calls=unrecorded)
     breakdown = {operation: _usage_summary(records) for operation, records in sorted(operations.items())}
@@ -138,6 +166,8 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
     field_sources = {}
     evidence_ids = set()
     accepted_claim_ids = set()
+    accepted_claims_by_model = defaultdict(set)
+    supported_fields_by_model = defaultdict(set)
     by_claim = {claim.claim_id: claim for claim in result.claims}
     source_ids_by_url = {
         url: source.source_id
@@ -177,6 +207,11 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
             accepted_claim_ids.update(supporting_claim_ids)
             if decision.selected_claim_id:
                 accepted_claim_ids.add(decision.selected_claim_id)
+            for claim_id in supporting_claim_ids | {decision.selected_claim_id}:
+                claim = by_claim.get(claim_id)
+                if claim and claim.person_id == result.profile.person_id and claim.field == field_name:
+                    accepted_claims_by_model[claim.extraction_model].add(claim_id)
+                    supported_fields_by_model[claim.extraction_model].add(field_name.value)
             evidence_ids.update(decision.supporting_source_ids)
             evidence_ids.update(source_ids_by_url.get(url, "url:" + url) for url in decision.sources)
             evidence_ids.update(
@@ -215,9 +250,22 @@ def summarize_person(result: ResearchResult, *, targeted_searches: Iterable[dict
         record for record in ledger if record.operation == "web_search" and not _proven_unsent(record)
     ]
     reported_searches = sum(record.web_search_requests or 0 for record in searches)
+    grounded_claims_by_model = Counter(
+        claim.extraction_model for claim in by_claim.values() if claim.person_id == result.profile.person_id
+    )
+    by_model = {
+        model: {
+            **_usage_summary(attempts_by_model[model]),
+            "claims_grounded": grounded_claims_by_model[model],
+            "claims_accepted": len(accepted_claims_by_model[model]),
+            "supported_fields": sorted(supported_fields_by_model[model]),
+        }
+        for model in sorted(attempts_by_model.keys() | grounded_claims_by_model.keys())
+    }
     summary = {
         **accounting,
         "operations": breakdown,
+        "by_model": by_model,
         "discovery_requests": metrics.queries_performed,
         "reported_search_requests": reported_searches,
         "actual_search_requests": (
@@ -308,6 +356,63 @@ def summarize_job(results: JobResults) -> dict:
     return aggregate_person_summaries(summaries)
 
 
+def _aggregate_model_summaries(summaries: list[dict]) -> dict:
+    entries_by_model = defaultdict(list)
+    for summary in summaries:
+        for model, metrics in summary.get("by_model", {}).items():
+            entries_by_model[model].append(metrics)
+    by_model = {}
+    for model, entries in sorted(entries_by_model.items()):
+        totals = {
+            key: sum(entry[key] for entry in entries)
+            for key in (
+                "model_calls",
+                "successful_calls",
+                "extraction_calls",
+                "successful_extraction_calls",
+                "output_limit_failures",
+                "invalid_structured_replies",
+                "retries",
+                "fallback_calls",
+                "input_tokens",
+                "output_tokens",
+                "reported_reasoning_tokens",
+                "latency_samples",
+                "claims_grounded",
+                "claims_accepted",
+                "unknown_cost_calls",
+            )
+        }
+        totals.update(
+            {
+                key: round(sum(entry[key] for entry in entries), 8)
+                for key in (
+                    "reported_api_cost",
+                    "reported_failed_api_cost",
+                    "reported_retry_api_cost",
+                    "reported_fallback_api_cost",
+                )
+            }
+        )
+        latency = sum(entry["attempt_latency_ms"] for entry in entries)
+        samples = totals["latency_samples"]
+        totals.update(
+            attempt_latency_ms=round(latency, 3),
+            mean_attempt_latency_ms=round(latency / samples, 3) if samples else None,
+            actual_api_cost=None if totals["unknown_cost_calls"] else totals["reported_api_cost"],
+            cost_complete=not totals["unknown_cost_calls"],
+            models=sorted({name for entry in entries for name in entry["models"]}),
+            inference_providers=sorted(
+                {provider for entry in entries for provider in entry["inference_providers"]}
+            ),
+            supported_fields=dict(
+                sorted(Counter(field for entry in entries for field in entry["supported_fields"]).items())
+            ),
+        )
+        by_model[model] = totals
+    return by_model
+
+
 def aggregate_person_summaries(summaries: list[dict], *, unmeasured_people: int = 0) -> dict:
     """Aggregate persisted compact accounting once a job becomes terminal.
 
@@ -345,6 +450,8 @@ def aggregate_person_summaries(summaries: list[dict], *, unmeasured_people: int 
         "cost_complete": complete,
         "unknown_cost_calls": sum(summary["unknown_cost_calls"] for summary in summaries),
         "model_calls_by_operation": dict(sorted(calls_by_operation.items())),
+        "model_performance_people_measured": sum("by_model" in summary for summary in summaries),
+        "by_model": _aggregate_model_summaries(summaries),
         "research_outcomes": dict(
             Counter(summary.get("research_outcome", "unknown") for summary in summaries)
         ),
@@ -407,7 +514,9 @@ def stage(name: str) -> Iterator[None]:
 
 
 @contextmanager
-def person_performance(job_id: str, person_id: str, *, queue_wait_ms: float = 0) -> Iterator[None]:
+def person_performance(
+    job_id: str, person_id: str, *, queue_wait_ms: float = 0, prior_elapsed_ms: float = 0
+) -> Iterator[None]:
     # The worker owns the outer lifetime including persistence. Direct research
     # callers still receive exactly one event through the nested orchestrator scope.
     if _current.get() is not None:
@@ -415,12 +524,16 @@ def person_performance(job_id: str, person_id: str, *, queue_wait_ms: float = 0)
         return
     performance = PersonPerformance()
     performance.values["queue_wait_ms"] = max(0, queue_wait_ms)
+    performance.values["prior_elapsed_ms"] = max(0, prior_elapsed_ms)
     token = _current.set(performance)
     started = perf_counter()
     try:
         yield
     finally:
         performance.values["total_person_ms"] = (perf_counter() - started) * 1000
+        performance.values["person_end_to_end_ms"] = sum(
+            performance.values[key] for key in ("queue_wait_ms", "prior_elapsed_ms", "total_person_ms")
+        )
         _current.reset(token)
         logger.info(
             "person_performance",

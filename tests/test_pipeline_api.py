@@ -661,6 +661,52 @@ async def test_batch_worker_reuses_retrieval_and_stops(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_worker_refills_slot_before_poll_while_another_person_is_running(tmp_path):
+    settings = configured(
+        tmp_path, MAX_CONCURRENT_PEOPLE=2, WORKER_POLL_SECONDS=20, WORKER_HEARTBEAT_SECONDS=20
+    )
+    store = migrated_store(settings)
+    names = ["First Person", "Slow Person", "Next Person"]
+    job = store.create_job([PersonSeed(full_name=name) for name in names])
+    slow_started, release_slow, next_started, stop = (asyncio.Event() for _ in range(4))
+
+    class Pipeline:
+        async def research(self, _job_id, person_id, seed, _checkpoint):
+            if seed.full_name == "First Person":
+                await slow_started.wait()
+            elif seed.full_name == "Slow Person":
+                slow_started.set()
+                await release_slow.wait()
+            else:
+                next_started.set()
+            return ResearchResult(
+                profile=PersonProfile(
+                    person_id=person_id,
+                    input_name=seed.full_name,
+                    status="review_required",
+                    fields={field: FieldDecision() for field in ProfileField},
+                    profile_confidence=50,
+                    coverage=50,
+                    review_required=True,
+                )
+            )
+
+    worker = asyncio.create_task(run_worker(settings, store, Pipeline(), stop))
+    try:
+        async with asyncio.timeout(5):
+            await next_started.wait()
+            assert slow_started.is_set()
+            assert (await asyncio.to_thread(store.get_job, job.job_id)).counts["review_required"] >= 1
+            release_slow.set()
+            while (await asyncio.to_thread(store.get_job, job.job_id)).status != "completed":
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await worker
+    assert [person.result.profile.input_name for person in store.get_results(job.job_id).people] == names
+
+
+@pytest.mark.asyncio
 async def test_worker_retries_checkpoint_and_finish_without_restarting_research(tmp_path, monkeypatch):
     settings = configured(tmp_path, PERSON_TIMEOUT_SECONDS=0.4)
     store = migrated_store(settings)

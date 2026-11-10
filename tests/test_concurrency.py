@@ -61,11 +61,13 @@ def response(content='{"claims":[]}'):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("valid_at_limit", [False, True])
-async def test_deepseek_output_budget_and_recovery_use_only_one_luna_fallback(valid_at_limit):
-    settings = configured(OPENROUTER_MAX_RETRIES=1).model_copy(
-        update={"OPENROUTER_EXTRACTION_MODEL": DEEPSEEK_EXTRACTION_MODEL}
-    )
+@pytest.mark.parametrize("valid_at_limit,reasoning_enabled", [(False, False), (True, True)])
+async def test_deepseek_output_budget_and_recovery_use_only_one_luna_fallback(
+    valid_at_limit, reasoning_enabled
+):
+    settings = configured(
+        OPENROUTER_MAX_RETRIES=1, OPENROUTER_DEEPSEEK_EXTRACTION_REASONING=reasoning_enabled
+    ).model_copy(update={"OPENROUTER_EXTRACTION_MODEL": DEEPSEEK_EXTRACTION_MODEL})
     metrics, usage, requests = ResearchMetrics(), [], []
     content = '{"claims":[{"field":"full_name","value":"Jane Doe","evidence":"Jane Doe","subject_name":"Jane Doe"}]}'
     snapshot = None
@@ -116,7 +118,7 @@ async def test_deepseek_output_budget_and_recovery_use_only_one_luna_fallback(va
         expected_model = DEEPSEEK_EXTRACTION_MODEL if valid_at_limit else LUNA_EXTRACTION_FALLBACK
         assert await extract(client) == [("Jane Doe", expected_model)]
         assert requests[0]["max_tokens"] == 6000
-        assert requests[0]["reasoning"] == {"enabled": False}
+        assert requests[0]["reasoning"] == {"enabled": reasoning_enabled}
         assert requests[0]["response_format"]["type"] == "json_schema"
         assert "shortest contiguous literal evidence" in requests[0]["messages"][0]["content"]
         assert len(requests) == (1 if valid_at_limit else 2)
@@ -124,6 +126,7 @@ async def test_deepseek_output_budget_and_recovery_use_only_one_luna_fallback(va
             assert snapshot is not None
             assert requests[1]["model"] == LUNA_EXTRACTION_FALLBACK
             assert requests[1]["max_tokens"] == settings.OPENROUTER_MAX_TOKENS
+            assert "reasoning" not in requests[1]
             assert usage[0].exception_type == "OutputTokenLimit"
             assert usage[1].fallback_from_model == DEEPSEEK_EXTRACTION_MODEL
             assert (
@@ -1091,10 +1094,27 @@ async def test_missing_education_is_searched_before_broad_candidates_exhaust_sou
 async def test_grounded_structured_facts_avoid_extraction_but_ambiguous_prose_still_uses_model(
     monkeypatch, ambiguous_paragraph
 ):
+    from app import processing
+    from app.research import extraction
+
     async def safe(url, settings=None):
         return url
 
     monkeypatch.setattr("app.retrieval.service.validate_public_url", safe)
+    conversions = []
+    structured_evidence = extraction.structured_evidence
+    html_to_markdown = processing.html_to_markdown
+
+    def count_structured(*args, **kwargs):
+        conversions.append("structured")
+        return structured_evidence(*args, **kwargs)
+
+    def count_markdown(*args, **kwargs):
+        conversions.append("markdown")
+        return html_to_markdown(*args, **kwargs)
+
+    monkeypatch.setattr(extraction, "structured_evidence", count_structured)
+    monkeypatch.setattr(processing, "html_to_markdown", count_markdown)
     settings = configured(
         MAX_SOURCES_PER_PERSON=1,
         OPENROUTER_MAX_RETRIES=0,
@@ -1174,6 +1194,7 @@ async def test_grounded_structured_facts_avoid_extraction_but_ambiguous_prose_st
             await retrieval.close()
 
     assert result.sources[0].processing_status == "extracted"
+    assert conversions == ["structured", "markdown"]
     assert result.sources[0].identity.score >= settings.SCORING.identity_review_threshold
     assert result.profile.fields[ProfileField.organisation].researched_value == "Example Foundation"
     assert result.profile.fields[ProfileField.job_title].researched_value == "Research Director"
@@ -1278,16 +1299,21 @@ def test_cumulative_accounting_distinguishes_unknown_cost_input_certainty_and_cr
         completion_tokens=20,
         cost=0.12,
         web_search_requests=1,
+        latency_ms=40,
     )
     unknown = UsageRecord(
         job_id="job",
         person_id="person",
         role="extraction",
         operation="extract_claims",
-        model="extract-model",
+        model="extract-requested",
+        response_model="extract-model",
+        inference_provider="Test Provider",
+        fallback_from_model="primary-model",
         prompt_version="v1",
         prompt_tokens=30,
         completion_tokens=40,
+        latency_ms=60,
     )
     result = ResearchResult(profile=profile, usage=[paid, paid.model_copy(), unknown])
     result.profile.metrics.llm_calls = 2
@@ -1303,6 +1329,13 @@ def test_cumulative_accounting_distinguishes_unknown_cost_input_certainty_and_cr
     assert summary["actual_api_cost"] is None and not summary["cost_complete"]
     assert summary["operations"]["web_search"]["actual_api_cost"] == 0.12
     assert summary["operations"]["extract_claims"]["actual_api_cost"] is None
+    assert summary["attempt_latency_ms"] == 100
+    assert summary["mean_attempt_latency_ms"] == 50
+    extraction = summary["by_model"]["extract-model"]
+    assert extraction["models"] == ["extract-requested"]
+    assert extraction["inference_providers"] == ["Test Provider"]
+    assert extraction["fallback_calls"] == extraction["successful_extraction_calls"] == 1
+    assert extraction["actual_api_cost"] is None
     assert summary["independently_supported_fields"] == ["organisation", "university_name"]
     assert "full_name" in summary["unresolved_required_fields"]
     assert summary["sources_used_as_evidence"] == 2
@@ -1320,6 +1353,11 @@ def test_cumulative_accounting_distinguishes_unknown_cost_input_certainty_and_cr
     assert aggregate["average_actual_cost_per_attempted_person"] == 0.2
     assert aggregate["average_actual_cost_per_enriched_person"] == 0.2
     assert aggregate["average_actual_cost_per_supported_field"] == 0.1
+    assert aggregate["model_performance_people_measured"] == 2
+    assert aggregate["by_model"]["extract-model"]["reported_fallback_api_cost"] == 0.16
+    assert aggregate["by_model"]["extract-model"]["mean_attempt_latency_ms"] == 60
+    legacy = {key: value for key, value in measured.items() if key != "by_model"}
+    assert aggregate_person_summaries([legacy, measured])["model_performance_people_measured"] == 1
     incomplete = aggregate_person_summaries([measured], unmeasured_people=1)
     assert incomplete["attempted_people"] == 2 and incomplete["unmeasured_people"] == 1
     assert incomplete["actual_api_cost"] is None
@@ -1341,6 +1379,16 @@ def test_cumulative_accounting_distinguishes_unknown_cost_input_certainty_and_cr
             extraction_model="extract-model",
         )
     )
-    assert "full_name" in record_person_result(result)["independently_supported_fields"]
+    name_supported = record_person_result(result)
+    assert "full_name" in name_supported["independently_supported_fields"]
+    extraction = name_supported["by_model"]["extract-model"]
+    assert extraction["claims_grounded"] == extraction["claims_accepted"] == 1
+    assert extraction["supported_fields"] == ["full_name"]
+    assert aggregate_person_summaries([name_supported, name_supported])["by_model"]["extract-model"][
+        "supported_fields"
+    ] == {"full_name": 2}
     result.claims[0].normalised_value = "other person"
-    assert "full_name" not in record_person_result(result)["independently_supported_fields"]
+    name_unsupported = record_person_result(result)
+    assert "full_name" not in name_unsupported["independently_supported_fields"]
+    assert name_unsupported["by_model"]["extract-model"]["claims_accepted"] == 0
+    assert name_unsupported["by_model"]["extract-model"]["supported_fields"] == []

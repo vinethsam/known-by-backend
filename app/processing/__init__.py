@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Collection, Mapping, MutableMapping
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 from app.seed_context import seed_context_values
+
+if TYPE_CHECKING:
+    from app.schemas import ExtractionResponse
 
 _TECHNICAL_ELEMENTS = ("script", "style", "noscript", "template")
 _EXCESS_BLANK_LINES = re.compile(r"\n(?:[ \t]*\n){2,}")
@@ -373,15 +377,28 @@ def processed_chunks(
     return _chunk_text(selected, settings)
 
 
-def process_content(
-    page: object,
-    seed: object,
-    settings: object,
-    *,
-    accepted_evidence: Collection[str] = (),
-    processing_stats: MutableMapping[str, int] | None = None,
-) -> list[str]:
-    """Convert a retrieved page to downstream chunks for LLM extraction."""
+@dataclass(frozen=True)
+class PreparedContent:
+    text: str
+    structured: list[tuple[str, ExtractionResponse]]
+
+    def chunks(
+        self,
+        seed: object,
+        settings: object,
+        *,
+        accepted_evidence: Collection[str] = (),
+        processing_stats: MutableMapping[str, int] | None = None,
+    ) -> list[str]:
+        # Remove only exact, fully grounded structured projections. Unresolved
+        # relationships and ordinary prose still reach model extraction.
+        blocks = [evidence for evidence, _ in self.structured if evidence not in accepted_evidence]
+        text = "\n\n".join([self.text, *blocks]).strip() if blocks else self.text
+        return processed_chunks(text, seed, settings, processing_stats=processing_stats)
+
+
+def prepare_content(page: object, seed: object) -> PreparedContent:
+    """Prepare text and structured projections once for both extraction paths."""
 
     from app.research.extraction import structured_evidence
 
@@ -398,13 +415,21 @@ def process_content(
             base_url=getattr(page, "final_url", None),
             seed=seed,
         )
-    # Preserve JSON-LD before the HTML converter removes script elements. An
-    # accepted fact can be excluded only by its exact, fully validated block;
-    # unresolved relationships and all ordinary prose still reach extraction.
-    blocks = [evidence for evidence, _ in structured if evidence not in accepted_evidence]
-    if blocks:
-        text = "\n\n".join([text, *blocks]).strip()
-    return processed_chunks(text, seed, settings, processing_stats=processing_stats)
+    return PreparedContent(text, structured)
+
+
+def process_content(
+    page: object,
+    seed: object,
+    settings: object,
+    *,
+    accepted_evidence: Collection[str] = (),
+    processing_stats: MutableMapping[str, int] | None = None,
+) -> list[str]:
+    """Convert a retrieved page to downstream chunks for LLM extraction."""
+    return prepare_content(page, seed).chunks(
+        seed, settings, accepted_evidence=accepted_evidence, processing_stats=processing_stats
+    )
 
 
 __all__ = ["html_to_markdown", "process_content", "processed_chunks"]

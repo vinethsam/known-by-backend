@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.config import Settings
 from app.processing import html_to_markdown, process_content, processed_chunks
 from app.research.claims import validate_claims
 from app.research.extraction import deterministic_evidence
 from app.research.identity import assess_identity
+from app.research.reconciliation import reconcile
 from app.retrieval.service import RetrievedPage
-from app.schemas import PersonSeed, ProfileField, SourceRecord
+from app.schemas import PersonSeed, ProfileField, SourceRecord, SourceType
 
 
 def settings(**overrides):
@@ -392,6 +395,101 @@ def test_each_explicit_credential_issuer_keeps_its_degree_and_subject_associatio
     ]
     assert all(len({claim.fact_group for claim in group}) == 1 for group in groups)
     assert len({group[0].fact_group for group in groups}) == 3
+
+
+def test_linked_credentials_across_jsonld_scripts_preserve_two_grounded_qualifications():
+    seed = PersonSeed(full_name="Ada Lovelace", organisation="Analytical Society")
+    blocks = [
+        {
+            "@type": "Person",
+            "name": seed.full_name,
+            "worksFor": {"@type": "Organization", "name": seed.organisation},
+            "hasCredential": [{"@id": "#bsc"}, {"@id": "#msc"}],
+        },
+        {
+            "@graph": [
+                {
+                    "@id": fragment,
+                    "@type": "EducationalOccupationalCredential",
+                    "name": degree,
+                    "about": {"@id": subject},
+                    "issuer": {"@id": institution},
+                }
+                for fragment, degree, subject, institution in (
+                    ("#bsc", "BSc", "#math", "#example"),
+                    ("#msc", "MSc", "#computing", "#analytical"),
+                )
+            ]
+        },
+        {
+            "@graph": [
+                {"@id": fragment, "@type": kind, "name": name}
+                for fragment, kind, name in (
+                    ("#example", "CollegeOrUniversity", "Example University"),
+                    ("#analytical", "CollegeOrUniversity", "Analytical Institute"),
+                    ("#math", "DefinedTerm", "Mathematics"),
+                    ("#computing", "DefinedTerm", "Computing"),
+                )
+            ]
+        },
+    ]
+    url = "https://example.org/ada"
+    page = RetrievedPage(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        html="".join(f'<script type="application/ld+json">{json.dumps(block)}</script>' for block in blocks),
+    )
+    cfg = settings()
+    text = "\n\n".join(process_content(page, seed, cfg))
+    source = SourceRecord(
+        person_id="person",
+        requested_url=url,
+        final_url=url,
+        canonical_url=url,
+        domain="example.org",
+        source_type=SourceType.university,
+        authority_score=0.95,
+        identity=assess_identity(seed, text, cfg.SCORING),
+    )
+    evidence_batches = deterministic_evidence(page, seed)
+    claims = []
+    for evidence, response in evidence_batches:
+        grounded, reasons = validate_claims(response, seed, source, evidence, "deterministic:structured-v1")
+        assert not reasons
+        assert evidence in text
+        claims.extend(grounded)
+
+    profile = reconcile("person", seed, claims, [source], cfg.SCORING)
+    fields = (ProfileField.university_name, ProfileField.degree_type, ProfileField.subject)
+    assert {tuple(record.fields[field].value for field in fields) for record in profile.records} == {
+        ("Example University", "Bachelor's Degree", "Mathematics"),
+        ("Analytical Institute", "Master's Degree", "Computing"),
+    }
+    assert all(record.fields[field].sources == [url] for record in profile.records for field in fields)
+    assert process_content(page, seed, cfg, accepted_evidence=[text for text, _ in evidence_batches]) == []
+
+
+@pytest.mark.parametrize("ambiguous", ["conflict", "custom_base"])
+def test_cross_script_fragments_require_unambiguous_default_base(ambiguous):
+    person = {"@type": "Person", "name": "Ada Lovelace", "hasCredential": {"@id": "#degree"}}
+    credential = {"@type": "EducationalOccupationalCredential", "@id": "#degree", "name": "MSc"}
+    if ambiguous == "conflict":
+        blocks = [person, credential, {**credential, "name": "MBA"}]
+    else:
+        blocks = [person, {**credential, "@context": {"@base": "https://other.example.org/"}}]
+    page = RetrievedPage(
+        requested_url="https://example.org/ada",
+        final_url="https://example.org/ada",
+        status=200,
+        html="".join(f'<script type="application/ld+json">{json.dumps(block)}</script>' for block in blocks),
+    )
+    claims = [
+        claim
+        for _, response in deterministic_evidence(page, {"full_name": "Ada Lovelace"})
+        for claim in response.claims
+    ]
+    assert [claim.field for claim in claims] == [ProfileField.full_name]
 
 
 def test_exact_repeated_evidence_blocks_save_chunks_without_dropping_unique_education():

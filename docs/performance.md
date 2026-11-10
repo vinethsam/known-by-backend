@@ -15,7 +15,9 @@ Existing persisted model-attempt usage remains the durable provider ledger.
 
 | Duration | Meaning |
 | --- | --- |
-| `queue_wait_ms` | Task creation to attempt start; retries include elapsed time since original creation |
+| `queue_wait_ms` | Task creation to the first research start available to the worker |
+| `prior_elapsed_ms` | Time from the stored research start to a resumed lease, including earlier work and recovery waits |
+| `person_end_to_end_ms` | Initial queue wait, prior elapsed time, and current lease wall time |
 | `discovery_ms` | Discovery requests and follow-up query planning |
 | `source_validation_ms` | Source-advisor candidate validation |
 | `retrieval_ms` | Retrieval work including cache/safety checks and waiting for fetch slots |
@@ -23,12 +25,14 @@ Existing persisted model-attempt usage remains the durable provider ledger.
 | `extraction_ms` | Structured claim extraction, including retries/checkpoints inside a call |
 | `reconciliation_ms` | Deterministic profile reconciliation |
 | `persistence_ms` | Checkpoint and terminal persistence calls |
-| `total_person_ms` | Wall time for the attempt, excluding queue wait |
+| `provider_backoff_ms` | Time spent sleeping between retries inside OpenRouter transport |
+| `total_person_ms` | Wall time for the current lease |
 
 Stage durations measure accumulated work, not mutually exclusive wall-clock slices.
 Overlapping retrieval/extraction and nested persistence mean their sum can exceed
 `total_person_ms`. Direct orchestrator calls have no queue-wait information and report
-zero for that field; the worker supplies the full attempt/persistence boundary.
+zero for that field. A resumed lease separates earlier elapsed time when it has a
+checkpoint. Without that checkpoint, the worker can only measure from the current lease.
 
 | Counter | Meaning |
 | --- | --- |
@@ -78,6 +82,25 @@ input rows and cancellations before research are excluded from attempted-person
 denominators. Aggregation uses retained compact summaries rather than rereading all
 evidence or performing historical backfills.
 
+`by_model` groups durable attempts by the returned model when available and the
+requested model otherwise. It lists requested aliases and observed inference providers.
+The same report tracks extraction success, invalid structured replies, output limits,
+fallbacks, and retries. Attempt latency totals can overlap under concurrency and
+exclude retry backoff and checkpoint time. Reported spend on failed, retried, and
+fallback attempts can overlap. Each subtotal describes its own category.
+
+Grounded claims carry their extraction model or deterministic rule. Model credit
+for a supported field requires a matching accepted or corroborating claim for
+that person and field. One field can receive support from multiple models. In the
+job report, `supported_fields` counts people with that model's support for each
+field. Historical summaries without model detail contribute only to the overall
+totals. Check `model_performance_people_measured` before comparing model totals.
+
+Terminal job logs also report `batch_end_to_end_ms` from creation to terminal commit,
+`batch_queue_wait_ms` before first processing, and `batch_processing_wall_ms` from
+the first processing start to terminal commit. `completed_people_per_minute` counts
+finalized completed and review-required people over batch end-to-end time.
+
 Repository fixture costs are synthetic. November 1–2 credit-exhaustion/HTTP 403
 batches are failed-provider diagnostics, not a successful cost or coverage baseline.
 The November 5 five-person job `e79e7948-464b-45ad-9911-9d548e4fc864` provides a
@@ -118,6 +141,34 @@ Source URLs now use accepted field attribution or explicit selected/supporting
 claim references. Unused retrieved candidates stay internal; missing historical
 attribution is left blank rather than promoted to confirmed evidence. Original saved
 files and evidence are retained, including their historical explicit source lists.
+
+## Phase 4 observations
+
+The recovered five-person reference used $0.03861 per attempted person and
+supported 29 of 35 fields. It made 78 model calls, including 47 extraction,
+18 validation and 13 web-search calls. Web search accounted for about 53% of the
+reported spend. The five original attempt logs averaged 133 seconds per person
+after queue wait. Extraction accounted for about 75 seconds of accumulated work,
+validation 27 seconds and discovery 15 seconds. Stage durations can overlap.
+The earlier $0.02243 reference is useful context for a controlled comparison.
+
+Compatible same-page JSON-LD fragments now carry explicit university, degree and
+subject links across script blocks. The focused fixture moved from three to six
+supported fields and from one remaining model chunk to zero. Structured
+projections and Markdown are prepared once per page and reused after grounding.
+Model prompts omit internal job, person and source IDs while the durable attempt
+ledger retains them.
+
+Workers refill a freed slot as soon as a task finishes. In three offline repeats
+of the same five short tasks, median batch wall time went from 2,118 ms to 397 ms.
+This fixture isolates the idle poll delay. Production latency and cost still
+need a comparable live run.
+
+DeepSeek keeps its 6,000-token extraction allowance and bounded Luna fallback.
+`OPENROUTER_DEEPSEEK_EXTRACTION_REASONING` defaults to false and applies to the
+supported DeepSeek snapshot. Keep source discovery and validation on their
+configured model during extraction comparisons. Verify the worker key's
+permitted allowance before any approved live comparison.
 
 ## Phase 1 paid-call audit and deterministic work
 
