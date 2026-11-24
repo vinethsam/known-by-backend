@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "as_of": "2026-11-10",
+  "cases": [
+    {
+      "id": "B01-explicitly-shared-subject",
+      "categories": ["university_biography", "canonical_metadata", "shared_qualification_subject", "honorary_degree"],
+      "seed": {"full_name": "Mara Elmwood", "university_name": "Ferncrest University"},
+      "sources": [
+        {
+          "id": "ferncrest-profile",
+          "url": "https://ferncrest.example.edu/people/mara-elmwood",
+          "source_type": "university",
+          "html": "<head><link rel='canonical' href='https://ferncrest.example.edu/people/mara-elmwood'></head><article><h1>Mara Elmwood</h1><p>Mara Elmwood earned both a BSc and an MSc in Chemistry from Ferncrest University.</p><p>Mara Elmwood received an honorary doctorate from Kelwick University.</p></article>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Mara Elmwood"], "organisation": [], "job_title": [],
+          "university_name": ["Ferncrest University"], "degree_type": ["Bachelor's Degree", "Master's Degree"],
+          "subject": ["Chemistry"], "profile_link": ["https://ferncrest.example.edu/people/mara-elmwood"]
+        },
+        "qualifications": [["Ferncrest University", "Bachelor's Degree", "Chemistry"], ["Ferncrest University", "Master's Degree", "Chemistry"]],
+        "employment": [],
+        "direct_profile_links": ["https://ferncrest.example.edu/people/mara-elmwood"]
+      },
+      "label_basis": "The word both scopes the same field and school over the two earned degrees. The later award is honorary. The document canonical URL names the subject."
+    },
+    {
+      "id": "B02-owned-microdata-and-neighbour",
+      "categories": ["structured_microdata", "adjacent_namesake", "same_page_different_roles", "directory"],
+      "seed": {"full_name": "Iris Selburn", "organisation": "Quartzrail Systems"},
+      "sources": [
+        {
+          "id": "quartzrail-directory",
+          "url": "https://quartzrail.example.com/directory",
+          "source_type": "employer",
+          "html": "<main><h1>Directory</h1><article itemscope itemtype='https://schema.org/Person'><h2 itemprop='name'>Iris Selburn</h2><p><span itemprop='jobTitle'>Systems Engineer</span> at <span itemprop='worksFor' itemscope itemtype='https://schema.org/Organization'><span itemprop='name'>Quartzrail Systems</span></span>.</p></article><article itemscope itemtype='https://schema.org/Person'><h2 itemprop='name'>Iris Selburne</h2><p><span itemprop='jobTitle'>Art Director</span> at <span itemprop='worksFor'>Auburn Gallery</span>.</p></article></main>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Iris Selburn"], "organisation": ["Quartzrail Systems"], "job_title": ["Systems Engineer"],
+          "university_name": [], "degree_type": [], "subject": [], "profile_link": null
+        },
+        "qualifications": [],
+        "employment": [["Quartzrail Systems", "Systems Engineer"]],
+        "direct_profile_links": [],
+        "forbidden_claims": {"organisation": ["Auburn Gallery"], "job_title": ["Art Director"]}
+      },
+      "label_basis": "Each Person microdata scope owns its role and employer. The similar-looking name belongs to a different person. The directory URL is shared by both biographies."
+    },
+    {
+      "id": "B03-complex-employment-prose",
+      "categories": ["biographical_prose", "current_and_former_employers", "dated_role", "unrelated_employer_mention"],
+      "seed": {"full_name": "Cora Isbourne", "organisation": "Lakehaven Transit"},
+      "sources": [
+        {
+          "id": "lakehaven-profile",
+          "url": "https://lakehaven.example.com/leadership/cora-isbourne",
+          "source_type": "employer",
+          "html": "<head><link rel='canonical' href='https://lakehaven.example.com/leadership/cora-isbourne'></head><article><h1>Cora Isbourne</h1><p>As of 2026-03-04, Cora Isbourne currently serves as Operations Director at Lakehaven Transit. Cora Isbourne formerly worked as Fleet Manager at Bayhaven Motors until 2023-07-31. Cora Isbourne thanked Jasper Fenwick, the Chief Executive Officer at Norford Capital.</p></article>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Cora Isbourne"], "organisation": ["Lakehaven Transit"], "job_title": ["Operations Director"],
+          "university_name": [], "degree_type": [], "subject": [],
+          "profile_link": ["https://lakehaven.example.com/leadership/cora-isbourne"]
+        },
+        "qualifications": [],
+        "employment": [["Lakehaven Transit", "Operations Director"]],
+        "employment_claim_pairs": [["Lakehaven Transit", "Operations Director", "current", "2026-03-04", null], ["Bayhaven Motors", "Fleet Manager", "former", null, "2023-07-31"]],
+        "direct_profile_links": ["https://lakehaven.example.com/leadership/cora-isbourne"],
+        "forbidden_claims": {"organisation": ["Norford Capital"], "job_title": ["Chief Executive Officer"]}
+      },
+      "label_basis": "The first two named sentences explicitly date distinct pairs. The third describes Jasper's role and is a mention only."
+    },
+    {
+      "id": "B04-owned-education-table",
+      "categories": ["semi_structured_html_table", "degree_institution_columns", "multiple_qualifications"],
+      "seed": {"full_name": "Lydia Fellbrook", "university_name": "Ravenmere University"},
+      "sources": [
+        {
+          "id": "ravenmere-profile",
+          "url": "https://ravenmere.example.edu/people/lydia-fellbrook",
+          "source_type": "university",
+          "html": "<head><link rel='canonical' href='https://ravenmere.example.edu/people/lydia-fellbrook'></head><article><h1>Lydia Fellbrook</h1><p>Lydia Fellbrook is a Ravenmere University alumna.</p><h2>Education</h2><table><thead><tr><th>Degree</th><th>Subject</th><th>Institution</th></tr></thead><tbody><tr><td>BSc</td><td>Physics</td><td>Ravenmere University</td></tr><tr><td>MSc</td><td>Materials Science</td><td>Ashdown University</td></tr></tbody></table></article>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Lydia Fellbrook"], "organisation": [], "job_title": [],
+          "university_name": ["Ravenmere University", "Ashdown University"], "degree_type": ["Bachelor's Degree", "Master's Degree"],
+          "subject": ["Physics", "Materials Science"], "profile_link": ["https://ravenmere.example.edu/people/lydia-fellbrook"]
+        },
+        "qualifications": [["Ravenmere University", "Bachelor's Degree", "Physics"], ["Ashdown University", "Master's Degree", "Materials Science"]],
+        "employment": [],
+        "direct_profile_links": ["https://ravenmere.example.edu/people/lydia-fellbrook"]
+      },
+      "label_basis": "The target's Education table has an explicit degree, subject and issuer in each row. Each row is its own relationship."
+    },
+    {
+      "id": "B05-partial-education-and-related-links",
+      "categories": ["short_biography", "partial_education", "institution_mention", "unowned_link"],
+      "seed": {"full_name": "Mira Beechmore", "university_name": "Marshwick University"},
+      "sources": [
+        {
+          "id": "community-awards",
+          "url": "https://awardboard.example.org/news/2026-awards",
+          "source_type": "professional_body",
+          "html": "<article><h1>2026 community awards</h1><h2>Mira Beechmore</h2><p>Mira Beechmore studied at Marshwick University.</p><p>Mira Beechmore attended a lecture on Economics at Brookfen University.</p><h2>Related profiles</h2><p><a href='https://brookfen.example.edu/people/evelyn-frost'>Evelyn Frost biography</a></p></article>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Mira Beechmore"], "organisation": [], "job_title": [],
+          "university_name": ["Marshwick University"], "degree_type": [], "subject": [], "profile_link": null
+        },
+        "qualifications": [["Marshwick University", null, null]],
+        "employment": [],
+        "direct_profile_links": [],
+        "forbidden_claims": {"university_name": ["Brookfen University"], "subject": ["Economics"], "profile_link": ["https://brookfen.example.edu/people/evelyn-frost"]}
+      },
+      "label_basis": "The first sentence supports attendance only. A guest lecture does not establish education or subject. The related link names another person."
+    },
+    {
+      "id": "B06-unrelated-same-name-source",
+      "categories": ["same_name_different_identity", "conflicting_employers", "source_admission"],
+      "seed": {"full_name": "Evan Hillbourne", "organisation": "Oakbank Transport"},
+      "sources": [
+        {
+          "id": "oakbank-profile",
+          "url": "https://oakbank.example.com/people/evan-hillbourne",
+          "source_type": "employer",
+          "html": "<head><link rel='canonical' href='https://oakbank.example.com/people/evan-hillbourne'></head><article><h1>Evan Hillbourne</h1><p>Evan Hillbourne currently works as Network Engineer at Oakbank Transport.</p></article>"
+        },
+        {
+          "id": "unrelated-painter",
+          "url": "https://moorfield.example.org/people/evan-hillbourne",
+          "source_type": "professional_body",
+          "relevance": "unrelated",
+          "html": "<head><link rel='canonical' href='https://moorfield.example.org/people/evan-hillbourne'></head><article><h1>Evan Hillbourne</h1><p>Evan Hillbourne currently works as Painter at Moorfield Studio.</p></article>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Evan Hillbourne"], "organisation": ["Oakbank Transport"], "job_title": ["Network Engineer"],
+          "university_name": [], "degree_type": [], "subject": [], "profile_link": ["https://oakbank.example.com/people/evan-hillbourne"]
+        },
+        "qualifications": [],
+        "employment": [["Oakbank Transport", "Network Engineer"]],
+        "direct_profile_links": ["https://oakbank.example.com/people/evan-hillbourne"],
+        "forbidden_claims": {"organisation": ["Moorfield Studio"], "job_title": ["Painter"], "profile_link": ["https://moorfield.example.org/people/evan-hillbourne"]},
+        "identity_rejected_sources": ["unrelated-painter"]
+      },
+      "label_basis": "Only the target's employer profile matches the supplied organisation. An unrelated same-name painter has a distinct career and biography."
+    }
+  ]
+}

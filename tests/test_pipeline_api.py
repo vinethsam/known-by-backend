@@ -276,6 +276,11 @@ def fake_services(
 
 @pytest.mark.asyncio
 async def test_pipeline_round_trip_with_real_mocked_provider_clients(tmp_path, monkeypatch):
+    def offline_only(*args, **kwargs):
+        pytest.fail("The offline seven-field engine must not run in the research worker")
+
+    monkeypatch.setenv("DETERMINISTIC_PILOT_ENABLED", "true")
+    monkeypatch.setattr("app.research.deterministic.claim_batches", offline_only)
     settings = configured(tmp_path)
     store = migrated_store(settings)
     seed = PersonSeed(full_name="Jane Doe", organisation="Example Foundation", country="Ghana")

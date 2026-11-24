@@ -6,6 +6,8 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import urlsplit, urlunsplit
 
 from app.config import ScoringPolicy
@@ -15,6 +17,7 @@ from app.schemas import PersonSeed, ProfileField, ResearchResult, SourceRecord
 from app.seed_context import seed_context_values
 
 logger = logging.getLogger(__name__)
+_suppress_trace = ContextVar("suppress_research_decision_trace", default=False)
 
 _EDUCATION_FIELDS = (ProfileField.university_name, ProfileField.degree_type, ProfileField.subject)
 _SENSITIVE_KEY = re.compile(
@@ -76,8 +79,18 @@ def _compact(value, *, depth: int = 0, budget: list[int] | None = None):
     return f"[{type(value).__name__} omitted]"
 
 
+@contextmanager
+def suppress_decision_logging():
+    """Keep an explicit private replay out of the active research decision log."""
+    token = _suppress_trace.set(True)
+    try:
+        yield
+    finally:
+        _suppress_trace.reset(token)
+
+
 def _emit(level: int, kind: str, person_id: str, job_id: str | None, details: dict) -> None:
-    if not logger.isEnabledFor(level):
+    if _suppress_trace.get() or not logger.isEnabledFor(level):
         return
     data = _compact(details)
     # Railway text exports may omit structured columns. Keep correlation IDs in

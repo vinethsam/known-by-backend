@@ -1,0 +1,271 @@
+{
+  "version": 1,
+  "as_of": "2026-11-10",
+  "cases": [
+    {
+      "id": "A01-same-institution-prose",
+      "categories": ["university_bio", "multiple_degrees_same_institution", "recorded_omission"],
+      "seed": {"full_name": "Amara Fennick", "university_name": "Eastmere University"},
+      "sources": [
+        {
+          "id": "eastmere-bio",
+          "url": "https://eastmere.example.edu/people/amara-fennick",
+          "source_type": "university",
+          "html": "<article><h1>Amara Fennick</h1><h2>Education</h2><p>Amara Fennick earned a BSc in Chemistry from Eastmere University.</p><p>Amara Fennick earned an MSc in Geology from Eastmere University.</p></article>",
+          "responses": [{"chunk": 0, "chunk_sha256": "c17626635b2d4874499f152c1f135b359c480caf4e430d3eaf493a73f4b1fdd2", "response": {"claims": [
+            {"field": "full_name", "value": "Amara Fennick", "evidence": "Amara Fennick earned a BSc in Chemistry from Eastmere University.", "subject_name": "Amara Fennick"},
+            {"field": "university_name", "value": "Eastmere University", "evidence": "Amara Fennick earned a BSc in Chemistry from Eastmere University.", "subject_name": "Amara Fennick", "fact_group": "bsc"},
+            {"field": "degree_type", "value": "BSc", "evidence": "Amara Fennick earned a BSc in Chemistry from Eastmere University.", "subject_name": "Amara Fennick", "fact_group": "bsc"},
+            {"field": "subject", "value": "Chemistry", "evidence": "Amara Fennick earned a BSc in Chemistry from Eastmere University.", "subject_name": "Amara Fennick", "fact_group": "bsc"},
+            {"field": "university_name", "value": "Eastmere University", "evidence": "Amara Fennick earned an MSc in Geology from Eastmere University.", "subject_name": "Amara Fennick", "fact_group": "msc"},
+            {"field": "degree_type", "value": "MSc", "evidence": "Amara Fennick earned an MSc in Geology from Eastmere University.", "subject_name": "Amara Fennick", "fact_group": "msc"}
+          ]}}]
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Amara Fennick"], "organisation": [], "job_title": [],
+          "university_name": ["Eastmere University"],
+          "degree_type": ["Bachelor's Degree", "Master's Degree"], "subject": ["Chemistry", "Geology"],
+          "profile_link": ["https://eastmere.example.edu/people/amara-fennick"]
+        },
+        "qualifications": [["Eastmere University", "Bachelor's Degree", "Chemistry"], ["Eastmere University", "Master's Degree", "Geology"]],
+        "employment": []
+      },
+      "label_basis": "The two Education paragraphs name the same person and university and separately state the degree and subject of each earned qualification. The university page is a dedicated biography."
+    },
+    {
+      "id": "A02-linked-structured-issuers",
+      "categories": ["university_bio", "json_ld", "multiple_institutions", "credential_issuer", "qualification_pairing"],
+      "seed": {"full_name": "Dario Velwick", "university_name": "Northfen University"},
+      "sources": [
+        {
+          "id": "northfen-bio",
+          "url": "https://northfen.example.edu/people/dario-velwick",
+          "source_type": "university",
+          "html": "<h1>Dario Velwick</h1><script type=\"application/ld+json\">{\"@type\":\"Person\",\"name\":\"Dario Velwick\",\"hasCredential\":[{\"@id\":\"#bsc\"},{\"@id\":\"#msc\"}]}</script><script type=\"application/ld+json\">{\"@graph\":[{\"@id\":\"#bsc\",\"@type\":\"EducationalOccupationalCredential\",\"name\":\"BSc\",\"about\":{\"@type\":\"DefinedTerm\",\"name\":\"Mathematics\"},\"issuer\":{\"@type\":\"CollegeOrUniversity\",\"name\":\"Northfen University\"}},{\"@id\":\"#msc\",\"@type\":\"EducationalOccupationalCredential\",\"name\":\"MSc\",\"about\":{\"@type\":\"DefinedTerm\",\"name\":\"Astronomy\"},\"issuer\":{\"@type\":\"CollegeOrUniversity\",\"name\":\"Stonebay University\"}}]}</script>"
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Dario Velwick"], "organisation": [], "job_title": [],
+          "university_name": ["Northfen University", "Stonebay University"],
+          "degree_type": ["Bachelor's Degree", "Master's Degree"], "subject": ["Mathematics", "Astronomy"],
+          "profile_link": ["https://northfen.example.edu/people/dario-velwick"]
+        },
+        "qualifications": [["Northfen University", "Bachelor's Degree", "Mathematics"], ["Stonebay University", "Master's Degree", "Astronomy"]],
+        "employment": []
+      },
+      "label_basis": "The Person node owns two credential references. Each resolves to a separate node with its own explicit educational issuer and subject. The URL is the dedicated profile containing those nodes."
+    },
+    {
+      "id": "A03-award-bio-partial-education",
+      "categories": ["award_bio", "short_biography", "missing_degree_and_subject", "ungrounded_claim"],
+      "seed": {"full_name": "Kira Solwyn", "university_name": "Reedhaven University"},
+      "sources": [
+        {
+          "id": "guild-award",
+          "url": "https://lanternguild.example.org/awards/kira-solwyn",
+          "source_type": "professional_body",
+          "html": "<article><h1>Kira Solwyn</h1><p>Kira Solwyn studied at Reedhaven University.</p><p>Kira Solwyn received the Lantern Guild Design Prize.</p></article>",
+          "responses": [{"chunk": 0, "chunk_sha256": "b4cc67888048b5b973ca07bb080a5dea21708ff74a2fb77570c0d6ec16eb74d7", "response": {"claims": [
+            {"field": "full_name", "value": "Kira Solwyn", "evidence": "Kira Solwyn studied at Reedhaven University.", "subject_name": "Kira Solwyn"},
+            {"field": "university_name", "value": "Reedhaven University", "evidence": "Kira Solwyn studied at Reedhaven University.", "subject_name": "Kira Solwyn", "fact_group": "education"},
+            {"field": "degree_type", "value": "MFA", "evidence": "Kira Solwyn studied at Reedhaven University.", "subject_name": "Kira Solwyn", "fact_group": "education"}
+          ]}}]
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Kira Solwyn"], "organisation": [], "job_title": [],
+          "university_name": ["Reedhaven University"], "degree_type": [], "subject": [],
+          "profile_link": null
+        },
+        "qualifications": [["Reedhaven University", null, null]],
+        "employment": []
+      },
+      "label_basis": "The award biography says where Kira studied and names a prize. It gives neither a degree nor a subject. It supplies no canonical professional profile link."
+    },
+    {
+      "id": "A04-adjacent-namesake-directory",
+      "categories": ["corporate_directory", "adjacent_html", "namesake", "wrong_person_claim"],
+      "seed": {"full_name": "Nessa Brindle", "organisation": "Cedarwick Labs"},
+      "sources": [
+        {
+          "id": "cedarwick-directory",
+          "url": "https://cedarwick.example.com/team",
+          "source_type": "employer",
+          "html": "<main><h1>Team directory</h1><section><h2>Nessa Brindle</h2><p>Nessa Brindle currently works as a Materials Engineer at Cedarwick Labs.</p></section><section><h2>Nessa Brindle-Watt</h2><p>Nessa Brindle-Watt is a guest from Foxbar Studio and earned a PhD in History from Dunelm Coast University.</p></section></main>",
+          "responses": [{"chunk": 0, "chunk_sha256": "4594dff800f2bfa2fb050119950361152f152d398b6ba528638451ce7836fce6", "response": {"claims": [
+            {"field": "full_name", "value": "Nessa Brindle", "evidence": "Nessa Brindle currently works as a Materials Engineer at Cedarwick Labs.", "subject_name": "Nessa Brindle"},
+            {"field": "organisation", "value": "Cedarwick Labs", "evidence": "Nessa Brindle currently works as a Materials Engineer at Cedarwick Labs.", "subject_name": "Nessa Brindle", "fact_group": "materials-role", "is_current": true},
+            {"field": "job_title", "value": "Materials Engineer", "evidence": "Nessa Brindle currently works as a Materials Engineer at Cedarwick Labs.", "subject_name": "Nessa Brindle", "fact_group": "materials-role", "is_current": true},
+            {"field": "university_name", "value": "Dunelm Coast University", "evidence": "Nessa Brindle-Watt is a guest from Foxbar Studio and earned a PhD in History from Dunelm Coast University.", "subject_name": "Nessa Brindle-Watt", "fact_group": "guest-credential"}
+          ]}}]
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Nessa Brindle"], "organisation": ["Cedarwick Labs"], "job_title": ["Materials Engineer"],
+          "university_name": [], "degree_type": [], "subject": [], "profile_link": null
+        },
+        "qualifications": [],
+        "employment": [["Cedarwick Labs", "Materials Engineer"]]
+      },
+      "label_basis": "The first heading and sentence pair the target with her employer and job title. The next heading names a different person, so the guest's education cannot count. A shared directory does not establish the target's canonical profile URL."
+    },
+    {
+      "id": "A05-current-role-vs-old-coverage",
+      "categories": ["corporate_bio", "news", "conflicting_job_titles", "historical_employment", "grounded_unselected"],
+      "seed": {"full_name": "Rowan Ashmere", "organisation": "Silverdock Research", "historical_employer": "Glassharbor Systems"},
+      "sources": [
+        {
+          "id": "silverdock-bio",
+          "url": "https://silverdock.example.com/people/rowan-ashmere",
+          "source_type": "employer",
+          "html": "<article><h1>Rowan Ashmere</h1><p>Rowan Ashmere currently works as Chief Research Officer at Silverdock Research as of 2026-09-15.</p><p>Rowan Ashmere was Research Director at Glassharbor Systems until 2023-08-31.</p></article>",
+          "responses": [{"chunk": 0, "chunk_sha256": "5db37fb90ec7883e1246f1d47cde14f13b56db78b68a3ec545200a94d0909f14", "response": {"claims": [
+            {"field": "full_name", "value": "Rowan Ashmere", "evidence": "Rowan Ashmere currently works as Chief Research Officer at Silverdock Research as of 2026-09-15.", "subject_name": "Rowan Ashmere"},
+            {"field": "organisation", "value": "Silverdock Research", "evidence": "Rowan Ashmere currently works as Chief Research Officer at Silverdock Research as of 2026-09-15.", "subject_name": "Rowan Ashmere", "fact_group": "current", "is_current": true, "as_of_date": "2026-09-15"},
+            {"field": "job_title", "value": "Chief Research Officer", "evidence": "Rowan Ashmere currently works as Chief Research Officer at Silverdock Research as of 2026-09-15.", "subject_name": "Rowan Ashmere", "fact_group": "current", "is_current": true, "as_of_date": "2026-09-15"},
+            {"field": "organisation", "value": "Glassharbor Systems", "evidence": "Rowan Ashmere was Research Director at Glassharbor Systems until 2023-08-31.", "subject_name": "Rowan Ashmere", "fact_group": "former", "is_current": false, "end_date": "2023-08-31"},
+            {"field": "job_title", "value": "Research Director", "evidence": "Rowan Ashmere was Research Director at Glassharbor Systems until 2023-08-31.", "subject_name": "Rowan Ashmere", "fact_group": "former", "is_current": false, "end_date": "2023-08-31"}
+          ]}}]
+        },
+        {
+          "id": "regional-news",
+          "url": "https://harborreview.example.org/archive/silverdock-launch",
+          "source_type": "publication",
+          "html": "<article><h1>Silverdock announces its research launch</h1><p>As of 2024-06-12, Rowan Ashmere is Research Lead at Silverdock Research.</p></article>",
+          "responses": [{"chunk": 0, "chunk_sha256": "f01e8c226fa52445ed4cc45b13bf18cb2061ce0272bae613aede051e7c948a3f", "response": {"claims": [
+            {"field": "organisation", "value": "Silverdock Research", "evidence": "As of 2024-06-12, Rowan Ashmere is Research Lead at Silverdock Research.", "subject_name": "Rowan Ashmere", "fact_group": "older-title", "is_current": true, "as_of_date": "2024-06-12"},
+            {"field": "job_title", "value": "Research Lead", "evidence": "As of 2024-06-12, Rowan Ashmere is Research Lead at Silverdock Research.", "subject_name": "Rowan Ashmere", "fact_group": "older-title", "is_current": true, "as_of_date": "2024-06-12"}
+          ]}}]
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": ["Rowan Ashmere"], "organisation": ["Silverdock Research"], "job_title": ["Chief Research Officer"],
+          "university_name": [], "degree_type": [], "subject": [],
+          "profile_link": ["https://silverdock.example.com/people/rowan-ashmere"]
+        },
+        "qualifications": [],
+        "employment": [["Silverdock Research", "Chief Research Officer"]]
+      },
+      "label_basis": "The newer employer biography explicitly names the current title and ends the Glassharbor role. The archived article supports an older Silverdock title as of its stated date. The current pair and dedicated employer profile are the selected-field labels."
+    },
+    {
+      "id": "A06-simultaneous-title-conflict",
+      "categories": [
+        "corporate_bio",
+        "same_date_conflict",
+        "unverified_current_title",
+        "review"
+      ],
+      "seed": {
+        "full_name": "Liora Fencrest",
+        "organisation": "Alderwick Instruments"
+      },
+      "sources": [
+        {
+          "id": "team-bio",
+          "url": "https://alderwick.example.com/team/liora-fencrest",
+          "source_type": "employer",
+          "html": "<article><h1>Liora Fencrest</h1><p>As of 2026-09-15, Liora Fencrest currently works as Materials Engineer at Alderwick Instruments.</p></article>",
+          "responses": [
+            {
+              "chunk": 0,
+              "chunk_sha256": "65766079bffeb5e4c2fd5c2b7d7799163f3f0532353a70e647e89894fdde8a8b",
+              "response": {
+                "claims": [
+                  {
+                    "field": "full_name",
+                    "value": "Liora Fencrest",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Materials Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest"
+                  },
+                  {
+                    "field": "organisation",
+                    "value": "Alderwick Instruments",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Materials Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest",
+                    "fact_group": "current-role",
+                    "is_current": true,
+                    "as_of_date": "2026-09-15"
+                  },
+                  {
+                    "field": "job_title",
+                    "value": "Materials Engineer",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Materials Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest",
+                    "fact_group": "current-role",
+                    "is_current": true,
+                    "as_of_date": "2026-09-15"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": "staff-bio",
+          "url": "https://alderwick.example.org/staff/liora-fencrest",
+          "source_type": "employer",
+          "html": "<article><h1>Liora Fencrest</h1><p>As of 2026-09-15, Liora Fencrest currently works as Process Engineer at Alderwick Instruments.</p></article>",
+          "responses": [
+            {
+              "chunk": 0,
+              "chunk_sha256": "c81b784b19021024fe7f26d61ba05b669dae6864f666dfee0131ffd297bb2aed",
+              "response": {
+                "claims": [
+                  {
+                    "field": "full_name",
+                    "value": "Liora Fencrest",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Process Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest"
+                  },
+                  {
+                    "field": "organisation",
+                    "value": "Alderwick Instruments",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Process Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest",
+                    "fact_group": "current-role",
+                    "is_current": true,
+                    "as_of_date": "2026-09-15"
+                  },
+                  {
+                    "field": "job_title",
+                    "value": "Process Engineer",
+                    "evidence": "As of 2026-09-15, Liora Fencrest currently works as Process Engineer at Alderwick Instruments.",
+                    "subject_name": "Liora Fencrest",
+                    "fact_group": "current-role",
+                    "is_current": true,
+                    "as_of_date": "2026-09-15"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "fields": {
+          "full_name": [
+            "Liora Fencrest"
+          ],
+          "organisation": [
+            "Alderwick Instruments"
+          ],
+          "job_title": null,
+          "university_name": [],
+          "degree_type": [],
+          "subject": [],
+          "profile_link": null
+        },
+        "qualifications": [],
+        "employment": null
+      },
+      "label_basis": "Two same-date employer bios agree on person and employer and conflict on current title. Title, selected pair and representative link require review."
+    }
+  ]
+}
